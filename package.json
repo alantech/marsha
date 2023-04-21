@@ -1,0 +1,14 @@
+{
+  "name": "marsha",
+  "version": "0.0.0",
+  "description": "MarSHA Source Code Advisor",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "David Ellis <david@alantechnologies.com>",
+  "dependencies": {
+    "openai": "^3.2.1"
+  }
+}
