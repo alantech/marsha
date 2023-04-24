@@ -58,8 +58,20 @@ function getFilesToFunctions() {
   return filesToFunctions;
 }
 
+async function retryChatCompletion(query, maxTries=3) {
+  do {
+    try {
+      return await openai.createChatCompletion(query);
+    } catch (e) {
+      maxTries--;
+      if (!maxTries) throw e;
+      await new Promise(r => setTimeout(r, 3000 / maxTries));
+    }
+  } while(maxTries);
+}
+
 async function gptOptimize(func) {
-  const res = await openai.createChatCompletion({
+  const res = await retryChatCompletion({
     messages: [{
       role: 'system',
       content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
@@ -167,7 +179,7 @@ ${func}
 }
 
 async function gptType(func) {
-  const res = await openai.createChatCompletion({
+  const res = await retryChatCompletion({
     messages: [{
       role: 'system',
       content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
@@ -275,7 +287,7 @@ ${func}
 }
 
 async function gptReducer(rec1, rec2) {
-  const res = await openai.createChatCompletion({
+  const res = await retryChatCompletion({
     messages: [{
       role: 'system',
       content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
@@ -456,7 +468,9 @@ async function main() {
   const entries = [...filesToFunctions.entries()];
   const files = entries.map(e => e[0]);
   const funcs = entries.map(e => e[1]);
+  const t1 = performance.now();
   const recs = await Promise.all(funcs.map(fs => gptForFile(fs)));
+  const t2 = performance.now();
   for (let i = 0; i < files.length; i++) {
     console.log(`Recommendations for ${files[i]}`);
     const fileRecs = recs[i];
@@ -465,6 +479,7 @@ async function main() {
       console.log('');
     }
   }
+  console.log(`GPT time was ${(t2 - t1) / 1000}sec`);
 }
 
 main();
