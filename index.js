@@ -59,9 +59,13 @@ function getFilesToFunctions() {
 }
 
 async function retryChatCompletion(query, maxTries=3) {
+  const t1 = performance.now();
   do {
     try {
-      return await openai.createChatCompletion(query);
+      const out = await openai.createChatCompletion(query);
+      const t2 = performance.now();
+      console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}`);
+      return out;
     } catch (e) {
       maxTries--;
       if (!maxTries) throw e;
