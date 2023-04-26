@@ -4,6 +4,7 @@ import { performance } from 'perf_hooks';
 
 import ts from 'typescript';
 import { Configuration, OpenAIApi } from 'openai';
+import { highlight } from 'cli-highlight';
 
 const configuration = new Configuration({
   organization: process.env.OPENAI_ORG,
@@ -65,6 +66,22 @@ async function retryChatCompletion(query, maxTries=3) {
       const out = await openai.createChatCompletion(query);
       const t2 = performance.now();
       console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}`);
+      return out;
+    } catch (e) {
+      maxTries--;
+      if (!maxTries) throw e;
+      await new Promise(r => setTimeout(r, 3000 / maxTries));
+    }
+  } while(maxTries);
+}
+
+async function retryCompletion(query, maxTries=3) {
+  const t1 = performance.now();
+  do {
+    try {
+      const out = await openai.createCompletion(query);
+      const t2 = performance.now();
+      console.log(`Completion Query took ${t2 - t1}ms, started at ${t1}`);
       return out;
     } catch (e) {
       maxTries--;
@@ -291,13 +308,10 @@ ${func}
 }
 
 async function gptReducer(rec1, rec2) {
-  const res = await retryChatCompletion({
-    messages: [{
-      role: 'system',
-      content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
-    }, {
-      role: 'user',
-      content: `I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
+    const prompt = `
+The following is a discussion between a senior software engineer (SENIOR) and a junior software engineer (JUNIOR).
+
+JUNIOR: I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
 
 #1: This function does not define the return type when there is only one return location and so its type is knowable. It also uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
@@ -390,10 +404,8 @@ export function findDiff(
   };
 }
 \`\`\`
-`,
-    }, {
-      role: 'assistant',
-      content: `This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
+
+SENIOR: This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
 \`\`\`ts
 export function findDiff<T>(
@@ -442,19 +454,20 @@ export function findDiff<T>(
     entitiesChanged,
   };
 }
-\`\`\`
-`,
-    }, {
-      role: 'user',
-      content: `I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
+
+JUNIOR: I have also received advice from different engineers on how to rewrite other code, #1 and #2 below. Can you combine them so I get both improvements?
+
 #1: ${rec1}
 
 #2: ${rec2}
-`
-    }],
-    model: 'gpt-3.5-turbo',
+
+SENIOR: `;
+  const res = await retryCompletion({
+    max_tokens: 4096 - Math.ceil(prompt.length / 3), // I don't know why some of these characters are counting as two bytes. I thought it was all UTF-8 8-bit chars? TODO: Find a more accurate token calculator
+    prompt,
+    model: 'text-davinci-003',
   });
-  return res.data.choices[0].message.content;
+  return res.data.choices[0].text;
 }
 
 async function gptForFunc(func) {
@@ -479,7 +492,14 @@ async function main() {
     console.log(`Recommendations for ${files[i]}`);
     const fileRecs = recs[i];
     for (let j = 0; j < fileRecs.length; j++) {
-      console.log(fileRecs[j]);
+      // Only ts for now, so split that way
+      console.log(fileRecs[j].split('```').map(r => {
+        if (/^ts\n/.test(r)) {
+          return highlight(r.replace(/^ts\n/, ''), { language: 'ts' });
+        }
+        return r;
+      }).join(''));
+      //console.log(fileRecs[j]);
       console.log('');
     }
   }

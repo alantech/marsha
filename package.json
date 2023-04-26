@@ -11,6 +11,7 @@
   "author": "David Ellis <david@alantechnologies.com>",
   "dependencies": {
     "@types/node": "^18.16.0",
+    "cli-highlight": "^2.1.11",
     "openai": "^3.2.1",
     "typescript": "^5.0.4"
   },
