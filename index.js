@@ -59,13 +59,22 @@ function getFilesToFunctions() {
   return filesToFunctions;
 }
 
+function functionParses(filename, filestring) {
+  try {
+    const sourceFile =  ts.createSourceFile(filename, filestring);
+    return !sourceFile.parseDiagnostics.length;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function retryChatCompletion(query, maxTries=3) {
   const t1 = performance.now();
   do {
     try {
       const out = await openai.createChatCompletion(query);
       const t2 = performance.now();
-      console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}`);
+      console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
       return out;
     } catch (e) {
       maxTries--;
@@ -81,7 +90,7 @@ async function retryCompletion(query, maxTries=3) {
     try {
       const out = await openai.createCompletion(query);
       const t2 = performance.now();
-      console.log(`Completion Query took ${t2 - t1}ms, started at ${t1}`);
+      console.log(`Completion Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
       return out;
     } catch (e) {
       maxTries--;
@@ -196,6 +205,10 @@ ${func}
     }],
     model: 'gpt-3.5-turbo',
   });
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptOptimize(func); // TODO: Don't allow this to potentially infinite loop
+  }
   return res.data.choices[0].message.content;
 }
 
@@ -304,6 +317,10 @@ ${func}
     }],
     model: 'gpt-3.5-turbo',
   });
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptType(func); // TODO: Don't allow this to potentially infinite loop
+  }
   return res.data.choices[0].message.content;
 }
 
@@ -463,10 +480,14 @@ JUNIOR: I have also received advice from different engineers on how to rewrite o
 
 SENIOR: `;
   const res = await retryCompletion({
-    max_tokens: 4096 - Math.ceil(prompt.length / 3), // I don't know why some of these characters are counting as two bytes. I thought it was all UTF-8 8-bit chars? TODO: Find a more accurate token calculator
+    max_tokens: 4096 - Math.ceil(prompt.length / 3) - 100, // I don't know why some of these characters are counting as two bytes. I thought it was all UTF-8 8-bit chars? TODO: Find a more accurate token calculator
     prompt,
     model: 'text-davinci-003',
   });
+  const fn = res.data.choices[0].text.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptReducer(rec1, rec2); // TODO: Don't allow this to potentially infinite loop
+  }
   return res.data.choices[0].text;
 }
 
