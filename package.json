@@ -10,7 +10,10 @@
   },
   "author": "David Ellis <david@alantechnologies.com>",
   "dependencies": {
-    "openai": "^3.2.1"
+    "@types/node": "^18.16.0",
+    "cli-highlight": "^2.1.11",
+    "openai": "^3.2.1",
+    "typescript": "^5.0.4"
   },
   "devDependencies": {
     "webpack": "^5.80.0",

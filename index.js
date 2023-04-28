@@ -1,4 +1,10 @@
+import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
+import { performance } from 'perf_hooks';
+
+import ts from 'typescript';
 import { Configuration, OpenAIApi } from 'openai';
+import { highlight } from 'cli-highlight';
 
 const configuration = new Configuration({
   organization: process.env.OPENAI_ORG,
@@ -6,34 +12,96 @@ const configuration = new Configuration({
 });
 
 const openai = new OpenAIApi(configuration);
+function checkNode(out, node) {
+  if ([ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression, ts.SyntaxKind.MethodDeclaration].includes(node.kind)) {
+    out.push(node);
+  }
+  ts.forEachChild(node, checkNode.bind(undefined, out));
+}
 
-async function main() {
-  console.log(`The original function being checked:
+function findRelevantNodes(node) {
+  const out = [];
+  checkNode(out, node);
+  return out;
+}
 
-\`\`\`ts
-export const sortModules = (modules: ModuleInterface[], existingModules: string[]) => {
-  const moduleList = [...modules];
-  const sortedModuleNames: { [key: string]: boolean } = {};
-  const sortedModules = [];
-  // Put all of the existing modules into the sortedModuleNames hash so they can be used for the
-  // checks
-  existingModules.forEach((m: string) => (sortedModuleNames[m] = true));
-  do {
-    const m = moduleList.shift();
-    if (!m) break;
-    if ((m.dependencies.length ?? 0) === 0 || m.dependencies.every(dep => sortedModuleNames[dep])) {
-      sortedModuleNames[\`\${m.name}@\${m.version}\`] = true;
-      sortedModules.push(m);
-    } else {
-      moduleList.push(m);
+function getFilesToFunctions() {
+  const t1 = performance.now();
+  const fileAndLineNumbers = execSync(
+    `git diff $(git remote show $(git remote show | head -n 1) | sed -n '/HEAD branch/s/.*HEAD branch: //p') --name-only | xargs -I '{}' echo '{}' | sed s"/\\(.*\\)/git blame \\1 | grep -nv '^\\\\^' | cut -f1 -d: | sed s\\/^\\/\\1:\\/g/g" | bash`,
+    { encoding: 'utf8' },
+  ).split('\n').map(r => r.split(':')).filter(r => /\.[jt]s$/.test(r[0]));
+  const t2 = performance.now();
+  console.log(`Time to get mutated lines: ${t2 - t1}`);
+  const files = new Set(fileAndLineNumbers.map(r => r[0]));
+  const filesToFunctions = new Map();
+  for (const file of files) {
+    const nodesToAnalyze = new Set();
+    const lineNumbers = fileAndLineNumbers.filter(r => r[0] === file).map(r => r[1]);
+    const sourceFile = ts.createSourceFile(file, readFileSync(file, 'utf8'));
+    for (const statement of sourceFile.statements) {
+      const relevantNodes = findRelevantNodes(statement);
+      for (const node of relevantNodes) {
+        for (const line of lineNumbers) {
+          if (
+            ts.getLineAndCharacterOfPosition(sourceFile, node.pos).line <= line &&
+            ts.getLineAndCharacterOfPosition(sourceFile, node.end).line >= line
+          ) {
+            nodesToAnalyze.add(node);
+          }
+        }
+      }
     }
-  } while (moduleList.length > 0);
-  return sortedModules;
-};
-\`\`\`
-`);
+    filesToFunctions.set(file, [...nodesToAnalyze].map(n => n.getText(sourceFile)));
+    const t3 = performance.now();
+    console.log(`Time to load, parse, and analyze all changed files: ${t3 - t2}`);
+  }
+  return filesToFunctions;
+}
 
-  const res = await openai.createChatCompletion({
+function functionParses(filename, filestring) {
+  try {
+    const sourceFile =  ts.createSourceFile(filename, filestring);
+    return !sourceFile.parseDiagnostics.length;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function retryChatCompletion(query, maxTries=3) {
+  const t1 = performance.now();
+  do {
+    try {
+      const out = await openai.createChatCompletion(query);
+      const t2 = performance.now();
+      console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
+      return out;
+    } catch (e) {
+      maxTries--;
+      if (!maxTries) throw e;
+      await new Promise(r => setTimeout(r, 3000 / maxTries));
+    }
+  } while(maxTries);
+}
+
+async function retryCompletion(query, maxTries=3) {
+  const t1 = performance.now();
+  do {
+    try {
+      const out = await openai.createCompletion(query);
+      const t2 = performance.now();
+      console.log(`Completion Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
+      return out;
+    } catch (e) {
+      maxTries--;
+      if (!maxTries) throw e;
+      await new Promise(r => setTimeout(r, 3000 / maxTries));
+    }
+  } while(maxTries);
+}
+
+async function gptOptimize(func) {
+  const res = await retryChatCompletion({
     messages: [{
       role: 'system',
       content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
@@ -131,33 +199,21 @@ export function findDiff(
       content: `Can this function's Big-O notation be improved?
 
 \`\`\`ts
-export const sortModules = (modules: ModuleInterface[], existingModules: string[]) => {
-  const moduleList = [...modules];
-  const sortedModuleNames: { [key: string]: boolean } = {};
-  const sortedModules = [];
-  // Put all of the existing modules into the sortedModuleNames hash so they can be used for the
-  // checks
-  existingModules.forEach((m: string) => (sortedModuleNames[m] = true));
-  do {
-    const m = moduleList.shift();
-    if (!m) break;
-    if ((m.dependencies.length ?? 0) === 0 || m.dependencies.every(dep => sortedModuleNames[dep])) {
-      sortedModuleNames[\`\${m.name}@\${m.version}\`] = true;
-      sortedModules.push(m);
-    } else {
-      moduleList.push(m);
-    }
-  } while (moduleList.length > 0);
-  return sortedModules;
-};
+${func}
 \`\`\`
 `
     }],
     model: 'gpt-3.5-turbo',
   });
-  console.log(res.data.choices[0].message.content);
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptOptimize(func); // TODO: Don't allow this to potentially infinite loop
+  }
+  return res.data.choices[0].message.content;
+}
 
-  const res2 = await openai.createChatCompletion({
+async function gptType(func) {
+  const res = await retryChatCompletion({
     messages: [{
       role: 'system',
       content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
@@ -255,39 +311,24 @@ export function findDiff<T>(
       content: `Can this function's type annotation be improved?
 
 \`\`\`ts
-export const sortModules = (modules: ModuleInterface[], existingModules: string[]) => {
-  const moduleList = [...modules];
-  const sortedModuleNames: { [key: string]: boolean } = {};
-  const sortedModules = [];
-  // Put all of the existing modules into the sortedModuleNames hash so they can be used for the
-  // checks
-  existingModules.forEach((m: string) => (sortedModuleNames[m] = true));
-  do {
-    const m = moduleList.shift();
-    if (!m) break;
-    if ((m.dependencies.length ?? 0) === 0 || m.dependencies.every(dep => sortedModuleNames[dep])) {
-      sortedModuleNames[\`\${m.name}@\${m.version}\`] = true;
-      sortedModules.push(m);
-    } else {
-      moduleList.push(m);
-    }
-  } while (moduleList.length > 0);
-  return sortedModules;
-};
+${func}
 \`\`\`
 `
     }],
     model: 'gpt-3.5-turbo',
   });
-  console.log(res2.data.choices[0].message.content);
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptType(func); // TODO: Don't allow this to potentially infinite loop
+  }
+  return res.data.choices[0].message.content;
+}
 
-  const res3 = await openai.createChatCompletion({
-    messages: [{
-      role: 'system',
-      content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
-    }, {
-      role: 'user',
-      content: `I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
+async function gptReducer(rec1, rec2) {
+    const prompt = `
+The following is a discussion between a senior software engineer (SENIOR) and a junior software engineer (JUNIOR).
+
+JUNIOR: I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
 
 #1: This function does not define the return type when there is only one return location and so its type is knowable. It also uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
@@ -380,10 +421,8 @@ export function findDiff(
   };
 }
 \`\`\`
-`,
-    }, {
-      role: 'assistant',
-      content: `This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
+
+SENIOR: This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
 \`\`\`ts
 export function findDiff<T>(
@@ -432,19 +471,60 @@ export function findDiff<T>(
     entitiesChanged,
   };
 }
-\`\`\`
-`,
-    }, {
-      role: 'user',
-      content: `I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
-#1: ${res.data.choices[0].message.content}
 
-#2: ${res2.data.choices[0].message.content}
-`
-    }],
-    model: 'gpt-3.5-turbo',
+JUNIOR: I have also received advice from different engineers on how to rewrite other code, #1 and #2 below. Can you combine them so I get both improvements?
+
+#1: ${rec1}
+
+#2: ${rec2}
+
+SENIOR: `;
+  const res = await retryCompletion({
+    max_tokens: 4096 - Math.ceil(prompt.length / 3) - 100, // I don't know why some of these characters are counting as two bytes. I thought it was all UTF-8 8-bit chars? TODO: Find a more accurate token calculator
+    prompt,
+    model: 'text-davinci-003',
   });
-  console.log(res3.data.choices[0].message.content);
+  const fn = res.data.choices[0].text.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn)) {
+    return gptReducer(rec1, rec2); // TODO: Don't allow this to potentially infinite loop
+  }
+  return res.data.choices[0].text;
+}
+
+async function gptForFunc(func) {
+  const baseRecs = await Promise.all([gptOptimize(func), gptType(func)]);
+  return await gptReducer(...baseRecs);
+}
+
+async function gptForFile(funcs) {
+  return await Promise.all(funcs.map(f => gptForFunc(f)));
+}
+
+async function main() {
+  const filesToFunctions = getFilesToFunctions();
+
+  const entries = [...filesToFunctions.entries()];
+  const files = entries.map(e => e[0]);
+  const funcs = entries.map(e => e[1]);
+  const t1 = performance.now();
+  const recs = await Promise.all(funcs.map(fs => gptForFile(fs)));
+  const t2 = performance.now();
+  for (let i = 0; i < files.length; i++) {
+    console.log(`Recommendations for ${files[i]}`);
+    const fileRecs = recs[i];
+    for (let j = 0; j < fileRecs.length; j++) {
+      // Only ts for now, so split that way
+      console.log(fileRecs[j].split('```').map(r => {
+        if (/^ts\n/.test(r)) {
+          return highlight(r.replace(/^ts\n/, ''), { language: 'ts' });
+        }
+        return r;
+      }).join(''));
+      //console.log(fileRecs[j]);
+      console.log('');
+    }
+  }
+  console.log(`GPT time was ${(t2 - t1) / 1000}sec`);
 }
 
 main();
