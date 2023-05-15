@@ -28,7 +28,7 @@ function findRelevantNodes(node) {
 function getFilesToFunctions() {
   const t1 = performance.now();
   const fileAndLineNumbers = execSync(
-    `git diff $(git remote show $(git remote show | head -n 1) | sed -n '/HEAD branch/s/.*HEAD branch: //p') --name-only | xargs -I '{}' echo '{}' | sed s"/\\(.*\\)/git blame \\1 | grep -nv '^\\\\^' | cut -f1 -d: | sed s\\/^\\/\\1:\\/g/g" | bash`,
+    `git diff $(git remote show $(git remote show | head -n 1) | sed -n '/HEAD branch/s/.*HEAD branch: //p') --name-only | sed s"/\\(.*\\)/git blame \\1 | grep -nv '^\\^' | cut -f1 -d: | sed s\\/^\\/\\1:\\/g/g" | bash`,
     { encoding: 'utf8' },
   ).split('\n').map(r => r.split(':')).filter(r => /\.[jt]s$/.test(r[0]));
   const t2 = performance.now();
@@ -520,7 +520,6 @@ async function main() {
         }
         return r;
       }).join(''));
-      //console.log(fileRecs[j]);
       console.log('');
     }
   }
