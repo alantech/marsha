@@ -27,7 +27,25 @@ function findRelevantNodes(node) {
 
 function getFilesToFunctions() {
   const t1 = performance.now();
-  const fileAndLineNumbers = execSync('./git-lines-changed.sh', { encoding: 'utf8' })
+  const changedLines = `
+REMOTE=$(git remote show | head -n 1)
+MAIN=$(git remote show $\{REMOTE\} | sed -n '/HEAD branch/s/.*HEAD branch: //p')
+FILES=$(git diff $\{MAIN\} --name-only)
+COMMITS="00000000
+$(git log HEAD...$\{REMOTE\}/$\{MAIN\} --oneline --no-decorate | sed 's/ .*//g')"
+
+OUT=""
+IFS="
+"
+for FILE in $FILES
+do
+  for COMMIT in $COMMITS
+  do
+    git blame $FILE | grep -n "$\{COMMIT\}" | sed 's/ .*//g' | cut -f1 -d: | sed "s/^/$\{FILE\}:/g"
+  done
+done
+  `;
+  const fileAndLineNumbers = execSync(changedLines, { encoding: 'utf8', env: process.env })
     .split('\n').map(r => r.split(':')).filter(r => /\.[jt]s$/.test(r[0]));
   const t2 = performance.now();
   console.log(`Time to get mutated lines: ${t2 - t1}`);
