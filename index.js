@@ -12,20 +12,33 @@ const configuration = new Configuration({
 });
 
 const openai = new OpenAIApi(configuration);
-function checkNode(out, node) {
-  if ([ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression, ts.SyntaxKind.MethodDeclaration].includes(node.kind)) {
+function checkFnNode(out, node) {
+  if ([ts.SyntaxKind.FunctionDeclaration, ts.SyntaxKind.FunctionExpression, ts.SyntaxKind.ClassDeclaration].includes(node.kind)) {
     out.push(node);
   }
-  ts.forEachChild(node, checkNode.bind(undefined, out));
+  ts.forEachChild(node, checkFnNode.bind(undefined, out));
 }
 
-function findRelevantNodes(node) {
+function findFunctionNodes(node) {
   const out = [];
-  checkNode(out, node);
+  checkFnNode(out, node);
   return out;
 }
 
-function getFilesToFunctions() {
+function checkCallNode(out, node) {
+  if (node.kind === ts.SyntaxKind.CallExpression) {
+    out.push(node);
+  }
+  ts.forEachChild(node, checkCallNode.bind(undefined, out));
+}
+
+function findCallNodes(node) {
+  const out = [];
+  checkCallNode(out, node);
+  return out;
+}
+
+function getFileAndLineNumbers() {
   const t1 = performance.now();
   const changedLines = `
 REMOTE=$(git remote show | head -n 1)
@@ -46,32 +59,96 @@ do
 done
   `;
   const fileAndLineNumbers = execSync(changedLines, { encoding: 'utf8', env: process.env })
-    .split('\n').map(r => r.split(':')).filter(r => /\.[jt]s$/.test(r[0]));
+    .split('\n').map(r => r.split(':')).filter(r => /\.[jt]sx?$/.test(r[0]));
   const t2 = performance.now();
   console.log(`Time to get mutated lines: ${t2 - t1}`);
+  return fileAndLineNumbers;
+}
+
+function getFunctionsFromJavascriptishFile(sourceFile) {
+  const functionNodes = new Set();
+  for (const statement of sourceFile.statements) {
+    const relevantNodes = findFunctionNodes(statement);
+    for (const node of relevantNodes) {
+      functionNodes.add(node);
+    }
+  }
+  return functionNodes;
+}
+
+class Fn {
+  name;
+  original;
+  deps;
+  sourceFile;
+  generated;
+  declaration;
+  toEval;
+
+  constructor(name, original, deps, sourceFile) {
+    this.name = name;
+    this.original = original;
+    this.deps = deps;
+    this.sourceFile = sourceFile;
+  }
+
+  getOriginalText() {
+    return this.original.getText(this.sourceFile);
+  }
+}
+
+function analyzeJavascriptishFile(file, lineNumbers) {
+  const fns = new Map();
+  const sourceFile = ts.createSourceFile(file, readFileSync(file, 'utf8'));
+  const fnsToAnalyze = new Set();
+  const functionNodes = getFunctionsFromJavascriptishFile(sourceFile);
+  for (const node of functionNodes) {
+    const callNodesForFn = findCallNodes(node);
+    const fnDeps = new Set();
+    for (const callNode of callNodesForFn) {
+      if (ts.SyntaxKind.Identifier === callNode.expression.kind) { // Only consider direct fn calls for now
+        fnDeps.add(callNode.expression.escapedText);
+      }
+    }
+    const fn = new Fn(node.name.escapedText, node, [...fnDeps], sourceFile);
+    fns.set(fn.name, fn);
+    for (const line of lineNumbers) {
+      if (
+        ts.getLineAndCharacterOfPosition(sourceFile, node.pos).line <= line &&
+        ts.getLineAndCharacterOfPosition(sourceFile, node.end).line >= line
+      ) {
+        fn.toEval = true;
+        fnsToAnalyze.add(fn);
+      }
+    }
+  }
+  for (const fn of fns.values()) {
+    for (let i = 0; i < fn.deps.length; i++) {
+      const dep = fn.deps[i];
+      if (fns.has(dep)) {
+        fn.deps[i] = fns.get(dep);
+      } else {
+        fn.deps.splice(i, 1);
+        i--;
+      }
+    }
+  }
+  return fnsToAnalyze;
+}
+
+function getFilesToFunctions(fileAndLineNumbers) {
+  const t1 = performance.now();
   const files = new Set(fileAndLineNumbers.map(r => r[0]));
   const filesToFunctions = new Map();
   for (const file of files) {
-    const nodesToAnalyze = new Set();
     const lineNumbers = fileAndLineNumbers.filter(r => r[0] === file).map(r => r[1]);
-    const sourceFile = ts.createSourceFile(file, readFileSync(file, 'utf8'));
-    for (const statement of sourceFile.statements) {
-      const relevantNodes = findRelevantNodes(statement);
-      for (const node of relevantNodes) {
-        for (const line of lineNumbers) {
-          if (
-            ts.getLineAndCharacterOfPosition(sourceFile, node.pos).line <= line &&
-            ts.getLineAndCharacterOfPosition(sourceFile, node.end).line >= line
-          ) {
-            nodesToAnalyze.add(node);
-          }
-        }
-      }
+    if (/\.[tj]sx?$/.test(file)) {
+      const fnsToAnalyze = analyzeJavascriptishFile(file, lineNumbers);
+      filesToFunctions.set(file, fnsToAnalyze);
     }
-    filesToFunctions.set(file, [...nodesToAnalyze].map(n => n.getText(sourceFile)));
-    const t3 = performance.now();
-    console.log(`Time to load, parse, and analyze all changed files: ${t3 - t2}`);
   }
+  const t2 = performance.now();
+  console.log(`Time to load, parse, and analyze all changed files: ${t2 - t1}`);
   return filesToFunctions;
 }
 
@@ -116,7 +193,86 @@ async function retryCompletion(query, maxTries=3) {
   } while(maxTries);
 }
 
-async function gptOptimize(func) {
+async function gptDeclaration(func, retries = 3) {
+  const res = await retryChatCompletion({
+    messages: [{
+      role: 'system',
+      content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
+    }, {
+      role: 'user',
+      content: `Can you give me a Typescript declare statement for this function?
+
+\`\`\`ts
+export function findDiff(dbEntities, cloudEntities, idGen, comparator) {
+  const entitiesInDbOnly = [];
+  const entitiesInAwsOnly = [];
+  const dbEntityIds = dbEntities.map(idGen);
+  const cloudEntityIds = cloudEntities.map(idGen);
+  // Everything in cloud and not in db is a potential delete
+  const cloudEntNotInDb = cloudEntities.filter(e => !dbEntityIds.includes(idGen(e)));
+  cloudEntNotInDb.map(e => entitiesInAwsOnly.push(e));
+  // Everything in db and not in cloud is a potential create
+  const dbEntNotInCloud = dbEntities.filter(e => !cloudEntityIds.includes(idGen(e)));
+  dbEntNotInCloud.map(e => entitiesInDbOnly.push(e));
+  // Everything else needs a diff between them
+  const remainingDbEntities = dbEntities.filter(e => cloudEntityIds.includes(idGen(e)));
+  const entitiesChanged = [];
+  remainingDbEntities.map(dbEnt => {
+    const cloudEntToCompare = cloudEntities.find(e => idGen(e) === idGen(dbEnt));
+    if (!comparator(dbEnt, cloudEntToCompare)) {
+      entitiesChanged.push({
+        db: dbEnt,
+        cloud: cloudEntToCompare,
+      });
+    }
+  });
+  return {
+    entitiesInDbOnly,
+    entitiesInAwsOnly,
+    entitiesChanged,
+  };
+}
+\`\`\`
+`,
+    }, {
+      role: 'assistant',
+      content: `This function does not define the return type when there is only one return location and so its type is knowable. It also has two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics. We can write a Typescript declare statement like this:
+
+\`\`\`ts
+declare function findDiff<T>(
+  dbEntities: T[],
+  cloudEntities: T[],
+  idGen: (e: T) => string,
+  comparator: (a: T, b: T) => boolean,
+): {
+  entitiesInDbOnly: T[];
+  entitiesInAwsOnly: T[];
+  entitiesChanged: {
+    db: T;
+    cloud: T;
+  }[];
+};
+\`\`\`
+`
+    }, {
+      role: 'user',
+      content: `Can you give me a Typescript declare statement for this function?
+
+\`\`\`ts
+${func}
+\`\`\`
+`
+    }],
+    model: 'gpt-3.5-turbo',
+  });
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!!fn && !functionParses('test', fn) && retries) {
+    return gptDeclaration(func, retries--);
+  }
+  return res.data.choices[0].message.content;
+}
+
+async function gptOptimize(func, decLines, retries = 3) {
   const res = await retryChatCompletion({
     messages: [{
       role: 'system',
@@ -213,7 +369,14 @@ export function findDiff(
     }, {
       role: 'user',
       content: `Can this function's Big-O notation be improved?
+${decLines && `
+I have these declare statements for some of the functions used:
 
+${decLines}
+
+And here is the function:
+
+`}
 \`\`\`ts
 ${func}
 \`\`\`
@@ -222,13 +385,13 @@ ${func}
     model: 'gpt-3.5-turbo',
   });
   const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
-  if (!!fn && !functionParses('test', fn)) {
-    return gptOptimize(func); // TODO: Don't allow this to potentially infinite loop
+  if (!!fn && !functionParses('test', fn) && retries) {
+    return gptOptimize(func, decLines, retries--);
   }
   return res.data.choices[0].message.content;
 }
 
-async function gptType(func) {
+async function gptType(func, decLines, retries = 3) {
   const res = await retryChatCompletion({
     messages: [{
       role: 'system',
@@ -325,7 +488,14 @@ export function findDiff<T>(
     }, {
       role: 'user',
       content: `Can this function's type annotation be improved?
+${decLines && `
+I have these declare statements for some of the functions used:
 
+${decLines}
+
+And here is the function:
+
+`}
 \`\`\`ts
 ${func}
 \`\`\`
@@ -334,13 +504,13 @@ ${func}
     model: 'gpt-3.5-turbo',
   });
   const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
-  if (!!fn && !functionParses('test', fn)) {
-    return gptType(func); // TODO: Don't allow this to potentially infinite loop
+  if (!!fn && !functionParses('test', fn) && retries) {
+    return gptType(func, decLines, retries--);
   }
   return res.data.choices[0].message.content;
 }
 
-async function gptReducer(rec1, rec2) {
+async function gptReducer(rec1, rec2, retries = 3) {
     const prompt = `
 The following is a discussion between a senior software engineer (SENIOR) and a junior software engineer (JUNIOR).
 
@@ -501,27 +671,56 @@ SENIOR: `;
     model: 'text-davinci-003',
   });
   const fn = res.data.choices[0].text.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
-  if (!!fn && !functionParses('test', fn)) {
-    return gptReducer(rec1, rec2); // TODO: Don't allow this to potentially infinite loop
+  if (!!fn && !functionParses('test', fn) && retries) {
+    return gptReducer(rec1, rec2, retries--);
   }
   return res.data.choices[0].text;
 }
 
 async function gptForFunc(func) {
-  const baseRecs = await Promise.all([gptOptimize(func), gptType(func)]);
-  return await gptReducer(...baseRecs);
+  if (func.generated) { // Already processed this in a prior iteration
+    return func.generated;
+  }
+  console.log(`Evaluating ${func.name}`);
+  // First, confirm all dependencies are fully analyzed, otherwise, recurse into the dependencies
+  for (const dep of func.deps) {
+    if (dep.declaration) continue;
+    dep.declaration = 'TODO'; // To prevent infinite looping we put a temporary value here
+    dep.generated = await gptForFunc(dep);
+    dep.declaration = await gptDeclaration(dep.generated);
+  }
+  if (func.generated) { // Already processed this as a self-dependency
+    return func.generated;
+  }
+  const decLines = [...func.deps].map(d => d.declaration).join('\n');
+  const original = func.getOriginalText();
+  if (func.toEval) {
+    console.log('Full eval required');
+    const baseRecs = await Promise.all([gptOptimize(original, decLines), gptType(original, decLines)]);
+    func.generated = await gptReducer(...baseRecs);
+  } else {
+    func.generated = func.getOriginalText();
+  }
+  func.declaration = await gptDeclaration(func.generated);
+  return func.generated;
 }
 
 async function gptForFile(funcs) {
-  return await Promise.all(funcs.map(f => gptForFunc(f)));
+  // Not safe to run in parallel within a file because dependencies may be shared
+  const out = [];
+  for (const f of funcs) {
+    out.push(await gptForFunc(f));
+  }
+  return out;
 }
 
 async function main() {
-  const filesToFunctions = getFilesToFunctions();
+  const fileAndLineNumbers = getFileAndLineNumbers();
+  const filesToFunctions = getFilesToFunctions(fileAndLineNumbers);
 
   const entries = [...filesToFunctions.entries()];
   const files = entries.map(e => e[0]);
-  const funcs = entries.map(e => e[1]);
+  const funcs = entries.map(e => [...e[1]]);
   const t1 = performance.now();
   const recs = await Promise.all(funcs.map(fs => gptForFile(fs)));
   const t2 = performance.now();
