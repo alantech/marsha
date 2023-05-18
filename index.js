@@ -193,7 +193,7 @@ async function retryCompletion(query, maxTries=3) {
   } while(maxTries);
 }
 
-async function gptDeclaration(func, retries = 3) {
+async function gptDeclaration(func, decLines, retries = 3) {
   const res = await retryChatCompletion({
     messages: [{
       role: 'system',
@@ -257,7 +257,14 @@ declare function findDiff<T>(
     }, {
       role: 'user',
       content: `Can you give me a Typescript declare statement for this function?
+${decLines && `
+I have these declare statements for some of the functions used:
 
+${decLines}
+
+And here is the function:
+
+`}
 \`\`\`ts
 ${func}
 \`\`\`
@@ -269,7 +276,13 @@ ${func}
   if (!!fn && !functionParses('test', fn) && retries) {
     return gptDeclaration(func, retries--);
   }
-  return res.data.choices[0].message.content;
+  return res.data.choices[0].message.content.split('```').map(r => {
+    if (/^ts\n/.test(r)) {
+      return r.replace(/^ts\n/, '');
+    }
+    return '';
+  }).join('');
+  // return res.data.choices[0].message.content;
 }
 
 async function gptOptimize(func, decLines, retries = 3) {
@@ -372,7 +385,9 @@ export function findDiff(
 ${decLines && `
 I have these declare statements for some of the functions used:
 
+\`\`\`ts
 ${decLines}
+\`\`\`
 
 And here is the function:
 
@@ -491,7 +506,9 @@ export function findDiff<T>(
 ${decLines && `
 I have these declare statements for some of the functions used:
 
+\`\`\`ts
 ${decLines}
+\`\`\`
 
 And here is the function:
 
@@ -681,37 +698,27 @@ async function gptForFunc(func) {
   if (func.generated) { // Already processed this in a prior iteration
     return func.generated;
   }
-  console.log(`Evaluating ${func.name}`);
+  // Establish a perhaps not as good declaration to be used if there are cycles in the graph
+  func.declaration = gptDeclaration(func.getOriginalText());
   // First, confirm all dependencies are fully analyzed, otherwise, recurse into the dependencies
   for (const dep of func.deps) {
     if (dep.declaration) continue;
-    dep.declaration = 'TODO'; // To prevent infinite looping we put a temporary value here
-    dep.generated = await gptForFunc(dep);
-    dep.declaration = await gptDeclaration(dep.generated);
+    gptForFunc(dep);
   }
-  if (func.generated) { // Already processed this as a self-dependency
-    return func.generated;
-  }
-  const decLines = [...func.deps].map(d => d.declaration).join('\n');
+  const decLines = (await Promise.all([...func.deps].map(d => d.declaration))).join('\n');
   const original = func.getOriginalText();
   if (func.toEval) {
-    console.log('Full eval required');
     const baseRecs = await Promise.all([gptOptimize(original, decLines), gptType(original, decLines)]);
-    func.generated = await gptReducer(...baseRecs);
+    func.generated = gptReducer(...baseRecs);
+    func.declaration = gptDeclaration(await func.generated);
   } else {
     func.generated = func.getOriginalText();
   }
-  func.declaration = await gptDeclaration(func.generated);
   return func.generated;
 }
 
 async function gptForFile(funcs) {
-  // Not safe to run in parallel within a file because dependencies may be shared
-  const out = [];
-  for (const f of funcs) {
-    out.push(await gptForFunc(f));
-  }
-  return out;
+  return await Promise.all(funcs.map(f => gptForFunc(f)));
 }
 
 async function main() {
