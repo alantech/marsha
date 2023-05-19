@@ -54,7 +54,7 @@ for FILE in $FILES
 do
   for COMMIT in $COMMITS
   do
-    git blame $FILE | grep -n "$\{COMMIT\}" | sed 's/ .*//g' | cut -f1 -d: | sed "s/^/$\{FILE\}:/g"
+    git blame $FILE | grep -n "$\{COMMIT\}" | sed 's/ .*//g' | cut -f1 -d: | sed "s#^#$\{FILE\}:#g"
   done
 done
   `;
@@ -110,7 +110,7 @@ function analyzeJavascriptishFile(file, lineNumbers) {
         fnDeps.add(callNode.expression.escapedText);
       }
     }
-    const fn = new Fn(node.name.escapedText, node, [...fnDeps], sourceFile);
+    const fn = new Fn(node.name?.escapedText ?? '[anonymous function]', node, [...fnDeps], sourceFile);
     fns.set(fn.name, fn);
     for (const line of lineNumbers) {
       if (
@@ -161,8 +161,9 @@ function functionParses(filename, filestring) {
   }
 }
 
-async function retryChatCompletion(query, maxTries=3) {
+async function retryChatCompletion(query, model='gpt-3.5-turbo', maxTries=3) {
   const t1 = performance.now();
+  query.model = model;
   do {
     try {
       const out = await openai.createChatCompletion(query);
@@ -170,22 +171,9 @@ async function retryChatCompletion(query, maxTries=3) {
       console.log(`Chat Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
       return out;
     } catch (e) {
-      maxTries--;
-      if (!maxTries) throw e;
-      await new Promise(r => setTimeout(r, 3000 / maxTries));
-    }
-  } while(maxTries);
-}
-
-async function retryCompletion(query, maxTries=3) {
-  const t1 = performance.now();
-  do {
-    try {
-      const out = await openai.createCompletion(query);
-      const t2 = performance.now();
-      console.log(`Completion Query took ${t2 - t1}ms, started at ${t1}, ms/chars = ${(t2 - t1) / (out.data.usage?.total_tokens ?? 9001)}`);
-      return out;
-    } catch (e) {
+      if (e?.response?.data?.error?.code === 'context_length_exceeded') {
+        query.model = 'gpt-4'; // Try to cover up this error by choosing the bigger, more expensive model
+      }
       maxTries--;
       if (!maxTries) throw e;
       await new Promise(r => setTimeout(r, 3000 / maxTries));
@@ -270,7 +258,6 @@ ${func}
 \`\`\`
 `
     }],
-    model: 'gpt-3.5-turbo',
   });
   const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
   if (!!fn && !functionParses('test', fn) && retries) {
@@ -397,7 +384,6 @@ ${func}
 \`\`\`
 `
     }],
-    model: 'gpt-3.5-turbo',
   });
   const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
   if (!!fn && !functionParses('test', fn) && retries) {
@@ -518,7 +504,6 @@ ${func}
 \`\`\`
 `
     }],
-    model: 'gpt-3.5-turbo',
   });
   const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
   if (!!fn && !functionParses('test', fn) && retries) {
@@ -528,10 +513,21 @@ ${func}
 }
 
 async function gptReducer(rec1, rec2, retries = 3) {
-    const prompt = `
-The following is a discussion between a senior software engineer (SENIOR) and a junior software engineer (JUNIOR).
-
-JUNIOR: I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
+  // First, check if either of the recommendations is a dummy recommendation with no function, and
+  // early escape in those case(s).
+  const fn1 = rec1.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  const fn2 = rec2.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  if (!fn1 && !fn2) return '';
+  if (!fn1) return rec2;
+  if (!fn2) return rec1;
+  // Now, if both recommendations have meat on their bones, try to merge them together
+  const res = await retryChatCompletion({
+    messages: [{
+      role: 'system',
+      content: 'You are a senior software engineer helping review code. You are brief, answering with a simple \'No\' when nothing needs to be done and concise explanations otherwise.',
+    }, {
+      role: 'user',
+      content: `I have received advice from different engineers on how to rewrite my code, #1 and #2 below. Can you combine them so I get both improvements?
 
 #1: This function does not define the return type when there is only one return location and so its type is knowable. It also uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
@@ -623,9 +619,10 @@ export function findDiff(
     entitiesChanged,
   };
 }
-\`\`\`
-
-SENIOR: This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
+\`\`\``,
+    }, {
+      role: 'assistant',
+      content: `This function's Big-O is \`O(n^2)\` due to the use of \`includes\`, which is \`O(n)\`, inside of a \`map\`, which is also \`O(n)\`. It also does not define the return type when there is only one return location and so its type is knowable. Finally, it uses the \`any\` type for two arrays of data that are passed into the same \`idGen\` function, implying that they both have the same underlying type for that function to be able to operate on both, which can be represented with type generics.
 
 \`\`\`ts
 export function findDiff<T>(
@@ -674,24 +671,21 @@ export function findDiff<T>(
     entitiesChanged,
   };
 }
-
-JUNIOR: I have also received advice from different engineers on how to rewrite other code, #1 and #2 below. Can you combine them so I get both improvements?
+\`\`\``,
+    }, {
+      role: 'user',
+      content: `I have also received advice from different engineers on how to rewrite other code, #1 and #2 below. Can you combine them into one so I get both improvements?
 
 #1: ${rec1}
 
-#2: ${rec2}
-
-SENIOR: `;
-  const res = await retryCompletion({
-    max_tokens: 4096 - Math.ceil(prompt.length / 3) - 100, // I don't know why some of these characters are counting as two bytes. I thought it was all UTF-8 8-bit chars? TODO: Find a more accurate token calculator
-    prompt,
-    model: 'text-davinci-003',
+#2: ${rec2}`,
+    }],
   });
-  const fn = res.data.choices[0].text.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
+  const fn = res.data.choices[0].message.content.split('```').find(r => /^ts\n/.test(r))?.replace(/^ts\n/, '');
   if (!!fn && !functionParses('test', fn) && retries) {
     return gptReducer(rec1, rec2, retries--);
   }
-  return res.data.choices[0].text;
+  return res.data.choices[0].message.content;
 }
 
 async function gptForFunc(func) {
