@@ -36,7 +36,7 @@ To be determined
 
 For now, only function definition is being considered. What other elements to create will depend on the initial target audience we intend to tackle, and since we're still debating that, we'll update this document once we're ready.
 
-Following the meta RFC, the functions will be a mixture of declarative and constraint style function definitions, and will have the following five parts: the function name, input arguments, return type, description, and examples of its usage. These should be enough for the LLM to do a pretty solid job at writing the actual code for us.
+Following the meta RFC, the functions will be a mixture of declarative and constraint style function definitions, and will have the following five parts: the function name, input arguments, return type, description, and examples of its usage. These should be enough for the LLM to do a pretty solid job at writing the actual code and the tests cases for us.
 
 #### Markdown-like Syntax
 
