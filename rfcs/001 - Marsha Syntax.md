@@ -26,17 +26,84 @@ YYYY-MM-DD
 
 ## Summary
 
-Marsha as a higher-level language is going to need a syntax. This syntax should be minimal, "obvious", and discourage lax or incomplete information that could lead to unpredictable behavior. It also needs to be mechanically parseable for syntax highlighting and quick feedback on correctness issues to the user.
+Marsha as a higher-level language is going to need a syntax. This syntax should be:
+- minimal, "obvious", and discourage lax or incomplete information that could lead to unpredictable behavior
+- be mechanically parseable for syntax highlighting and quick feedback on correctness issues to the user
+- make it easy to define examples and set different tolerance levels that will fail to compile if not enough examples are provided to reduce the probability of generating faulty code and provide the foundation for a test harness/suite itself
+
+For now, only function and data structure definitions are being considered. What other elements to create will depend on the initial target audience we intend to tackle, and since we're still debating that, we'll update this document once we're ready.
+
+Following the meta RFC, the functions will be a mixture of declarative and constraint style function definitions, and will have the following five parts: the function name, input arguments, return type, description, and examples of its usage. These should be enough for the LLM to do a pretty solid job at writing the actual code and the tests cases for us.
 
 ## Proposal
 
 To be determined
 
-### Alternatives Considered
+### Data Syntax Alternatives Considered
 
-For now, only function definition is being considered. What other elements to create will depend on the initial target audience we intend to tackle, and since we're still debating that, we'll update this document once we're ready.
+#### Pure CSV Syntax with Types Row
 
-Following the meta RFC, the functions will be a mixture of declarative and constraint style function definitions, and will have the following five parts: the function name, input arguments, return type, description, and examples of its usage. These should be enough for the LLM to do a pretty solid job at writing the actual code and the tests cases for us.
+```md
+# type SKU
+brand_id, sku_id, color, type
+integer, integer, string that is a valid color name, string that is name of article of clothing
+20, 10040, 'red', 'shirt'
+50, 10059, 'blue', 'shirt'
+```
+
+#### Pure CSV Syntax with Optional Types
+
+```md
+# type SKU
+brand_id: integer, sku_id: integer, color: string that is a valid color name, type: string that is name of article of clothing
+20, 10040, 'red', 'shirt'
+50, 10059, 'blue', 'shirt'
+
+sku_from_new_brands(SKU[sku_id=10040])
+```
+
+#### Numbered Constructor Syntax with Optional Types
+
+```md
+# type SKU(brand_id: integer, sku_id: integer, color: string that is a valid color name, type: string that is name of article of clothing)
+1. SKU(20, 10040, 'red', 'shirt')
+2. SKU(50, 10059, 'blue', 'shirt')
+```
+
+All the numbered syntax examples can be referenced in the function examples using `#`:
+
+```md
+# sku_from_new_brand(SKU[], Brand[]) = SKU[]
+<description>
+- sku_from_new_brand([SKU#1], ...) = SKU#1
+```
+
+#### Numbered CSV-like Syntax with Optional Types
+
+```md
+# type SKU
+brand_id: integer, sku_id: integer, color: string that is a valid color name, type: string that is name of article of clothing
+1. 20, 10040, 'red', 'shirt'
+2. 50, 10059, 'blue', 'shirt'
+```
+
+#### Numbered, CSV-like Syntax with Optional Types
+
+```md
+# type SKU(brand_id: integer, sku_id: integer, color: string that is a valid color name, type: string that is name of article of clothing)
+1. 20, 10040, 'red', 'shirt'
+2. 50, 10059, 'blue', 'shirt'
+```
+
+#### Numbered, TS-like Syntax with Optional Types
+
+```md
+# type SKU(brand_id: integer, sku_id: integer, color: string that is a valid color name, type: string that is name of article of clothing)
+1. SKU { 20, 10040, 'red', 'shirt' }
+2. SKU {50, 10059, 'blue', 'shirt' }
+```
+
+### Function Syntax Alternatives Considered
 
 #### Markdown-like Syntax
 
