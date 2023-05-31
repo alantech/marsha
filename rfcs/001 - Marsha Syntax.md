@@ -37,7 +37,57 @@ Following the meta RFC, the functions will be a mixture of declarative and const
 
 ## Proposal
 
-To be determined
+### Function Syntax Proposal
+
+For the function syntax, we're going with something that is brief, allows for fuzzy, ambiguous definition if desired, but has enough "hooks" to make parsing of the 5 component pieces unambiguous, along with the ability to switch to an unambiguous type definition if needed by the user.
+
+```md
+# func fibonacci(integer): integer in the set of fibonacci numbers
+This function calculates the nth fibonacci number, where n is provided to it and starts with 1.
+
+fibonacci(n) = fibonacci(n - 1) + fibonacci(n - 2)
+* fibonacci(1) = 1
+* fibonacci(2) = 1
+* fibonacci(3) = 2
+* fibonacci(0) throws an error
+```
+
+A function block begins with `# func ` and is then followed by a math-y function declaration of `function_name(type1, type2, ...): return_type`
+
+Only input and output types are provided, *not* any argument names. Since this language is *not* imperative, the examples will never explicitly label the input arguments. The description *can* name the argument, like is done in this example, but there is no explicit requirement to do so and many functions likely won't need to given the context from the example function calls.
+
+The types can be anything you want, but if the type is a single word, it would be checked against the list of user-defined types to potentially include in the function generation prompt for better context.
+
+#### Data Type Syntax Proposal
+
+For "Data Type" we are only considering struct-style types where there's named properties with their own sub-types. "Base" types, like integers, strings, booleans, etc, will just be implicit and handled by the LLM, and we won't model tuple types as you can just represent them as struct types with property names 1, 2, 3, etc.
+
+The most common form of struct type that most non-developer technical users are aware of is the table type, like in SQL, or also known as a spreadsheet with column labels in Excel or as a CSV file. The table can be represented as either an array of structs (row-oriented) or a struct of arrays (column-oriented), though the latter representation is generally only used for certain performance-centered contexts and the row-oriented representation is the "normal" one (that also more closely matches a struct syntax).
+
+With this in mind, we can make the data type syntax as close as possible to a snippet of a CSV to improve the ease of defining the type for non-developers:
+
+```md
+# type SKU
+brand_id, sku_id, color, type
+20, 10040, 'red', 'shirt'
+50, 10059, 'blue', 'shirt'
+```
+
+The beginning of the syntax starts with `# type ` followed by a single word specifying the name of the type.
+
+After that are the first few lines of a CSV file, with the first row being the column headers that define the struct property names, and the following rows some example data.
+
+We considered adding a reference syntax to the function definition to allow the examples to directly use one of the example values from the data type definition as an input or output type, but references (eg, pointers) are hard for non-developers (or even junior developers), and the closest existing example to this concept [YAML anchors](https://medium.com/@kinghuang/docker-compose-anchors-aliases-extensions-a1e4105d70bd), are uncomfortable to most developers, too, so we dropped the concept (for now, at least).
+
+Regardless of if we had the reference syntax, though, there needs to be some way for users to define a custom struct record that is passed as an input argument or returned as the output type from a function in the examples. Because of LLMs, this doesn't have to be strictly enforced (anything programming language "like" ought to work, to varying degrees of reliability), but we probably should recommend using the syntax of the target language when possible, so for Python that would look like calling a constructor function for a class:
+
+```
+SKU(20, 10040, 'red', 'shirt')
+```
+
+(We may want to provide these types to the LLM as Python classes when generating Python code, and this syntax is simple enough that we should be able to do so with basic coding, not needing an LLM in the loop for it, but that is an implementation detail we will decide on in the actual code.)
+
+We have also dropped explicit typing of the sub-types for a user-defined type to instead rely on the LLM to infer the type from the examples. We may add back that in the future, but for the sake of speed of release and reduced scope for the initial version we cut it for now.
 
 ### Data Syntax Alternatives Considered
 
