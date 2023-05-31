@@ -64,6 +64,7 @@ def fibonacci(n):
 import unittest
 import fibonacci from fibonacci
 
+
 class TestFibonacci(unittest.TestCase):
 
   def test_1(self):
@@ -77,6 +78,10 @@ class TestFibonacci(unittest.TestCase):
 
   def test_0(self):
     self.assertRaises(Exception, fibonacci, 0)
+
+
+if __name__ == '__main__':
+    unittest.main()
 ```'''
         }, {
             'role': 'user',
@@ -92,8 +97,10 @@ def main():
 
 It should extract from the database url all the connection properties in a JSON format.
 
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0:5432", "database": "mydb" }
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0:5432", "database": "mydb", "extra": { "ssl": "require" } }
+* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb" }
+* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "ssl": "require" } }
+* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
+* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass&sslMode=REQUIRED = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl": "require" } }
 * extract_connection_info('') = {}'''))
 
 
