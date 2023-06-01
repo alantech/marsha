@@ -1,4 +1,4 @@
-./dist/marsha: ./venv
+./dist/marsha: ./venv ./marsha.py
 	. ./venv/bin/activate; pip install -r requirements.txt
 	. ./venv/bin/activate; pyinstaller marsha.py --onefile
 

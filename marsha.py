@@ -1,11 +1,19 @@
+import argparse
 import os
 import time
 
+from mistletoe import Document, ast_renderer
 import openai
 
 openai.organization = os.getenv('OPENAI_ORG')
 openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
+parser = argparse.ArgumentParser(
+        prog='marsha',
+        description='Marsha AI Compiler',
+)
+parser.add_argument('source')
+args = parser.parse_args()
 
 def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
     t1 = time.time()
@@ -27,7 +35,7 @@ def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             raise Exception('Could not execute chat completion')
 
 
-def gpt_func_to_python(func):
+def gpt_func_to_python(func, retries=3):
     res = retry_chat_completion({
         'messages': [{
             'role': 'system',
@@ -88,20 +96,41 @@ if __name__ == '__main__':
             'content': func
         }],
     })
-    return res.choices[0].message.content
+    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
+    # try again (or fully error out, for now)
+    try:
+        return Document(res.choices[0].message.content)
+    except:
+        if retries > 0:
+            return gpt_func_to_python(func, retries - 1)
+        else:
+            return Document('''# Failure.py
 
+```py
+print('Failed to generate code :(')
+```''')
+
+def write_files_from_markdown(md):
+    ast = ast_renderer.get_ast(md)
+    filename = ''
+    filedata = ''
+    for section in ast['children']:
+        # TODO: Validate better that the markdown is in the form of Heading then CodeFence, etc
+        if section['type'] == 'Heading':
+            filename = section['children'][0]['content']
+        elif section['type'] == 'CodeFence':
+            filedata = section['children'][0]['content']
+            f = open(filename, 'w')
+            f.write(filedata)
+            f.close()
 
 def main():
-    print(gpt_func_to_python(
-        '''# func extract_connection_info(url): JSON object with connection properties
-
-It should extract from the database url all the connection properties in a JSON format.
-
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb" }
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass&sslMode=REQUIRED = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('') = {}'''))
+    print('Compiling...')
+    f = open(args.source, 'r')
+    func = f.read()
+    f.close()
+    write_files_from_markdown(gpt_func_to_python(func))
+    print('Done!')
 
 
 main()
