@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 
+from mistletoe import Document, ast_renderer
 import openai
 
 openai.organization = os.getenv('OPENAI_ORG')
@@ -34,7 +35,7 @@ def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             raise Exception('Could not execute chat completion')
 
 
-def gpt_func_to_python(func):
+def gpt_func_to_python(func, retries=3):
     res = retry_chat_completion({
         'messages': [{
             'role': 'system',
@@ -95,12 +96,41 @@ if __name__ == '__main__':
             'content': func
         }],
     })
-    return res.choices[0].message.content
+    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
+    # try again (or fully error out, for now)
+    try:
+        return Document(res.choices[0].message.content)
+    except:
+        if retries > 0:
+            return gpt_func_to_python(func, retries - 1)
+        else:
+            return Document('''# Failure.py
 
+```py
+print('Failed to generate code :(')
+```''')
+
+def write_files_from_markdown(md):
+    ast = ast_renderer.get_ast(md)
+    filename = ''
+    filedata = ''
+    for section in ast['children']:
+        # TODO: Validate better that the markdown is in the form of Heading then CodeFence, etc
+        if section['type'] == 'Heading':
+            filename = section['children'][0]['content']
+        elif section['type'] == 'CodeFence':
+            filedata = section['children'][0]['content']
+            f = open(filename, 'w')
+            f.write(filedata)
+            f.close()
 
 def main():
+    print('Compiling...')
     f = open(args.source, 'r')
-    print(gpt_func_to_python(f.read()))
+    func = f.read()
+    f.close()
+    write_files_from_markdown(gpt_func_to_python(func))
+    print('Done!')
 
 
 main()
