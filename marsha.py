@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 
@@ -6,6 +7,12 @@ import openai
 openai.organization = os.getenv('OPENAI_ORG')
 openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
+parser = argparse.ArgumentParser(
+        prog='marsha',
+        description='Marsha AI Compiler',
+)
+parser.add_argument('source')
+args = parser.parse_args()
 
 def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
     t1 = time.time()
@@ -92,16 +99,8 @@ if __name__ == '__main__':
 
 
 def main():
-    print(gpt_func_to_python(
-        '''# func extract_connection_info(url): JSON object with connection properties
-
-It should extract from the database url all the connection properties in a JSON format.
-
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb" }
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass&sslMode=REQUIRED = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('') = {}'''))
+    f = open(args.source, 'r')
+    print(gpt_func_to_python(f.read()))
 
 
 main()
