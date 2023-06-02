@@ -1,4 +1,9 @@
+flake8
+mccabe
 mistletoe
 openai
+pycodestyle
+pydocstyle
+pyflakes
 pyinstaller
 pylama
