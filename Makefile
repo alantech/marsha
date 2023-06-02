@@ -1,6 +1,6 @@
-./dist/marsha: ./venv ./marsha.py
+./dist/marsha: ./venv ./marsha.py ./marsha.spec
 	. ./venv/bin/activate; pip install -r requirements.txt
-	. ./venv/bin/activate; pyinstaller marsha.py --onefile
+	. ./venv/bin/activate; pyinstaller marsha.py --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama
 
 ./venv:
 	(command -v python && python -m venv venv) || (command -v python3 && python3 -m venv venv)
