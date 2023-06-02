@@ -44,6 +44,7 @@ f = open(os.path.join(base_path, 'examples/connection_lint/after.py'), 'r')
 connection_lint_after = f.read()
 f.close()
 
+
 async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
     t1 = time.time()
     query['model'] = model
@@ -60,13 +61,40 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             if max_tries == 0:
                 raise e
             time.sleep(3 / max_tries)
-        except:
+        except Exception as e:
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
             time.sleep(3 / max_tries)
         if max_tries == 0:
             raise Exception('Could not execute chat completion')
+
+
+def extract_function_name(func):
+    ast = ast_renderer.get_ast(Document(func))
+    if ast['children'][0]['type'] != 'Heading':
+        raise Exception('Invalid Marsha function')
+    header = ast['children'][0]['children'][0]['content']
+    return header.split('(')[0].split('func')[1].strip()
+
+
+def validate_first_stage_markdown(md, func_name):
+    ast = ast_renderer.get_ast(md)
+    if len(ast['children']) != 4:
+        return False
+    if ast['children'][0]['type'] != 'Heading':
+        return False
+    if ast['children'][2]['type'] != 'Heading':
+        return False
+    if ast['children'][1]['type'] != 'CodeFence':
+        return False
+    if ast['children'][3]['type'] != 'CodeFence':
+        return False
+    if ast['children'][0]['children'][0]['content'].strip() != f'{func_name}.py':
+        return False
+    if ast['children'][2]['children'][0]['content'].strip() != f'{func_name}_test.py':
+        return False
+    return True
 
 
 async def gpt_func_to_python(func, retries=3):
@@ -98,12 +126,26 @@ async def gpt_func_to_python(func, retries=3):
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
-        return Document(res.choices[0].message.content)
-    except:
+        # If it fails to parse, it will throw here
+        doc = Document(res.choices[0].message.content)
+        # Some validation that the generated file matches the expected format of:
+        # # function_name.py
+        # ```py
+        # <insert code here>
+        # ```
+        # # function_name_test.py
+        # ```py
+        # <insert code here>
+        # ```
+        if not validate_first_stage_markdown(doc, extract_function_name(func)):
+            raise Exception('Invalid output format')
+        return doc
+    except Exception as e:
         if retries > 0:
             return await gpt_func_to_python(func, retries - 1)
         else:
             raise Exception('Failed to generate code', func)
+
 
 def write_files_from_markdown(md):
     ast = ast_renderer.get_ast(md)
@@ -111,7 +153,6 @@ def write_files_from_markdown(md):
     filename = ''
     filedata = ''
     for section in ast['children']:
-        # TODO: Validate better that the markdown is in the form of Heading then CodeFence, etc
         if section['type'] == 'Heading':
             filename = section['children'][0]['content']
             filenames.append(filename)
