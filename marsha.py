@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import subprocess
 import sys
 import time
 
@@ -42,6 +43,24 @@ connection_lint_pylama = f.read()
 f.close()
 f = open(os.path.join(base_path, 'examples/connection_lint/after.py'), 'r')
 connection_lint_after = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/func.mrsh'), 'r')
+func_correction = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/before.py'), 'r')
+before_correction = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/before_test.py'), 'r')
+before_test_correction = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/test_results.txt'), 'r')
+test_results_correction = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/after.py'), 'r')
+after_correction = f.read()
+f.close()
+f = open(os.path.join(base_path, 'examples/test_correction/after_test.py'), 'r')
+after_test_correction = f.read()
 f.close()
 
 
@@ -216,7 +235,7 @@ async def fix_file(filename, lint_text, retries=3):
         if retries > 0:
             return await fix_file(filename, lint_text, retries - 1)
         else:
-            raise Exception('Failed to generate code', func)
+            raise Exception('Failed to generate code', lint_text)
 
 
 async def lint_and_fix_files(files, max_depth=10):
@@ -236,10 +255,114 @@ async def lint_and_fix_files(files, max_depth=10):
         file_lints = [e.format(DEFAULT_FORMAT) for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
-            print(lint_text)
             jobs.append(fix_file(file, lint_text))
     await asyncio.gather(*jobs)
     await lint_and_fix_files(files, max_depth - 1)
+
+
+async def test_and_fix_files(func, files, max_depth=10):
+    if max_depth == 0:
+        return
+    # There should only be two files, the test file and the code file
+    test_file = [file for file in files if file.endswith('_test.py')][0]
+    code_file = [file for file in files if not file.endswith('_test.py')][0]
+
+    # TODO: Do we assume the user has `python` in their $PATH and use that via a shell call,
+    # or do we `eval` the code with our bundled Python interpreter? Going with the former for now
+    test_stream = subprocess.Popen(['python', test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = test_stream.communicate()
+    test_results = f'{stdout}{stderr}'
+
+    # Recursively work on fixing the files while the test suite fails, return when complete
+    if "FAILED" in test_results:
+        f = open(test_file, 'r')
+        test = f.read()
+        f.close()
+        f = open(code_file, 'r')
+        code = f.read()
+        f.close()
+        res = await retry_chat_completion({
+            'messages': [{
+                'role': 'system',
+                'content': 'You are a senior software engineer helping a junior engineer fix some code that is failing. You are given the documentation of the function they were assigned to write, followed by the function they wrote, the unit tests they wrote, and the unit test results. There is little time before this feature must be included, so you are simply correcting their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.',
+            }, {
+                'role': 'user',
+                'content': f'''{func_correction}
+
+# extract_connection_info.py
+
+```py
+{before_correction}
+```
+
+# extract_connection_info_test.py
+
+```py
+{before_test_correction}
+```
+
+# Test Results
+
+{test_results_correction}''',
+            }, {
+                'role': 'assistant',
+                'content': f'''# extract_connection_info.py
+
+```py
+{after_correction}
+```
+
+# extract_connection_info_test.py
+
+```py
+{after_test_correction}
+```''',
+            }, {
+                'role': 'user',
+                'content': f'''{func}
+
+# {code_file}
+
+```py
+{code}
+```
+
+# {test_file}
+
+```py
+{test}
+```
+
+# Test Results
+
+{test_results}''',
+            }],
+        }, 'gpt-4')
+
+        # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
+        # try again (or fully error out, for now)
+        try:
+            # If it fails to parse, it will throw here
+            doc = Document(res.choices[0].message.content)
+            # Some validation that the generated file matches the expected format of:
+            # # function_name.py
+            # ```py
+            # <insert code here>
+            # ```
+            # # function_name_test.py
+            # ```py
+            # <insert code here>
+            # ```
+            if not validate_first_stage_markdown(doc, extract_function_name(func)):
+                raise Exception('Invalid output format')
+            write_files_from_markdown(doc)
+        except Exception:
+            if max_depth == 0:
+                raise Exception('Failed to fix code', func)
+
+        # We figure out if this pass has succeeded by re-running the tests recursively, where it
+        # ejects from the iteration if the tests pass
+        return await test_and_fix_files(func, files, max_depth - 1)
 
 
 async def main():
@@ -248,7 +371,10 @@ async def main():
     func = f.read()
     f.close()
     files = write_files_from_markdown(await gpt_func_to_python(func))
+    print('Cleaning generated code...')
     await lint_and_fix_files(files)
+    print('Verifying and correcting generated code...')
+    await test_and_fix_files(func, files)
     print('Done!')
 
 
