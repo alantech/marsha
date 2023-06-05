@@ -1,0 +1,12 @@
+# func sort_modules(list of modules where each module has a name and a list of module names it depends on): list of module names where all modules it depends on are before it in the list
+
+This function takes a list of modules, where each module has a name property that is a string and a dependencies property that is a list of strings that are the names of modules it depends on. The set of modules are supposed to be a DAG (Directed Acyclic Graph) such that one or more module is a "root" module with zero dependencies, and zero or more modules depend on other modules but never directly or indirectly depend on themselves.
+
+The function determines an ordering from these "root" modules to the dependent modules such that all of their dependencies come earlier in the list. This allows processing of the modules in list order without needing to worry whether or not any particular module is missing its dependency.
+
+In the case that the dependencies defined are *not* a DAG, it should raise an error describing the cycle found.
+
+* sort_modules([{"name": "a", "dependencies": []}, {"name": "b", "dependencies": ["c"]}, {"name": "c", "dependencies": ["a"]}) = ["a", "c", "b"]
+* sort_modules([{"name": "first_root", "dependencies": []}, {"name": "mid_node", "dependencies": ["first_root", "second_root"]}, {"name": "leaf", "dependencies": ["mid_node", "second_root"]}, {"name": "second_root", "dependencies": []}]) = ["first_root", "second_root", "mid_node", "leaf"]
+* sort_modules([{"name": "a", "dependencies": ["a"]}]) raises an error with the message: "Cycle detected: a -> a"
+* sort_modules([{"name": "a", "dependencies": ["b"]}, {"name": "b", "dependencies": ["c"]}, {"name":: "c", "dependencies": ["a"]}]) raises an error with the message: "Cycle detected: a -> b -> c -> a"

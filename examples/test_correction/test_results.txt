@@ -1,0 +1,35 @@
+F.FF.
+======================================================================
+FAIL: test_basic_mysql (__main__.TestExtractConnectionInfo)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/damocles/alantech/marsha/examples/test/extract_connection_info_test.py", line 20, in test_basic_mysql
+    self.assertEqual(result, expected)
+AssertionError: '{"protocol": "jdbc", "dbUser": null, "dbPassword": null, "h[61 chars]db"}' != '{"protocol": "jdbc:mysql", "dbUser": "user", "dbPassword": [56 chars]db"}'
+- {"protocol": "jdbc", "dbUser": null, "dbPassword": null, "host": null, "port": null, "database": "ysql://0.0.0.0:3306/mydb"}
++ {"protocol": "jdbc:mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb"}
+
+
+======================================================================
+FAIL: test_empty_string (__main__.TestExtractConnectionInfo)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/damocles/alantech/marsha/examples/test/extract_connection_info_test.py", line 30, in test_empty_string
+    self.assertEqual(result, expected)
+AssertionError: {} != '{}'
+
+======================================================================
+FAIL: test_mysql_with_extra (__main__.TestExtractConnectionInfo)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/damocles/alantech/marsha/examples/test/extract_connection_info_test.py", line 25, in test_mysql_with_extra
+    self.assertEqual(result, expected)
+AssertionError: '{"protocol": "jdbc", "dbUser": null, "dbPassword": null, "h[61 chars]db"}' != '{"protocol": "jdbc:mysql", "dbUser": "user", "dbPassword": [85 chars]e"}}'
+- {"protocol": "jdbc", "dbUser": null, "dbPassword": null, "host": null, "port": null, "database": "ysql://0.0.0.0:3306/mydb"}
++ {"protocol": "jdbc:mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": {"ssl": "require"}}
+
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+FAILED (failures=3)
