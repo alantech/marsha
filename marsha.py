@@ -129,7 +129,7 @@ async def gpt_func_to_python(func, retries=3):
             'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. You write up a simple file that imports libraries if necessary and contains the function, and a second file that includes unit tests at the end based on the provided test cases. The filenames should follow the pattern of [function name].py and [function name]_test.py',
         }, {
             'role': 'user',
-            'content': fibonacci_mrsh
+            'content': f'''# Requirements for function {fibonacci_mrsh.split('# func')[1]}'''
         }, {
             'role': 'assistant',
             'content': f'''# fibonnaci.py
@@ -145,7 +145,7 @@ async def gpt_func_to_python(func, retries=3):
 ```'''
         }, {
             'role': 'user',
-            'content': func
+            'content': f'''# Requirements for function {func.split('# func')[1]}'''
         }],
     })
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
@@ -291,7 +291,7 @@ async def test_and_fix_files(func, files, max_depth=10):
                 'content': 'You are a senior software engineer helping a junior engineer fix some code that is failing. You are given the documentation of the function they were assigned to write, followed by the function they wrote, the unit tests they wrote, and the unit test results. There is little time before this feature must be included, so you are simply correcting their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.',
             }, {
                 'role': 'user',
-                'content': f'''{func_correction}
+                'content': f'''# Requirements for function {func_correction.split('# func')[1]}
 
 # extract_connection_info.py
 
@@ -323,7 +323,7 @@ async def test_and_fix_files(func, files, max_depth=10):
 ```''',
             }, {
                 'role': 'user',
-                'content': f'''{func}
+                'content': f'''# Requirements for function {func.split('# func')[1]}
 
 # {code_file}
 
@@ -370,6 +370,7 @@ async def test_and_fix_files(func, files, max_depth=10):
 
 
 async def main():
+    t1 = time.time()
     print('Compiling...')
     f = open(args.source, 'r')
     func = f.read()
@@ -379,7 +380,8 @@ async def main():
     await lint_and_fix_files(files)
     print('Verifying and correcting generated code...')
     await test_and_fix_files(func, files)
-    print('Done!')
+    t2 = time.time()
+    print(f'Done! Total time elapsed: {t2 - t1}')
 
 
 asyncio.run(main())
