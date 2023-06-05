@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -62,6 +63,11 @@ f.close()
 f = open(os.path.join(base_path, 'examples/test_correction/after_test.py'), 'r')
 after_test_correction = f.read()
 f.close()
+
+# Determine what name the user's `python` executable is (`python` or `python3`)
+python = 'python' if shutil.which('python') is not None else 'python3'
+if shutil.which(python) is None:
+    raise Exception('Python not found')
 
 
 async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
@@ -267,9 +273,7 @@ async def test_and_fix_files(func, files, max_depth=10):
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
 
-    # TODO: Do we assume the user has `python` in their $PATH and use that via a shell call,
-    # or do we `eval` the code with our bundled Python interpreter? Going with the former for now
-    test_stream = subprocess.Popen(['python', test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    test_stream = subprocess.Popen([python, test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = test_stream.communicate()
     test_results = f'{stdout}{stderr}'
 
