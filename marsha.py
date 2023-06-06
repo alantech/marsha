@@ -11,6 +11,9 @@ from mistletoe import Document, ast_renderer
 import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
+# Get time at startup to make human legible "start times" in the logs
+t0 = time.time()
+
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
 openai.api_key = os.getenv('OPENAI_SECRET_KEY')
@@ -71,6 +74,19 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
+def prettify_time_delta(delta):
+    if delta < 1:
+        return f'''{format(delta * 1000, '3g')} ms'''
+    elif delta < 60:
+        return f'''{format(delta, '3g')} sec'''
+    elif delta < 3600:
+        return f'''{format(delta / 60, '3g')} min'''
+    elif delta < 86400:
+        return f'''{format(delta / 3600, '3g')} hr'''
+    else:
+        return f'''{format(delta / 86400, '3g')} days'''
+
+
 async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
     t1 = time.time()
     query['model'] = model
@@ -79,7 +95,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             out = await openai.ChatCompletion.acreate(**query)
             t2 = time.time()
             print(
-                f'''Chat query took {(t2 - t1) * 1000}ms, started at {t1}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
+                f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
             return out
         except openai.error.InvalidRequestError as e:
             if e.code == 'context_length_exceeded':
@@ -451,7 +467,7 @@ async def main():
     print('Formatting code...')
     autoformat_files(files)
     t2 = time.time()
-    print(f'Done! Total time elapsed: {t2 - t1}')
+    print(f'Done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
 asyncio.run(main())
