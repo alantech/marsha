@@ -248,14 +248,64 @@ async def lint_and_fix_files(files, max_depth=10):
     if max_depth == 0:
         return
     options = parse_options()
-    # Disabling pydocstyle and mccabe for now
-    # options.linters = ['mccabe', 'pycodestyle', 'pydocstyle', 'pyflakes']
+
+    # Disabling pydocstyle and mccabe as they only do style checks, no compile-like checks
     options.linters = ['pycodestyle', 'pyflakes']
     options.paths = [os.path.abspath(f'./{file}') for file in files]
+
+    # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
+    # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
+    # end, so we have a significant number of warnings and "errors" from the linter we ignore
+    options.ignore = {
+        'E111',  # indentation is not multiple of 4
+        'E117',  # over-indented
+        'E201',  # whitespace after `(`
+        'E202',  # whitespace before `)`
+        'E203',  # whitespace before `,` `;` `:`
+        'E211',  # whitespace before `(`'
+        'E221',  # multiple spaces before operator
+        'E222',  # multiple spaces after operator
+        'E223',  # tab before operator
+        'E224',  # tab after operator
+        'E225',  # missing whitespace around operator
+        'E227',  # missing whitespace around bitwise or shift operator
+        'E228',  # missing whitespace around modulo operator
+        'E231',  # missing whitespace after `,` `;` `:`
+        'E251',  # unexpected spaces around keyword / parameter equals
+        'E261',  # at least two spaces before inline comment
+        'E262',  # inline comment should start with `# `
+        'E265',  # block comment should start with `# `
+        'E266',  # too many `#` for block comment
+        'E271',  # multiple spaces after keyword
+        'E272',  # multiple spaces before keyword
+        'E273',  # tab before keyword
+        'E274',  # tab after keyword
+        'E275',  # space missing after keyword
+        'E301',  # expected 1 blank line, found 0
+        'E302',  # expected 2 blank lines, found 0
+        'E303',  # too many blank lines
+        'E304',  # blank line after function decorator
+        'E305',  # expected 2 blank lines after function or class
+        'E306',  # expected 1 blank line before nested definition
+        'E401',  # multiple imports on one line
+        'E501',  # line too long
+        'E502',  # blackslash redundant between brackets
+        'E701',  # multiple statements on one line (colon)
+        'E702',  # multiple statements on one line (semicolon)
+        'E703',  # statement ends with a semicolon
+        'E731',  # do not assign a lambda expression, use a def
+        'W191',  # indentation contains tabs
+        'W291',  # trailing whitespace
+        'W292',  # no newline at end of file
+        'W293',  # blank line contains whitespace
+        'W391',  # blank line at end of file
+    }
+
     lints = check_paths([os.path.abspath(f'./{file}') for file in files], options=options, rootdir='.')
-    lints = [lint for lint in lints if lint.number != 'E501']
+
     if len(lints) == 0:
         return
+
     jobs = []
     for file in files:
         file_lints = [e.format(DEFAULT_FORMAT) for e in lints if e.filename == file]
@@ -263,6 +313,7 @@ async def lint_and_fix_files(files, max_depth=10):
             lint_text = '\n'.join(file_lints)
             jobs.append(fix_file(file, lint_text))
     await asyncio.gather(*jobs)
+
     await lint_and_fix_files(files, max_depth - 1)
 
 
@@ -376,7 +427,7 @@ async def main():
     func = f.read()
     f.close()
     files = write_files_from_markdown(await gpt_func_to_python(func))
-    print('Cleaning generated code...')
+    print('Parsing generated code...')
     await lint_and_fix_files(files)
     print('Verifying and correcting generated code...')
     await test_and_fix_files(func, files)
