@@ -17,8 +17,8 @@ openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
 # Parse the input arguments (currently only one, the file to compile
 parser = argparse.ArgumentParser(
-        prog='marsha',
-        description='Marsha AI Compiler',
+    prog='marsha',
+    description='Marsha AI Compiler',
 )
 parser.add_argument('source')
 args = parser.parse_args()
@@ -78,11 +78,13 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
         try:
             out = await openai.ChatCompletion.acreate(**query)
             t2 = time.time()
-            print(f'''Chat query took {(t2 - t1) * 1000}ms, started at {t1}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
+            print(
+                f'''Chat query took {(t2 - t1) * 1000}ms, started at {t1}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
             return out
         except openai.error.InvalidRequestError as e:
             if e.code == 'context_length_exceeded':
-                query['model'] = 'gpt-4'  # Try to cover up this error by choosing the bigger, more expensive model
+                # Try to cover up this error by choosing the bigger, more expensive model
+                query['model'] = 'gpt-4'
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
@@ -166,7 +168,7 @@ async def gpt_func_to_python(func, retries=3):
         if not validate_first_stage_markdown(doc, extract_function_name(func)):
             raise Exception('Invalid output format')
         return doc
-    except Exception as e:
+    except Exception:
         if retries > 0:
             return await gpt_func_to_python(func, retries - 1)
         else:
@@ -238,7 +240,7 @@ async def fix_file(filename, lint_text, retries=3):
     try:
         parsed = Document(res.choices[0].message.content)
         write_files_from_markdown(parsed)
-    except:
+    except Exception:
         if retries > 0:
             return await fix_file(filename, lint_text, retries - 1)
         else:
@@ -302,14 +304,16 @@ async def lint_and_fix_files(files, max_depth=10):
         'W391',  # blank line at end of file
     }
 
-    lints = check_paths([os.path.abspath(f'./{file}') for file in files], options=options, rootdir='.')
+    lints = check_paths(
+        [os.path.abspath(f'./{file}') for file in files], options=options, rootdir='.')
 
     if len(lints) == 0:
         return
 
     jobs = []
     for file in files:
-        file_lints = [e.format(DEFAULT_FORMAT) for e in lints if e.filename == file]
+        file_lints = [e.format(DEFAULT_FORMAT)
+                      for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
             jobs.append(fix_file(file, lint_text))
@@ -325,7 +329,8 @@ async def test_and_fix_files(func, files, max_depth=10):
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
 
-    test_stream = subprocess.Popen([python, test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    test_stream = subprocess.Popen(
+        [python, test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = test_stream.communicate()
     test_results = f'{stdout}{stderr}'
 
