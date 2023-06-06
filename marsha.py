@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 
+import autopep8
 from mistletoe import Document, ast_renderer
 import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
@@ -246,7 +247,7 @@ async def fix_file(filename, lint_text, retries=3):
 
 async def lint_and_fix_files(files, max_depth=10):
     if max_depth == 0:
-        return
+        raise Exception('Failed to fix code', files)
     options = parse_options()
 
     # Disabling pydocstyle and mccabe as they only do style checks, no compile-like checks
@@ -319,7 +320,7 @@ async def lint_and_fix_files(files, max_depth=10):
 
 async def test_and_fix_files(func, files, max_depth=10):
     if max_depth == 0:
-        return
+        raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
@@ -420,9 +421,20 @@ async def test_and_fix_files(func, files, max_depth=10):
         return await test_and_fix_files(func, files, max_depth - 1)
 
 
+def autoformat_files(files):
+    for file in files:
+        f = open(file, 'r')
+        before = f.read()
+        f.close()
+        after = autopep8.fix_code(before)
+        f = open(file, 'w')
+        f.write(after)
+        f.close()
+
+
 async def main():
     t1 = time.time()
-    print('Compiling...')
+    print('Generating Python code...')
     f = open(args.source, 'r')
     func = f.read()
     f.close()
@@ -431,6 +443,8 @@ async def main():
     await lint_and_fix_files(files)
     print('Verifying and correcting generated code...')
     await test_and_fix_files(func, files)
+    print('Formatting code...')
+    autoformat_files(files)
     t2 = time.time()
     print(f'Done! Total time elapsed: {t2 - t1}')
 
