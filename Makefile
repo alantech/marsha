@@ -12,3 +12,7 @@ clean:
 .PHONY: install
 install: ./dist/marsha
 	cp ./dist/marsha /usr/local/bin/marsha
+
+.PHONY: format
+format:
+	. ./venv/bin/activate; autopep8 -i marsha.py
