@@ -1,4 +1,4 @@
-./dist/marsha: ./venv ./marsha.py ./marsha.spec
+./dist/marsha: ./venv ./*.py ./marsha.spec
 	. ./venv/bin/activate; pip install -r requirements.txt
 	. ./venv/bin/activate; pyinstaller marsha.py --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ./examples:./examples
 
@@ -15,4 +15,4 @@ install: ./dist/marsha
 
 .PHONY: format
 format:
-	. ./venv/bin/activate; autopep8 -i marsha.py
+	. ./venv/bin/activate; autopep8 -i *.py
