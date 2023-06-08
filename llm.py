@@ -102,10 +102,10 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
 
 
 async def gpt_func_to_python(func, retries=3):
-    res = await retry_chat_completion({
+    reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. You write up a simple file that imports libraries if necessary and contains the function, and a second file that includes unit tests at the end based on the provided test cases. The filenames should follow the pattern of [function name].py and [function name]_test.py',
+            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The filename should exactly match the function name followed by `.py`, eg [function name].py',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -115,9 +115,21 @@ async def gpt_func_to_python(func, retries=3):
 
 ```py
 {fibonacci_py}
-```
-
-# fibonacci_test.py
+```'''
+        }, {
+            'role': 'user',
+            'content': f'''{format_func_for_llm(func)}'''
+        }],
+    }), retry_chat_completion({
+        'messages': [{
+            'role': 'system',
+            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py',
+        }, {
+            'role': 'user',
+            'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
+        }, {
+            'role': 'assistant',
+            'content': f'''# fibonnaci_test.py
 
 ```py
 {fibonacci_test}
@@ -126,12 +138,12 @@ async def gpt_func_to_python(func, retries=3):
             'role': 'user',
             'content': f'''{format_func_for_llm(func)}'''
         }],
-    })
+    }))
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
         # If it fails to parse, it will throw here
-        doc = res.choices[0].message.content
+        doc = reses[0].choices[0].message.content + '\n\n' + reses[1].choices[0].message.content
         # Some validation that the generated file matches the expected format of:
         # # function_name.py
         # ```py
