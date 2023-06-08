@@ -36,45 +36,68 @@ def autoformat_files(files):
 
 async def main():
     t1 = time.time()
-    print('Generating Python code...')
     f = open(args.source, 'r')
     func = f.read()
     f.close()
-    files = write_files_from_markdown(await gpt_func_to_python(func))
-    if args.debug:
-        for file in files:
-            print(file)
-            f = open(file, 'r')
-            print(f.read())
-            f.close()
-            print()
-    print('Parsing generated code...')
-    await lint_and_fix_files(files)
-    if args.debug:
-        for file in files:
-            print(file)
-            f = open(file, 'r')
-            print(f.read())
-            f.close()
-            print()
-    print('Verifying and correcting generated code...')
-    await test_and_fix_files(func, files)
-    if args.debug:
-        for file in files:
-            print(file)
-            f = open(file, 'r')
-            print(f.read())
-            f.close()
-            print()
-    print('Formatting code...')
-    autoformat_files(files)
-    if args.debug:
-        for file in files:
-            print(file)
-            f = open(file, 'r')
-            print(f.read())
-            f.close()
-            print()
+    attempts = 3
+    while attempts:
+        attempts = attempts - 1
+        print('Generating Python code...')
+        md = ''
+        try:
+            md = await gpt_func_to_python(func)
+        except Exception as e:
+            print('First stage failure')
+            print(e)
+            print('Retrying')
+            continue
+        files = write_files_from_markdown(md)
+        if args.debug:
+            for file in files:
+                print(f'# {file}\n')
+                f = open(file, 'r')
+                print(f.read())
+                f.close()
+                print()
+        print('Parsing generated code...')
+        try:
+            await lint_and_fix_files(files)
+        except Exception as e:
+            print('Second stage failure')
+            print(e)
+            print('Retrying')
+            continue
+        if args.debug:
+            for file in files:
+                print(f'# {file}\n')
+                f = open(file, 'r')
+                print(f.read())
+                f.close()
+                print()
+        print('Verifying and correcting generated code...')
+        try:
+            await test_and_fix_files(func, files)
+        except Exception as e:
+            print('Third stage failure')
+            print(e)
+            print('Retrying')
+            continue
+        if args.debug:
+            for file in files:
+                print(f'# {file}\n')
+                f = open(file, 'r')
+                print(f.read())
+                f.close()
+                print()
+        print('Formatting code...')
+        autoformat_files(files)
+        if args.debug:
+            for file in files:
+                print(f'# {file}\n')
+                f = open(file, 'r')
+                print(f.read())
+                f.close()
+                print()
     t2 = time.time()
     print(f'Done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 

@@ -61,17 +61,27 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
-def prettify_time_delta(delta):
+def prettify_time_delta(delta, max_depth=2):
+    if not max_depth:
+        return ''
     if delta < 1:
-        return f'''{format(delta * 1000, '3g')} ms'''
+        return f'''{format(delta * 1000, '3g')}ms'''
     elif delta < 60:
-        return f'''{format(delta, '3g')} sec'''
+        sec = int(delta)
+        subdelta = delta - sec
+        return f'''{format(sec, '2g')}sec {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     elif delta < 3600:
-        return f'''{format(delta / 60, '3g')} min'''
+        mn = int(delta / 60)
+        subdelta = delta - mn * 60
+        return f'''{format(mn, '2g')}min {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     elif delta < 86400:
-        return f'''{format(delta / 3600, '3g')} hr'''
+        hr = int(delta / 3600)
+        subdelta = delta - hr * 3600
+        return f'''{format(hr, '2g')}hr {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     else:
-        return f'''{format(delta / 86400, '3g')} days'''
+        day = int(delta / 86400)
+        subdelta = delta - day * 86400
+        return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
 
 
 async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
@@ -101,11 +111,11 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, retries=3):
+async def gpt_func_to_python(func, retries=4):
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The filename should exactly match the function name followed by `.py`, eg [function name].py',
+            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. These example cases will be used in the unit tests for the function (written by someone else). The filename should exactly match the function name followed by `.py`, eg [function name].py',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -295,7 +305,7 @@ async def lint_and_fix_files(files, max_depth=10):
     await lint_and_fix_files(files, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, max_depth=10):
+async def test_and_fix_files(func, files, max_depth=5):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
