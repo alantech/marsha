@@ -98,6 +98,8 @@ async def main():
                 print(f.read())
                 f.close()
                 print()
+        # Done!
+        attempts = 0
     t2 = time.time()
     print(f'Done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
