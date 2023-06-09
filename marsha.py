@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument('source')
 parser.add_argument('-d', '--debug', action='store_true', help='Turn on debug logging')
+parser.add_argument('-q', '--quick-and-dirty', action='store_true', help='Code generation with no correction stages run')
 args = parser.parse_args()
 
 
@@ -59,6 +60,8 @@ async def main():
                 print(f.read())
                 f.close()
                 print()
+        if args.quick_and_dirty:
+            break
         print('Parsing generated code...')
         try:
             await lint_and_fix_files(files)

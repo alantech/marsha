@@ -62,24 +62,25 @@ if shutil.which(python) is None:
 
 
 def prettify_time_delta(delta, max_depth=2):
+    rnd = round if max_depth == 1 else int
     if not max_depth:
         return ''
     if delta < 1:
         return f'''{format(delta * 1000, '3g')}ms'''
     elif delta < 60:
-        sec = int(delta)
+        sec = rnd(delta)
         subdelta = delta - sec
         return f'''{format(sec, '2g')}sec {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     elif delta < 3600:
-        mn = int(delta / 60)
+        mn = rnd(delta / 60)
         subdelta = delta - mn * 60
         return f'''{format(mn, '2g')}min {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     elif delta < 86400:
-        hr = int(delta / 3600)
+        hr = rnd(delta / 3600)
         subdelta = delta - hr * 3600
         return f'''{format(hr, '2g')}hr {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
     else:
-        day = int(delta / 86400)
+        day = rnd(delta / 86400)
         subdelta = delta - day * 86400
         return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
 
@@ -312,13 +313,23 @@ async def test_and_fix_files(func, files, max_depth=5):
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
 
-    test_stream = subprocess.Popen(
-        [python, test_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = test_stream.communicate()
+    test_stream = await asyncio.create_subprocess_exec(
+        python, test_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout = ''
+    stderr = ''
+    try:
+        stdout, stderr = await asyncio.wait_for(test_stream.communicate(), 60)
+    except asyncio.exceptions.TimeoutError:
+        try:
+            test_stream.kill()
+        except OSError:
+            # Ignore 'no such process' error
+            pass
+        raise
     test_results = f'{stdout}{stderr}'
 
     # Recursively work on fixing the files while the test suite fails, return when complete
-    if "FAILED" in test_results:
+    if "FAILED" in test_results or "Traceback" in test_results:
         f = open(test_file, 'r')
         test = f.read()
         f.close()
