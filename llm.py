@@ -327,7 +327,6 @@ async def test_and_fix_files(func, files, max_depth=8):
             pass
         raise
     test_results = f'''{stdout.decode('utf-8')}{stderr.decode('utf-8')}'''
-    print(test_results)
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
