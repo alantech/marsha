@@ -1,7 +1,8 @@
 import re
 import json
 
-def extract_connection_info(database_url):
+def extract_connection_info(database_url: str) -> dict:
+  """It should extract from the database url all the connection properties in a JSON format."""
   result = {}
 
   if database_url == '':
