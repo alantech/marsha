@@ -306,7 +306,7 @@ async def lint_and_fix_files(files, max_depth=10):
     await lint_and_fix_files(files, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, max_depth=5):
+async def test_and_fix_files(func, files, max_depth=8):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
@@ -314,7 +314,7 @@ async def test_and_fix_files(func, files, max_depth=5):
     code_file = [file for file in files if not file.endswith('_test.py')][0]
 
     test_stream = await asyncio.create_subprocess_exec(
-        python, test_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        python, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout = ''
     stderr = ''
     try:
@@ -326,7 +326,8 @@ async def test_and_fix_files(func, files, max_depth=5):
             # Ignore 'no such process' error
             pass
         raise
-    test_results = f'{stdout}{stderr}'
+    test_results = f'''{stdout.decode('utf-8')}{stderr.decode('utf-8')}'''
+    print(test_results)
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
