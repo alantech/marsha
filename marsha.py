@@ -103,6 +103,8 @@ async def main():
                 print()
         # Done!
         attempts = 0
+    if attempts == 0:
+        raise Exception(f'Failed to generate working code for {func}')
     t2 = time.time()
     print(f'Done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
