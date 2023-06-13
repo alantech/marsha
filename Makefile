@@ -3,7 +3,7 @@
 	. ./venv/bin/activate; pyinstaller marsha.py --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ./examples:./examples
 
 ./venv:
-	(command -v python && python -m venv venv) || (command -v python3 && python3 -m venv venv)
+	(command -v $(python) && $(python) -m venv venv) || (command -v python && python -m venv venv) || (command -v python3 && python3 -m venv venv)
 
 .PHONY: clean
 clean:
