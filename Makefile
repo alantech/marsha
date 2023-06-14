@@ -19,4 +19,4 @@ format:
 
 .PHONY: time
 time: ./dist/marsha .time.sh
-	. ./venv/bin/activate; ./.time.sh $(test)
+	. ./venv/bin/activate; ./.time.py $(test)

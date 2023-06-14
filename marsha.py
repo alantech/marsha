@@ -13,7 +13,7 @@ from parse import write_files_from_markdown
 openai.organization = os.getenv('OPENAI_ORG')
 openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
-# Parse the input arguments (currently only one, the file to compile
+# Parse the input arguments
 parser = argparse.ArgumentParser(
     prog='marsha',
     description='Marsha AI Compiler',
