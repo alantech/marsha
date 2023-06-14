@@ -116,7 +116,17 @@ async def gpt_func_to_python(func, retries=4):
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. These example cases will be used in the unit tests for the function (written by someone else). The description should be included as a docstring and type hints should be included if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py',
+            'content': '''You are a senior software engineer assigned to write a Python 3 function.
+                - The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function.
+                - These example cases will be used in the unit tests for the function (written by someone else).
+                - The description should be included as a docstring and type hints should be included if feasible.
+                - The filename should exactly match the function name followed by `.py`, eg [function name].py.
+                - Make sure to follow pycodestyle guidelines.
+                - Make sure the code passes pylint and pylama checks.
+                - Make sure the code passes pyflakes checks.
+                - Make sure all imports included in the file are necessary and are used.
+                - Make sure there are no unused imports.
+                - Make sure all variables defined are used.''',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -134,7 +144,16 @@ async def gpt_func_to_python(func, retries=4):
     }), retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py',
+            'content': '''You are a senior software engineer assigned to write a unit test suite for a Python 3 function.
+                - The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function.
+                - The unit tests should exactly match the example cases provided.
+                - The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py
+                - Make sure to follow pycodestyle guidelines.
+                - Make sure the code passes pylint and pylama checks.
+                - Make sure the code passes pyflakes checks.
+                - Make sure all imports included in the file are necessary and are used.
+                - Make sure there are no unused imports.
+                - Make sure all variables defined are used.''',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
