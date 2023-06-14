@@ -101,8 +101,9 @@ async def main():
                 print(f.read())
                 f.close()
                 print()
-        # Done!
-        attempts = 0
+        # Done! Add one back to `attempts` to avoid accidentally erroring out on success
+        attempts = attempts + 1
+        break
     if attempts == 0:
         raise Exception(f'Failed to generate working code for {func}')
     t2 = time.time()
