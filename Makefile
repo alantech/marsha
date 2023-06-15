@@ -16,3 +16,7 @@ install: ./dist/marsha
 .PHONY: format
 format:
 	. ./venv/bin/activate; autopep8 -i *.py
+
+.PHONY: time
+time: ./dist/marsha .time.py
+	. ./venv/bin/activate; ./.time.py $(test)
