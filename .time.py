@@ -5,6 +5,8 @@ import math
 import os
 import time
 
+from llm import prettify_time_delta
+
 # Parse the input arguments
 parser = argparse.ArgumentParser(
     prog='.time.py',
@@ -31,4 +33,4 @@ stddev = math.sqrt(sum(square_errors) / 8)
 
 print("Test results")
 print(f'{sum(successes)} / 8 runs successful')
-print(f'Runtime of {avgtime} +/- {stddev}')
+print(f'Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddev)}')
