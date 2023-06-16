@@ -23,6 +23,9 @@ parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
+parser.add_argument('-a', '--attempts', action='store_true',
+                    help='Number of attempts', default=3)
+
 args = parser.parse_args()
 
 
@@ -64,7 +67,7 @@ async def main():
     for func in functions:
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
-        attempts = 3
+        attempts = args.attempts
         while attempts:
             attempts = attempts - 1
             print('Generating Python code...')
