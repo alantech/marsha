@@ -8,7 +8,7 @@ import time
 import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import extract_function_name, validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm
+from parse import extract_function_name, extract_type_name, validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -154,7 +154,8 @@ async def gpt_func_to_python(func, retries=4):
     # try again (or fully error out, for now)
     try:
         # If it fails to parse, it will throw here
-        doc = reses[0].choices[0].message.content + '\n\n' + reses[1].choices[0].message.content
+        doc = reses[0].choices[0].message.content + \
+            '\n\n' + reses[1].choices[0].message.content
         # Some validation that the generated file matches the expected format of:
         # # function_name.py
         # ```py
@@ -417,3 +418,55 @@ async def test_and_fix_files(func, files, max_depth=8):
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
         return await test_and_fix_files(func, files, max_depth - 1)
+
+
+async def gpt_type_to_python(type, retries=2) -> str:
+    res = await retry_chat_completion({
+        'messages': [{
+            'role': 'system',
+            'content': 'You are a senior software engineer assigned to write a Python 3 class. The assignment is written in markdown format, with a markdown title consisting of the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Just return the markdown as is in the example below, do not add any additional code or info.',
+        }, {
+            'role': 'user',
+            'content': '''# type SKU
+            name,price,quantity
+            "Widget",10.00,100
+            "Gadget",20.00,50
+            "Gizmo",30.00,25
+            '''
+        }, {
+            'role': 'assistant',
+            'content': f'''
+            # type SKU
+
+            ```py
+            class SKU:
+                def __init__(self, name, price, quantity):
+                    self.name = name
+                    self.price = price
+                    self.quantity = quantity
+            ```
+'''
+        }, {
+            'role': 'user',
+            'content': f'''{type}'''
+        }],
+    })
+    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
+    # try again (or fully error out, for now)
+    try:
+        # If it fails to parse, it will throw here
+        doc = res.choices[0].message.content
+        # Some validation that the generated file matches the expected format of:
+        # # type Person
+        #
+        # ```py
+        # <insert code here>
+        # ```
+        if not validate_type_markdown(doc, extract_type_name(type)):
+            raise Exception('Invalid output format')
+        return extract_class_definition(doc)
+    except Exception:
+        if retries > 0:
+            return await gpt_type_to_python(type, retries - 1)
+        else:
+            raise Exception('Failed to generate code', type)
