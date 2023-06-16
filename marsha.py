@@ -23,8 +23,7 @@ parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
-parser.add_argument('-a', '--attempts', action='store_true',
-                    help='Number of attempts', default=3)
+parser.add_argument('-a', '--attempts', type=int, default=3)
 
 args = parser.parse_args()
 
