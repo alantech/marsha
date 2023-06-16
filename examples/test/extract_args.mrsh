@@ -1,0 +1,12 @@
+# func extract_args(string): list of arguments
+
+This function extracts all arguments from a given function call string. It returns a list of arguments. It should be able to extract also the arguments from nested functions.
+
+* extract_args('fn()') = []
+* extract_args('sum(a, b)') = ['a', 'b']
+* extract_args('sum(a, sub(b, 0))') = ['a', 'b', 0]
+* extract_args('sum(a, sub(b, id(c)))') = ['a', 'b', 'c']
+* extract_args('') throws a not a function error
+* extract_args('a') throws a not a function error
+* extract_args('what ever string') throws a not a function error
+* extract_args(3) throws an error for invalid type
