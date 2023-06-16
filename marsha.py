@@ -125,9 +125,7 @@ async def main():
             break
         if attempts == 0:
             t2 = time.time()
-            print(
-                f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
-            continue
+            raise Exception(f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
         t2 = time.time()
         print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
