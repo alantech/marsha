@@ -456,7 +456,6 @@ async def gpt_type_to_python(type, retries=2) -> str:
     try:
         # If it fails to parse, it will throw here
         doc = res.choices[0].message.content
-        print(doc)
         # Some validation that the generated file matches the expected format of:
         # # type Person
         #
