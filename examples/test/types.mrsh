@@ -1,0 +1,11 @@
+# type SKU
+brand_id, sku_id, color, type
+20, 10040, 'red', 'shirt'
+50, 10059, 'blue', 'shirt'
+
+# type person
+name, age
+Joe, 20
+Jane, 50
+Felix, 10
+Alex, 60

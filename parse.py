@@ -84,7 +84,8 @@ def format_func_for_llm(func):
                 raise Exception('Invalid Marsha function')
             header = child['children'][0]['content']
             name = header.split('(')[0].split('func')[1].strip()
-            args = [arg.strip() for arg in header.split('(')[1].split(')')[0].split(',')]
+            args = [arg.strip()
+                    for arg in header.split('(')[1].split(')')[0].split(',')]
             ret = header.split('):')[1].strip()
             continue
         if child['type'] == 'List':
@@ -92,7 +93,8 @@ def format_func_for_llm(func):
             reqs = to_markdown(child)
             continue
         if list_started:
-            raise Exception('Function description must come *before* usage examples')
+            raise Exception(
+                'Function description must come *before* usage examples')
         desc_parts.append(to_markdown(child))
     desc = '\n\n'.join(desc_parts)
 
@@ -174,16 +176,42 @@ def write_files_from_markdown(md):
             f.close()
     return filenames
 
+
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str]]:
     res = ([], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\('
-    # TODO: handle types
-    # type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*'
+    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*'
     for section in sections:
         if re.match(func_regex, section):
             res[0].append(f'# {section.lstrip()}')
-        # TODO: handle types
-        # elif re.match(type_regex, section):
-        #     res[1].append(f'# {section.lstrip()}')
+        elif re.match(type_regex, section):
+            res[1].append(f'# {section.lstrip()}')
     return res
+
+
+def extract_type_name(type):
+    ast = ast_renderer.get_ast(Document(type))
+    if ast['children'][0]['type'] != 'Heading':
+        raise Exception('Invalid Marsha type')
+    header = ast['children'][0]['children'][0]['content']
+    return header.split('(')[0].split('type')[1].strip()
+
+
+def validate_type_markdown(md, type_name):
+    ast = ast_renderer.get_ast(Document(md))
+    print(ast)
+    if len(ast['children']) != 2:
+        return False
+    if ast['children'][0]['type'] != 'Heading':
+        return False
+    if ast['children'][1]['type'] != 'CodeFence':
+        return False
+    if ast['children'][0]['children'][0]['content'].strip() != f'type {type_name}':
+        return False
+    return True
+
+
+def extract_class_definition(md):
+    ast = ast_renderer.get_ast(Document(md))
+    return ast['children'][1]['children'][0]['content'].strip()
