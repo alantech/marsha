@@ -1,3 +1,5 @@
+import re
+
 from mistletoe import Document, ast_renderer
 
 
@@ -171,3 +173,17 @@ def write_files_from_markdown(md):
             f.write(filedata)
             f.close()
     return filenames
+
+def extract_functions_and_types(file: str) -> tuple[list[str], list[str]]:
+    res = ([], [])
+    sections = file.split('#')
+    func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\('
+    # TODO: handle types
+    # type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*'
+    for section in sections:
+        if re.match(func_regex, section):
+            res[0].append(f'# {section.lstrip()}')
+        # TODO: handle types
+        # elif re.match(type_regex, section):
+        #     res[1].append(f'# {section.lstrip()}')
+    return res
