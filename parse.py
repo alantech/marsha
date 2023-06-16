@@ -200,7 +200,6 @@ def extract_type_name(type):
 
 def validate_type_markdown(md, type_name):
     ast = ast_renderer.get_ast(Document(md))
-    print(ast)
     if len(ast['children']) != 2:
         return False
     if ast['children'][0]['type'] != 'Heading':
