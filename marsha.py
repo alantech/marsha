@@ -55,6 +55,7 @@ async def main():
     marsha_file = f.read()
     f.close()
     functions, types = extract_functions_and_types(marsha_file)
+    classes_defined = None
     if len(types) > 0:
         classes_defined = await process_types(types)
         if args.debug:
@@ -62,7 +63,6 @@ async def main():
                 print(f'# type {key}\n')
                 print(value)
                 print()
-    # TODO: use classes_defined in function generation if necessary
     for func in functions:
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
