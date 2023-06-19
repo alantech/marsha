@@ -112,7 +112,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, retries=4):
+async def gpt_func_to_python(func, retries=4, debug=False):
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
@@ -166,11 +166,15 @@ async def gpt_func_to_python(func, retries=4):
         # <insert code here>
         # ```
         if not validate_first_stage_markdown(doc, extract_function_name(func)):
+            if debug:
+                print(f'''Invalid doc = {doc}''')
             raise Exception('Invalid output format')
         return doc
     except Exception:
+        if debug:
+            print(f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, retries - 1)
+            return await gpt_func_to_python(func, retries=retries - 1)
         else:
             raise Exception('Failed to generate code', func)
 
