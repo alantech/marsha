@@ -72,7 +72,7 @@ async def main():
             print('Generating Python code...')
             md = ''
             try:
-                md = await gpt_func_to_python(func)
+                md = await gpt_func_to_python(func, types=classes_defined)
             except Exception as e:
                 print('First stage failure')
                 print(e)
