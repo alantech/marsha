@@ -115,7 +115,7 @@ def format_func_for_llm(func, defined_classes: list = None):
 
 {desc}
 
-{defined_classes is not None and len(defined_classes) > 0 and f"""## Defined classes
+{defined_classes is not None and len(defined_classes) > 0 and f"""## Must include the following classes
 {break_line.join(defined_classes)}""" or ""
 }
 
