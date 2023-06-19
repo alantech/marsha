@@ -126,7 +126,7 @@ async def gpt_func_to_python(func, types: dict=None, retries=4):
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. These example cases will be used in the unit tests for the function (written by someone else). The description should be included as a docstring and type hints should be included if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Make sure to use `Defined classes` exactly as shown if section is present.',
+            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
