@@ -19,6 +19,7 @@ args = parser.parse_args()
 exitcodes = []
 times = []
 for i in range(8):
+    print(f'Run {i + 1} / 8')
     t_1 = time.time()
     exitcode = os.system(f'./dist/marsha {args.source} -a {args.attempts}')
     t_2 = time.time()
