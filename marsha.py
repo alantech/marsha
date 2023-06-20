@@ -67,12 +67,14 @@ async def main():
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
         attempts = args.attempts
+        if args.debug:
+            print(f'Number of attempts: {attempts}')
         while attempts:
             attempts = attempts - 1
             print('Generating Python code...')
             md = ''
             try:
-                md = await gpt_func_to_python(func, types=classes_defined)
+                md = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
             except Exception as e:
                 print('First stage failure')
                 print(e)
