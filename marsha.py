@@ -107,7 +107,7 @@ async def main():
                     print()
             print('Verifying and correcting generated code...')
             try:
-                await test_and_fix_files(func, files)
+                await test_and_fix_files(func, files, debug=args.debug)
             except Exception as e:
                 print('Third stage failure')
                 print(e)

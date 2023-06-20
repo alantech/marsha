@@ -126,7 +126,13 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
+            'content': '''
+                - You are a senior software engineer assigned to write a Python 3 function.
+                - The assignment is written in markdown format.
+                - The description should be included as a docstring.
+                - Add type hints if feasible.
+                - The filename should exactly match the function name followed by `.py`, eg [function name].py.
+                - Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.''',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -144,7 +150,14 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
     }), retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py. Unknown imports might come from the file where the function is defined, or from the standard library.',
+            'content': '''
+                - You are a senior software engineer assigned to write a unit test suite for a Python 3 function.
+                - The assignment is written in markdown format.
+                - The unit tests should exactly match the example cases provided.
+                - Add type hints if feasible.
+                - The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py.
+                - Unknown imports might come from the file where the function is defined, or from the standard library.
+                - Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.''',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -196,7 +209,11 @@ async def fix_file(filename, lint_text, retries=3):
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer working on a Python 3 function. You are using the pylama linting tool to find obvious errors and then fixing them. It uses pyflakes and pycodestyle under the hood to provide its recommendations, and all of the lint errors require fixing.',
+            'content': '''
+                - You are a senior software engineer assigned to fix linting errors on a Python 3 file.
+                - The assignment is written in markdown format.
+                - The recommendations and lint errors come from `pyflakes` and `pycodestyle`, and all of the lint errors require fixing.
+                - Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.''',
         }, {
             'role': 'user',
             'content': f'''# extract_connection_info.py
@@ -321,7 +338,7 @@ async def lint_and_fix_files(files, max_depth=10):
     await lint_and_fix_files(files, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, max_depth=8):
+async def test_and_fix_files(func, files, max_depth=8, debug=False):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
@@ -354,7 +371,17 @@ async def test_and_fix_files(func, files, max_depth=8):
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
-                'content': 'You are a senior software engineer helping a junior engineer fix some code that is failing. You are given the documentation of the function they were assigned to write, followed by the function they wrote, the unit tests they wrote, and the unit test results. There is little time before this feature must be included, so you are simply correcting their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.',
+                'content': '''
+                    - You are a senior software engineer helping a junior engineer fix some code that is failing.
+                    - The assignment is written in markdown, and the code is written in Python 3.
+                    - You are given the initial requirements for the function.
+                    - You are given the function they wrote.
+                    - Ypu are given the unit tests they wrote.
+                    - You are given the unit test results. 
+                    - Your assignment is to correct their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.
+                    - Keep the description as a docstring.
+                    - Keep type hints if feasible.
+                    - Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.''',
             }, {
                 'role': 'user',
                 'content': f'''{format_func_for_llm(func_correction)}
@@ -423,6 +450,8 @@ async def test_and_fix_files(func, files, max_depth=8):
             # <insert code here>
             # ```
             if not validate_first_stage_markdown(doc, extract_function_name(func)):
+                if debug:
+                    print(f'Invalid output format: {doc}')
                 raise Exception('Invalid output format')
             write_files_from_markdown(doc)
         except Exception:
@@ -431,7 +460,7 @@ async def test_and_fix_files(func, files, max_depth=8):
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(func, files, max_depth - 1)
+        return await test_and_fix_files(func, files, max_depth - 1, debug)
 
 
 async def gpt_type_to_python(type, retries=2) -> str:
@@ -442,33 +471,31 @@ async def gpt_type_to_python(type, retries=2) -> str:
         }, {
             'role': 'user',
             'content': '''# type SKU
-            name,price,quantity
-            "Widget",10.00,100
-            "Gadget",20.00,50
-            "Gizmo",30.00,25
+name,price,quantity
+"Widget",10.00,100
+"Gadget",20.00,50
+"Gizmo",30.00,25
             '''
         }, {
             'role': 'assistant',
-            'content': f'''
-            # type SKU
+            'content': f'''# type SKU
 
-            ```py
-            class SKU:
-                def __init__(self, name, price, quantity):
-                    self.name = name
-                    self.price = price
-                    self.quantity = quantity
+```py
+class SKU:
+    def __init__(self, name, price, quantity):
+        self.name = name
+        self.price = price
+        self.quantity = quantity
 
-                def __repr__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __repr__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __str__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __str__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __eq__(self, other):
-                    return self.name == other.name and self.price == other.price and self.quantity == other.quantity
-            ```
-'''
+    def __eq__(self, other):
+        return self.name == other.name and self.price == other.price and self.quantity == other.quantity
+```'''
         }, {
             'role': 'user',
             'content': f'''{type}'''
