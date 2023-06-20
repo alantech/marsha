@@ -112,11 +112,21 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, retries=4):
+async def gpt_func_to_python(func, types: dict=None, retries=4):
+    defined_classes = list()
+    if types is not None and len(types.keys()) > 0:
+        # look if the func uses any of the types
+        for type in types.keys():
+            if type in func:
+                # if so, we update the prompt to include the python class definition and use it in the completion
+                defined_classes.append(types[type])
+    
+    func_for_llm = format_func_for_llm(func, defined_classes)
+
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. These example cases will be used in the unit tests for the function (written by someone else). The description should be included as a docstring and type hints should be included if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py',
+            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -129,12 +139,12 @@ async def gpt_func_to_python(func, retries=4):
 ```'''
         }, {
             'role': 'user',
-            'content': f'''{format_func_for_llm(func)}'''
+            'content': f'''{func_for_llm}'''
         }],
     }), retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py',
+            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py. Unknown imports might come from the file where the function is defined, or from the standard library.',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -147,7 +157,7 @@ async def gpt_func_to_python(func, retries=4):
 ```'''
         }, {
             'role': 'user',
-            'content': f'''{format_func_for_llm(func)}'''
+            'content': f'''{func_for_llm}'''
         }],
     }))
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
@@ -170,7 +180,7 @@ async def gpt_func_to_python(func, retries=4):
         return doc
     except Exception:
         if retries > 0:
-            return await gpt_func_to_python(func, retries - 1)
+            return await gpt_func_to_python(func, types=types, retries=retries - 1)
         else:
             raise Exception('Failed to generate code', func)
 
@@ -424,7 +434,7 @@ async def gpt_type_to_python(type, retries=2) -> str:
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 class. The assignment is written in markdown format, with a markdown title consisting of the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Just return the markdown as is in the example below, do not add any additional code or info.',
+            'content': 'You are a senior software engineer assigned to write a Python 3 class. The assignment is written in markdown format, with a markdown title consisting of the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Just return the markdown as is in the example below, do not add any additional code or info. Make sure to add the __str__, __repr__, and __eq__ methods to the class.',
         }, {
             'role': 'user',
             'content': '''# type SKU
@@ -444,6 +454,15 @@ async def gpt_type_to_python(type, retries=2) -> str:
                     self.name = name
                     self.price = price
                     self.quantity = quantity
+
+                def __repr__(self):
+                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+
+                def __str__(self):
+                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+
+                def __eq__(self, other):
+                    return self.name == other.name and self.price == other.price and self.quantity == other.quantity
             ```
 '''
         }, {
