@@ -67,7 +67,8 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_func_for_llm(func):
+def format_func_for_llm(func, defined_classes: list = None):
+    break_line = '\n'
     ast = ast_renderer.get_ast(Document(func))
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha function')
@@ -113,6 +114,10 @@ def format_func_for_llm(func):
 ## Description
 
 {desc}
+
+{defined_classes is not None and len(defined_classes) > 0 and f"""## Must include the following classes
+{break_line.join(defined_classes)}""" or ""
+}
 
 ## Examples of expected behavior
 
@@ -206,7 +211,7 @@ def validate_type_markdown(md, type_name):
         return False
     if ast['children'][1]['type'] != 'CodeFence':
         return False
-    if ast['children'][0]['children'][0]['content'].strip() != f'type {type_name}':
+    if ast['children'][0]['children'][0]['content'].strip().lower() != f'type {type_name}'.lower():
         return False
     return True
 

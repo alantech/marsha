@@ -1,0 +1,18 @@
+# type person
+name, age
+Joe, 20
+Jane, 50
+Felix, 10
+Alex, 60
+
+# func sort_by_age(person list, ascending boolean flag): person list ordered by age
+
+This function receives a list of `person` objects and return them ordered by age ascending or descending depending on the boolean flag. The default value for the ascending flag is true.
+
+* sort_by_age([person('Joe', 20)]) = [person('Joe', 20)]
+* sort_by_age([person('Joe', 20)], false) = [person('Joe', 20)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)]) = [person('Felix', 10), person('Joe', 20), person('Jane', 50), person('Alex', 60)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)], true) = [person('Felix', 10), person('Joe', 20), person('Jane', 50), person('Alex', 60)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)], false) = [person('Alex', 60), person('Jane', 50), person('Joe', 20), person('Felix', 10)]
+* sort_by_age([]) = []
+* sort_by_age() = throws a no list received error
