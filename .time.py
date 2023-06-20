@@ -13,13 +13,14 @@ parser = argparse.ArgumentParser(
     description='Time the execution of Marsha on the same source multiple times'
 )
 parser.add_argument('source')
+parser.add_argument('attempts', type=int, default=3)
 args = parser.parse_args()
 
 exitcodes = []
 times = []
 for i in range(8):
     t_1 = time.time()
-    exitcode = os.system(f'./dist/marsha {args.source}')
+    exitcode = os.system(f'./dist/marsha {args.source} -a {args.attempts}')
     t_2 = time.time()
     testtime = t_2 - t_1
     exitcodes.append(exitcode)
