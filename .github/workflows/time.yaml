@@ -8,6 +8,10 @@ on:
         description: "Marsha test to run"
         required: true
         default: "./examples/test/sort_modules.mrsh"
+      attempts:
+        description: "Number of attempts to run the test"
+        required: true
+        default: 1
 
 jobs:
   run:
@@ -21,7 +25,6 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
       - name: Run time script
-        run: make attempts=1 test=${{test}} time
+        run: make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} time
         env:
-          test: ${{ github.event.inputs.test }}
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
