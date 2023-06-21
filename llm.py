@@ -167,15 +167,15 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
     # try again (or fully error out, for now)
 
     try:
-        doc = ''
+        mds = list()
         for i in range(n_results):
-            tmp = reses[0].choices[i].message.content + \
+            doc = reses[0].choices[i].message.content + \
                 '\n\n' + reses[1].choices[i].message.content
-            if validate_first_stage_markdown(tmp, extract_function_name(func)):
-                doc = doc + '\n\n' + tmp.replace(f'# {func_name}.py', f'# {func_name}_{i}.py').replace(f'# {func_name}_test.py', f'# {func_name}_{i}_test.py')
+            if validate_first_stage_markdown(doc, extract_function_name(func)):
+                mds.append(doc)
             else:
                 if debug:
-                    print(f'''Invalid doc = {tmp}''')
+                    print(f'''Invalid doc = {doc}''')
         # If it fails to parse, it will throw here
         # doc = reses[0].choices[0].message.content + \
         #     '\n\n' + reses[1].choices[0].message.content
@@ -188,10 +188,9 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
         # ```py
         # <insert code here>
         # ```
-        if doc == '':
+        if len(mds) == 0:
             raise Exception('Invalid output format')
-        print(f'Generated doc = {doc}')
-        return doc
+        return mds
     except Exception:
         if debug:
             print(f'Failed to parse doc. Retries left = {retries}. Retrying...')
