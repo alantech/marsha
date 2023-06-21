@@ -48,6 +48,47 @@ async def process_types(types: list[str]) -> dict:
         classes_defined[type_name] = class_defined
     return classes_defined
 
+async def fix_files_func(files, func):
+    print('Parsing generated code...')
+    try:
+        await lint_and_fix_files(files)
+    except Exception as e:
+        print('Second stage failure')
+        print(e)
+        print('Retrying')
+        # continue
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n')
+            f = open(file, 'r')
+            print(f.read())
+            f.close()
+            print()
+    print('Verifying and correcting generated code...')
+    try:
+        await test_and_fix_files(func, files)
+    except Exception as e:
+        print('Third stage failure')
+        print(e)
+        print('Retrying')
+        # continue
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n')
+            f = open(file, 'r')
+            print(f.read())
+            f.close()
+            print()
+    print('Formatting code...')
+    autoformat_files(files)
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n')
+            f = open(file, 'r')
+            print(f.read())
+            f.close()
+            print()
+
 
 async def main():
     t1 = time.time()
@@ -90,45 +131,30 @@ async def main():
                     print()
             if args.quick_and_dirty:
                 break
-            print('Parsing generated code...')
-            try:
-                await lint_and_fix_files(files)
-            except Exception as e:
-                print('Second stage failure')
-                print(e)
-                print('Retrying')
-                continue
-            if args.debug:
-                for file in files:
-                    print(f'# {file}\n')
-                    f = open(file, 'r')
-                    print(f.read())
-                    f.close()
-                    print()
-            print('Verifying and correcting generated code...')
-            try:
-                await test_and_fix_files(func, files)
-            except Exception as e:
-                print('Third stage failure')
-                print(e)
-                print('Retrying')
-                continue
-            if args.debug:
-                for file in files:
-                    print(f'# {file}\n')
-                    f = open(file, 'r')
-                    print(f.read())
-                    f.close()
-                    print()
-            print('Formatting code...')
-            autoformat_files(files)
-            if args.debug:
-                for file in files:
-                    print(f'# {file}\n')
-                    f = open(file, 'r')
-                    print(f.read())
-                    f.close()
-                    print()
+            # Create a new list of files having the i and i+1 files together
+            # This is because we want to run the linting and testing in parallel
+            # but we need to make sure that the linting and testing is done on
+            # the same files (func and test) together
+            files = [files[i:i + 2] for i in range(0, len(files), 2)]
+            # Run in parallel using asyncio
+            tasks = []
+            for f_list in files:
+                tasks.append(fix_files_func(f_list, func))
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            print(f'Number of tasks: {len(tasks)}')
+            print(f'Number of done tasks: {len(done)}')
+            print(f'Number of pending tasks: {len(pending)}')
+            for task in pending:
+                task.cancel()
+            # Check if any if the returned tasks errored out
+            for task in done:
+                if task.exception() is not None:
+                    print('Error in task')
+                    print(task.exception())
+                    print('Retrying')
+                    continue
+                else:
+                    print('Task completed successfully')
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
             attempts = attempts + 1
             break
