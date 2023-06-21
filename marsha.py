@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import shutil
 import time
 
 import autopep8
@@ -38,6 +39,15 @@ def autoformat_files(files):
         f.write(after)
         f.close()
 
+
+def copy_file(src, dest):
+    shutil.copyfile(src, dest)
+
+def delete_dir_and_content(filename):
+    dir = os.path.dirname(filename)
+    if os.path.isdir(dir):
+        print(f'Deleting {dir}')
+        shutil.rmtree(dir)
 
 async def process_types(types: list[str]) -> dict:
     classes_defined = {}
@@ -113,15 +123,21 @@ async def main():
         while attempts:
             attempts = attempts - 1
             print('Generating Python code...')
-            md = ''
+            mds = None
             try:
-                md = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
+                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
             except Exception as e:
                 print('First stage failure')
                 print(e)
                 print('Retrying')
                 continue
-            files = write_files_from_markdown(md)
+            print(f'number of mds: {len(mds)}')
+            print(f'mds: {mds}')
+            files = list()
+            for idx, md in enumerate(mds):
+                print('Writing generated code to files...')
+                files = files + write_files_from_markdown(md, sub_dir=f'{func_name}_{idx}')
+            print(f'files: {files}')
             if args.debug:
                 for file in files:
                     print(f'# {file}\n')
@@ -130,22 +146,27 @@ async def main():
                     f.close()
                     print()
             if args.quick_and_dirty:
+                # TODO: maybe just keep the first file?
                 break
             # Create a new list of files having the i and i+1 files together
             # This is because we want to run the linting and testing in parallel
             # but we need to make sure that the linting and testing is done on
             # the same files (func and test) together
             files = [files[i:i + 2] for i in range(0, len(files), 2)]
+            print(f'files grouped: {files}')
             # Run in parallel using asyncio
             tasks = []
             for f_list in files:
-                tasks.append(fix_files_func(f_list, func))
+                tasks.append(asyncio.create_task(fix_files_func(f_list, func), name=f_list[0]))
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             print(f'Number of tasks: {len(tasks)}')
             print(f'Number of done tasks: {len(done)}')
             print(f'Number of pending tasks: {len(pending)}')
             for task in pending:
                 task.cancel()
+                filename = task.get_name()
+                test_filename = filename.replace('.py', '_test.py')
+                delete_dir_and_content(filename)
             # Check if any if the returned tasks errored out
             for task in done:
                 if task.exception() is not None:
@@ -156,6 +177,12 @@ async def main():
                 else:
                     print('Task completed successfully')
                     # TODO: If task done, write the final file to disk, delete the intermediate files and break in case another task also completed successfully
+                    filename = task.get_name()
+                    test_filename = filename.replace('.py', '_test.py')
+                    copy_file(filename, f'{func_name}.py')
+                    copy_file(test_filename, f'{func_name}_test.py')
+                    delete_dir_and_content(filename)
+                    break
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
             attempts = attempts + 1
             break
