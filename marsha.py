@@ -155,6 +155,7 @@ async def main():
                     continue
                 else:
                     print('Task completed successfully')
+                    # TODO: If task done, write the final file to disk, delete the intermediate files and break in case another task also completed successfully
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
             attempts = attempts + 1
             break
