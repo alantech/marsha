@@ -85,9 +85,10 @@ def prettify_time_delta(delta, max_depth=2):
         return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
 
 
-async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
+async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_results=1):
     t1 = time.time()
     query['model'] = model
+    query['n'] = n_results
     while True:
         try:
             out = await openai.ChatCompletion.acreate(**query)
@@ -113,7 +114,9 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3):
 
 
 async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
+    n_results = 4
     defined_classes = list()
+    func_name = extract_function_name(func)
     if types is not None and len(types.keys()) > 0:
         # look if the func uses any of the types
         for type in types.keys():
@@ -141,7 +144,7 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
-    }), retry_chat_completion({
+    }, n_results=n_results), retry_chat_completion({
         'messages': [{
             'role': 'system',
             'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py. Unknown imports might come from the file where the function is defined, or from the standard library.',
@@ -159,13 +162,23 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
-    }))
+    }, n_results=n_results))
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
+
     try:
+        doc = ''
+        for i in range(n_results):
+            tmp = reses[0].choices[i].message.content + \
+                '\n\n' + reses[1].choices[i].message.content
+            if validate_first_stage_markdown(tmp, extract_function_name(func)):
+                doc = doc + '\n\n' + tmp.replace(f'# {func_name}.py', f'# {func_name}_{i}.py').replace(f'# {func_name}_test.py', f'# {func_name}_{i}_test.py')
+            else:
+                if debug:
+                    print(f'''Invalid doc = {tmp}''')
         # If it fails to parse, it will throw here
-        doc = reses[0].choices[0].message.content + \
-            '\n\n' + reses[1].choices[0].message.content
+        # doc = reses[0].choices[0].message.content + \
+        #     '\n\n' + reses[1].choices[0].message.content
         # Some validation that the generated file matches the expected format of:
         # # function_name.py
         # ```py
@@ -175,10 +188,9 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
         # ```py
         # <insert code here>
         # ```
-        if not validate_first_stage_markdown(doc, extract_function_name(func)):
-            if debug:
-                print(f'''Invalid doc = {doc}''')
+        if doc == '':
             raise Exception('Invalid output format')
+        print(f'Generated doc = {doc}')
         return doc
     except Exception:
         if debug:
