@@ -435,7 +435,8 @@ async def test_and_fix_files(func, files, max_depth=8):
             # ```
             if not validate_first_stage_markdown(doc, extract_function_name(func)):
                 raise Exception('Invalid output format')
-            write_files_from_markdown(doc)
+            subdir = '/'.join(code_file.split('/')[:-1])
+            write_files_from_markdown(doc, sub_dir=subdir)
         except Exception:
             if max_depth == 0:
                 raise Exception('Failed to fix code', func)
