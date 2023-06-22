@@ -125,28 +125,6 @@ async def await_tasks(tasks) -> str:
         if done_task is not None and done_task.exception() is not None:
             raise done_task.exception()
         raise Exception('No task completed successfully')
-    # else:
-    #     for task in pending:
-    #         task.cancel()
-    #         filename = task.get_name()
-    #         test_filename = filename.replace('.py', '_test.py')
-    #         delete_dir_and_content(filename)
-
-    #         # wait for pending tasks to finish
-    #         print('Error in task')
-    #         print(task.exception())
-    #         print('Waiting for the rest of the tasks to finish')
-    #         await asyncio.wait(pending)
-    #         continue
-
-    #         print('Task completed successfully')
-    #         # # TODO: If task done, write the final file to disk, delete the intermediate files and break in case another task also completed successfully
-    #         # filename = task.get_name()
-    #         # test_filename = filename.replace('.py', '_test.py')
-    #         # copy_file(filename, f'{func_name}.py')
-    #         # copy_file(test_filename, f'{func_name}_test.py')
-    #         # delete_dir_and_content(filename)
-    #         break
 
 async def main():
     t1 = time.time()
