@@ -65,8 +65,6 @@ async def fix_files_func(files, func):
     except Exception as e:
         print('Second stage failure')
         print(e)
-        print('Retrying')
-        # continue
         raise e
     if args.debug:
         for file in files:
@@ -81,8 +79,6 @@ async def fix_files_func(files, func):
     except Exception as e:
         print('Third stage failure')
         print(e)
-        print('Retrying')
-        # continue
         raise e
     if args.debug:
         for file in files:
@@ -102,29 +98,23 @@ async def fix_files_func(files, func):
             print()
 
 
-async def await_tasks(tasks) -> str:
-    print('Waiting for tasks to finish...')
+async def run_parallel_tasks(tasks) -> str:
+    print('Running tasks in parallel...')
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    print(f'Number of tasks: {len(tasks)}')
-    print(f'Number of done tasks: {len(done)}')
-    print(f'Number of pending tasks: {len(pending)}')
-    # Get done task
     done_task = done.pop()
     if done_task.exception() is None:
-        print('Task completed successfully')
-        for task in pending:
+        print('Task completed successfully. Cancelling the rest of the tasks...')
+        for task in pending if pending is not None else []:
             task.cancel()
         return done_task.get_name()
     elif len(pending) > 0:
-        print('Error in task')
-        print('Waiting for the rest of the tasks to finish')
-        return await await_tasks(pending)
+        print('Task completed with error. Waiting for the rest of the tasks to finish...')
+        return await run_parallel_tasks(pending)
     else:
-        print('Error in task')
-        print(done_task.exception())
+        print('All tasks failed. Raising exception...')
         if done_task is not None and done_task.exception() is not None:
             raise done_task.exception()
-        raise Exception('No task completed successfully')
+        raise Exception('All tasks failed.')
 
 async def main():
     t1 = time.time()
@@ -159,51 +149,48 @@ async def main():
                 print(e)
                 print('Retrying')
                 continue
-            files = list()
+            if args.quick_and_dirty:
+                for md in mds[:2]:
+                    write_files_from_markdown(md)
+                break
+            filenames = list()
             for idx, md in enumerate(mds):
                 print('Writing generated code to files...')
-                files = files + write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
-            print(f'files: {files}')
+                filenames = filenames + write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
             if args.debug:
-                for file in files:
-                    print(f'# {file}\n')
-                    f = open(file, 'r')
+                for filename in filenames:
+                    print(f'# {filename}\n')
+                    f = open(filename, 'r')
                     print(f.read())
                     f.close()
                     print()
-            if args.quick_and_dirty:
-                # TODO: maybe just keep the first file?
-                break
             # Create a new list of files having the i and i+1 files together
             # This is because we want to run the linting and testing in parallel
             # but we need to make sure that the linting and testing is done on
             # the same files (func and test) together
-            files = [files[i:i + 2] for i in range(0, len(files), 2)]
-            print(f'files grouped: {files}')
-            # Run in parallel using asyncio
+            files_grouped = [filenames[i:i + 2] for i in range(0, len(filenames), 2)]
+            # Create tasks to run in parallel using asyncio
             tasks = []
-            for f_list in files:
-                tasks.append(asyncio.create_task(fix_files_func(f_list, func), name=f_list[0]))
+            for file_group in files_grouped:
+                tasks.append(asyncio.create_task(fix_files_func(file_group, func), name=file_group[0]))
             task_names = [task.get_name() for task in tasks]
             try:
-                done = await await_tasks(tasks)
+                done_task_name = await run_parallel_tasks(tasks)
                 for name in task_names:
-                    if name != done:
+                    if name != done_task_name:
                         delete_dir_and_content(name)
                     else:
                         filename = name
                         test_filename = filename.replace('.py', '_test.py')
-                        print('------- Task completed successfully, writing files to disk')
                         copy_file(filename, f'{func_name}.py')
                         copy_file(test_filename, f'{func_name}_test.py')
-                        print('------- Deleting intermediate files')
                         delete_dir_and_content(filename)
             except Exception as e:
-                print('Second or third stage failure')
+                print('Failed to generate working code.')
                 print(e)
-                print('Deleting files and retrying')
                 for name in task_names:
                     delete_dir_and_content(name)
+                print('Retrying...')
                 continue
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
             attempts = attempts + 1
