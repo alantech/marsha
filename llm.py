@@ -115,7 +115,6 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
 
 async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug=False):
     defined_classes = list()
-    func_name = extract_function_name(func)
     if types is not None and len(types.keys()) > 0:
         # look if the func uses any of the types
         for type in types.keys():
