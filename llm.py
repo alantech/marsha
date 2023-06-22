@@ -113,7 +113,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug=False):
+async def gpt_func_to_python(func, n_results, types: dict = None, retries=4, debug=False):
     defined_classes = list()
     if types is not None and len(types.keys()) > 0:
         # look if the func uses any of the types
@@ -121,7 +121,7 @@ async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug
             if type in func:
                 # if so, we update the prompt to include the python class definition and use it in the completion
                 defined_classes.append(types[type])
-    
+
     func_for_llm = format_func_for_llm(func, defined_classes)
 
     reses = await asyncio.gather(retry_chat_completion({
@@ -187,7 +187,8 @@ async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug
         return mds
     except Exception:
         if debug:
-            print(f'Failed to parse doc. Retries left = {retries}. Retrying...')
+            print(
+                f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
             return await gpt_func_to_python(func, n_results, types, retries - 1, debug)
         else:

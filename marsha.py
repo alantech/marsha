@@ -44,10 +44,12 @@ def autoformat_files(files):
 def copy_file(src, dest):
     shutil.copyfile(src, dest)
 
+
 def delete_dir_and_content(filename):
     dir = os.path.dirname(filename)
     if os.path.isdir(dir):
         shutil.rmtree(dir)
+
 
 async def process_types(types: list[str]) -> dict:
     classes_defined = {}
@@ -57,6 +59,7 @@ async def process_types(types: list[str]) -> dict:
         class_defined = await gpt_type_to_python(type)
         classes_defined[type_name] = class_defined
     return classes_defined
+
 
 async def fix_files_func(files, func):
     print('Parsing generated code...')
@@ -116,6 +119,7 @@ async def run_parallel_tasks(tasks) -> str:
             raise done_task.exception()
         raise Exception('All tasks failed.')
 
+
 async def main():
     t1 = time.time()
     f = open(args.source, 'r')
@@ -156,7 +160,8 @@ async def main():
             filenames = list()
             for idx, md in enumerate(mds):
                 print('Writing generated code to files...')
-                filenames = filenames + write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
+                filenames = filenames + \
+                    write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
             if args.debug:
                 for filename in filenames:
                     print(f'# {filename}\n')
@@ -168,11 +173,13 @@ async def main():
             # This is because we want to run the linting and testing in parallel
             # but we need to make sure that the linting and testing is done on
             # the same files (func and test) together
-            files_grouped = [filenames[i:i + 2] for i in range(0, len(filenames), 2)]
+            files_grouped = [filenames[i:i + 2]
+                             for i in range(0, len(filenames), 2)]
             # Create tasks to run in parallel using asyncio
             tasks = []
             for file_group in files_grouped:
-                tasks.append(asyncio.create_task(fix_files_func(file_group, func), name=file_group[0]))
+                tasks.append(asyncio.create_task(
+                    fix_files_func(file_group, func), name=file_group[0]))
             task_names = [task.get_name() for task in tasks]
             try:
                 done_task_name = await run_parallel_tasks(tasks)
@@ -197,7 +204,8 @@ async def main():
             break
         if attempts == 0:
             t2 = time.time()
-            raise Exception(f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
+            raise Exception(
+                f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
         t2 = time.time()
         print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
