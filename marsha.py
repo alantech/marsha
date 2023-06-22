@@ -106,12 +106,12 @@ async def run_parallel_tasks(tasks) -> str:
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     done_task = done.pop()
     if done_task.exception() is None:
-        print('Task completed successfully. Cancelling the rest of the tasks...')
+        print('Task completed successfully. Cancelling pending tasks...')
         for task in pending if pending is not None else []:
             task.cancel()
         return done_task.get_name()
     elif len(pending) > 0:
-        print('Task completed with error. Waiting for the rest of the tasks to finish...')
+        print('Task completed with error. Waiting for pending tasks to finish...')
         return await run_parallel_tasks(pending)
     else:
         print('All tasks failed. Raising exception...')
@@ -154,12 +154,13 @@ async def main():
                 print('Retrying')
                 continue
             if args.quick_and_dirty:
+                print('Writing generated code to files...')
                 for md in mds[:2]:
                     write_files_from_markdown(md)
                 break
             filenames = list()
             for idx, md in enumerate(mds):
-                print('Writing generated code to files...')
+                print('Writing generated code to temporal files...')
                 filenames = filenames + \
                     write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
             if args.debug:
@@ -187,6 +188,7 @@ async def main():
                     if name != done_task_name:
                         delete_dir_and_content(name)
                     else:
+                        print('Writing generated code to files...')
                         filename = name
                         test_filename = filename.replace('.py', '_test.py')
                         copy_file(filename, f'{func_name}.py')
