@@ -181,6 +181,7 @@ def write_files_from_markdown(md, sub_dir=None):
             filedata = section['children'][0]['content']
             if sub_dir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
+            print(f'Writing {filename}')
             f = open(filename, 'w')
             f.write(filedata)
             f.close()
