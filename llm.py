@@ -113,8 +113,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
-    n_results = 4
+async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug=False):
     defined_classes = list()
     func_name = extract_function_name(func)
     if types is not None and len(types.keys()) > 0:
@@ -195,7 +194,7 @@ async def gpt_func_to_python(func, types: dict=None, retries=4, debug=False):
         if debug:
             print(f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, types, retries - 1, debug)
+            return await gpt_func_to_python(func, n_results, types, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', func)
 

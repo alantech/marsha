@@ -25,6 +25,7 @@ parser.add_argument('-d', '--debug', action='store_true',
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
 parser.add_argument('-a', '--attempts', type=int, default=3)
+parser.add_argument('-n', '--n-parallel-executions', type=int, default=1)
 
 args = parser.parse_args()
 
@@ -144,14 +145,16 @@ async def main():
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
         attempts = args.attempts
+        n_results = args.n_parallel_executions
         if args.debug:
             print(f'Number of attempts: {attempts}')
+            print(f'Number of parallel executions: {n_results}')
         while attempts:
             attempts = attempts - 1
             print('Generating Python code...')
             mds = None
             try:
-                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
+                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug, n_results=n_results)
             except Exception as e:
                 print('First stage failure')
                 print(e)
