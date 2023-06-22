@@ -186,7 +186,8 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str]]:
     res = ([], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\('
-    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]* ([a-zA-Z0-0_\.]+){0,1}'
+    # todo: should only check csv files if any?
+    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.]*'
     for section in sections:
         if re.match(func_regex, section):
             res[0].append(f'# {section.lstrip()}')
