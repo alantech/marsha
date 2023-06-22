@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument('source')
 parser.add_argument('attempts', type=int, default=3)
+parser.add_argument('n_parallel_executions', type=int, default=1)
 args = parser.parse_args()
 
 exitcodes = []
@@ -21,7 +22,10 @@ times = []
 for i in range(8):
     print(f'Run {i + 1} / 8')
     t_1 = time.time()
-    exitcode = os.system(f'./dist/marsha {args.source} -a {args.attempts}')
+    print(
+        f'Running ./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions}')
+    exitcode = os.system(
+        f'./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions}')
     t_2 = time.time()
     testtime = t_2 - t_1
     exitcodes.append(exitcode)
@@ -35,4 +39,5 @@ stddev = math.sqrt(sum(square_errors) / 8)
 
 print("Test results")
 print(f'{sum(successes)} / 8 runs successful')
-print(f'Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddev)}')
+print(
+    f'Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddev)}')
