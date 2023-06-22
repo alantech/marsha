@@ -161,31 +161,27 @@ async def gpt_func_to_python(func, n_results, types: dict=None, retries=4, debug
             'content': f'''{func_for_llm}'''
         }],
     }, n_results=n_results))
-    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
-    # try again (or fully error out, for now)
-
+    # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
+    # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
         mds = list()
         for i in range(n_results):
             doc = reses[0].choices[i].message.content + \
                 '\n\n' + reses[1].choices[i].message.content
+            # Some validation that the generated file matches the expected format of:
+            # # function_name.py
+            # ```py
+            # <insert code here>
+            # ```
+            # # function_name_test.py
+            # ```py
+            # <insert code here>
+            # ```
             if validate_first_stage_markdown(doc, extract_function_name(func)):
                 mds.append(doc)
             else:
                 if debug:
                     print(f'''Invalid doc = {doc}''')
-        # If it fails to parse, it will throw here
-        # doc = reses[0].choices[0].message.content + \
-        #     '\n\n' + reses[1].choices[0].message.content
-        # Some validation that the generated file matches the expected format of:
-        # # function_name.py
-        # ```py
-        # <insert code here>
-        # ```
-        # # function_name_test.py
-        # ```py
-        # <insert code here>
-        # ```
         if len(mds) == 0:
             raise Exception('Invalid output format')
         return mds
