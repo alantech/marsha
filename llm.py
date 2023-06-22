@@ -476,7 +476,6 @@ class SKU:
     try:
         # If it fails to parse, it will throw here
         doc = res.choices[0].message.content
-        print(f'''Invalid doc: {doc}''')
         # Some validation that the generated file matches the expected format of:
         # # type Person
         #
@@ -484,7 +483,6 @@ class SKU:
         # <insert code here>
         # ```
         if not validate_type_markdown(doc, extract_type_name(type)):
-            print(f'''Invalid doc: {doc}''')
             raise Exception('Invalid output format')
         return extract_class_definition(doc)
     except Exception:

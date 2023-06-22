@@ -200,13 +200,10 @@ def extract_type_name(type):
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
     header = ast['children'][0]['children'][0]['content']
-    print(f'return {header.split(" ")[1].strip()}')
     return header.split(' ')[1].strip()
 
 
 def validate_type_markdown(md, type_name):
-    print('validating type markdown')
-    print(md)
     ast = ast_renderer.get_ast(Document(md))
     if len(ast['children']) != 2:
         return False
@@ -214,8 +211,6 @@ def validate_type_markdown(md, type_name):
         return False
     if ast['children'][1]['type'] != 'CodeFence':
         return False
-    print(ast['children'][0]['children'][0]['content'].strip().lower())
-    print(f'type {type_name}'.lower())
     if ast['children'][0]['children'][0]['content'].strip().lower() != f'type {type_name}'.lower():
         return False
     return True
@@ -228,25 +223,17 @@ def extract_class_definition(md):
 
 def validate_type_from_file(md):
     ast = ast_renderer.get_ast(Document(md))
-    print(f'len {len(ast["children"])}')
-    print(f'ast {ast}')
     if len(ast['children']) != 1:
         return False
-    print(f'ast {ast["children"][0]}')
     if ast['children'][0]['type'] != 'Heading':
         return False
     header = ast['children'][0]['children'][0]['content']
     split_header = header.split(' ')
-    print('split_header')
-    print(split_header)
     if len(split_header) != 3:
         return False
-    print('return true')
     return True
 
 def extract_type_filename(md):
     ast = ast_renderer.get_ast(Document(md))
     header = ast['children'][0]['children'][0]['content']
-    print(f'header {header}')
-    print(f'return {header.split(" ")[2]}')
     return header.split(' ')[2]

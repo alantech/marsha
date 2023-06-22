@@ -50,13 +50,10 @@ async def process_types(types: list[str]) -> dict:
             filename = extract_type_filename(type)
             f = open(filename, 'r')
             file_data = f.read()
-            print(file_data)
             f.close()
             type = f'''# type {type_name}
 {file_data}
             '''
-        print('Generating Python code...')
-        print(type)
         class_defined = await gpt_type_to_python(type)
         classes_defined[type_name] = class_defined
     return classes_defined
