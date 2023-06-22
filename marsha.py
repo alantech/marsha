@@ -67,6 +67,7 @@ async def fix_files_func(files, func):
         print(e)
         print('Retrying')
         # continue
+        raise e
     if args.debug:
         for file in files:
             print(f'# {file}\n')
@@ -82,6 +83,7 @@ async def fix_files_func(files, func):
         print(e)
         print('Retrying')
         # continue
+        raise e
     if args.debug:
         for file in files:
             print(f'# {file}\n')
@@ -99,6 +101,52 @@ async def fix_files_func(files, func):
             f.close()
             print()
 
+
+async def await_tasks(tasks) -> str:
+    print('Waiting for tasks to finish...')
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    print(f'Number of tasks: {len(tasks)}')
+    print(f'Number of done tasks: {len(done)}')
+    print(f'Number of pending tasks: {len(pending)}')
+    # Get done task
+    done_task = done.pop()
+    if done_task.exception() is None:
+        print('Task completed successfully')
+        for task in pending:
+            task.cancel()
+        return done_task.get_name()
+    elif len(pending) > 0:
+        print('Error in task')
+        print('Waiting for the rest of the tasks to finish')
+        return await await_tasks(pending)
+    else:
+        print('Error in task')
+        print(done_task.exception())
+        if done_task is not None and done_task.exception() is not None:
+            raise done_task.exception()
+        raise Exception('No task completed successfully')
+    # else:
+    #     for task in pending:
+    #         task.cancel()
+    #         filename = task.get_name()
+    #         test_filename = filename.replace('.py', '_test.py')
+    #         delete_dir_and_content(filename)
+
+    #         # wait for pending tasks to finish
+    #         print('Error in task')
+    #         print(task.exception())
+    #         print('Waiting for the rest of the tasks to finish')
+    #         await asyncio.wait(pending)
+    #         continue
+
+    #         print('Task completed successfully')
+    #         # # TODO: If task done, write the final file to disk, delete the intermediate files and break in case another task also completed successfully
+    #         # filename = task.get_name()
+    #         # test_filename = filename.replace('.py', '_test.py')
+    #         # copy_file(filename, f'{func_name}.py')
+    #         # copy_file(test_filename, f'{func_name}_test.py')
+    #         # delete_dir_and_content(filename)
+    #         break
 
 async def main():
     t1 = time.time()
@@ -131,8 +179,6 @@ async def main():
                 print(e)
                 print('Retrying')
                 continue
-            print(f'number of mds: {len(mds)}')
-            print(f'mds: {mds}')
             files = list()
             for idx, md in enumerate(mds):
                 print('Writing generated code to files...')
@@ -158,31 +204,27 @@ async def main():
             tasks = []
             for f_list in files:
                 tasks.append(asyncio.create_task(fix_files_func(f_list, func), name=f_list[0]))
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            print(f'Number of tasks: {len(tasks)}')
-            print(f'Number of done tasks: {len(done)}')
-            print(f'Number of pending tasks: {len(pending)}')
-            for task in pending:
-                task.cancel()
-                filename = task.get_name()
-                test_filename = filename.replace('.py', '_test.py')
-                delete_dir_and_content(filename)
-            # Check if any if the returned tasks errored out
-            for task in done:
-                if task.exception() is not None:
-                    print('Error in task')
-                    print(task.exception())
-                    print('Retrying')
-                    continue
-                else:
-                    print('Task completed successfully')
-                    # TODO: If task done, write the final file to disk, delete the intermediate files and break in case another task also completed successfully
-                    filename = task.get_name()
-                    test_filename = filename.replace('.py', '_test.py')
-                    copy_file(filename, f'{func_name}.py')
-                    copy_file(test_filename, f'{func_name}_test.py')
-                    delete_dir_and_content(filename)
-                    break
+            task_names = [task.get_name() for task in tasks]
+            try:
+                done = await await_tasks(tasks)
+                for name in task_names:
+                    if name != done:
+                        delete_dir_and_content(name)
+                    else:
+                        filename = name
+                        test_filename = filename.replace('.py', '_test.py')
+                        print('------- Task completed successfully, writing files to disk')
+                        copy_file(filename, f'{func_name}.py')
+                        copy_file(test_filename, f'{func_name}_test.py')
+                        print('------- Deleting intermediate files')
+                        delete_dir_and_content(filename)
+            except Exception as e:
+                print('Second or third stage failure')
+                print(e)
+                print('Deleting files and retrying')
+                for name in task_names:
+                    delete_dir_and_content(name)
+                continue
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
             attempts = attempts + 1
             break
