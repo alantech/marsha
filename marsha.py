@@ -47,7 +47,6 @@ def copy_file(src, dest):
 def delete_dir_and_content(filename):
     dir = os.path.dirname(filename)
     if os.path.isdir(dir):
-        print(f'Deleting {dir}')
         shutil.rmtree(dir)
 
 async def process_types(types: list[str]) -> dict:
