@@ -434,7 +434,7 @@ async def test_and_fix_files(func, files, max_depth=8):
         return await test_and_fix_files(func, files, max_depth - 1)
 
 
-async def gpt_type_to_python(type, retries=2) -> str:
+async def gpt_type_to_python(type, retries=1) -> str:
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
@@ -442,33 +442,30 @@ async def gpt_type_to_python(type, retries=2) -> str:
         }, {
             'role': 'user',
             'content': '''# type SKU
-            name,price,quantity
-            "Widget",10.00,100
-            "Gadget",20.00,50
-            "Gizmo",30.00,25
-            '''
+name,price,quantity
+"Widget",10.00,100
+"Gadget",20.00,50
+"Gizmo",30.00,25'''
         }, {
             'role': 'assistant',
-            'content': f'''
-            # type SKU
+            'content': f'''# type SKU
 
-            ```py
-            class SKU:
-                def __init__(self, name, price, quantity):
-                    self.name = name
-                    self.price = price
-                    self.quantity = quantity
+```py
+class SKU:
+    def __init__(self, name, price, quantity):
+        self.name = name
+        self.price = price
+        self.quantity = quantity
 
-                def __repr__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __repr__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __str__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __str__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __eq__(self, other):
-                    return self.name == other.name and self.price == other.price and self.quantity == other.quantity
-            ```
-'''
+    def __eq__(self, other):
+        return self.name == other.name and self.price == other.price and self.quantity == other.quantity
+```'''
         }, {
             'role': 'user',
             'content': f'''{type}'''
@@ -479,6 +476,7 @@ async def gpt_type_to_python(type, retries=2) -> str:
     try:
         # If it fails to parse, it will throw here
         doc = res.choices[0].message.content
+        print(f'''Invalid doc: {doc}''')
         # Some validation that the generated file matches the expected format of:
         # # type Person
         #
@@ -486,6 +484,7 @@ async def gpt_type_to_python(type, retries=2) -> str:
         # <insert code here>
         # ```
         if not validate_type_markdown(doc, extract_type_name(type)):
+            print(f'''Invalid doc: {doc}''')
             raise Exception('Invalid output format')
         return extract_class_definition(doc)
     except Exception:

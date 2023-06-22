@@ -186,7 +186,7 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str]]:
     res = ([], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\('
-    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*'
+    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]* ([a-zA-Z0-0_\.]+){0,1}'
     for section in sections:
         if re.match(func_regex, section):
             res[0].append(f'# {section.lstrip()}')
@@ -200,10 +200,13 @@ def extract_type_name(type):
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
     header = ast['children'][0]['children'][0]['content']
-    return header.split('(')[0].split('type')[1].strip()
+    print(f'return {header.split(" ")[1].strip()}')
+    return header.split(' ')[1].strip()
 
 
 def validate_type_markdown(md, type_name):
+    print('validating type markdown')
+    print(md)
     ast = ast_renderer.get_ast(Document(md))
     if len(ast['children']) != 2:
         return False
@@ -211,6 +214,8 @@ def validate_type_markdown(md, type_name):
         return False
     if ast['children'][1]['type'] != 'CodeFence':
         return False
+    print(ast['children'][0]['children'][0]['content'].strip().lower())
+    print(f'type {type_name}'.lower())
     if ast['children'][0]['children'][0]['content'].strip().lower() != f'type {type_name}'.lower():
         return False
     return True
@@ -219,3 +224,29 @@ def validate_type_markdown(md, type_name):
 def extract_class_definition(md):
     ast = ast_renderer.get_ast(Document(md))
     return ast['children'][1]['children'][0]['content'].strip()
+
+
+def validate_type_from_file(md):
+    ast = ast_renderer.get_ast(Document(md))
+    print(f'len {len(ast["children"])}')
+    print(f'ast {ast}')
+    if len(ast['children']) != 1:
+        return False
+    print(f'ast {ast["children"][0]}')
+    if ast['children'][0]['type'] != 'Heading':
+        return False
+    header = ast['children'][0]['children'][0]['content']
+    split_header = header.split(' ')
+    print('split_header')
+    print(split_header)
+    if len(split_header) != 3:
+        return False
+    print('return true')
+    return True
+
+def extract_type_filename(md):
+    ast = ast_renderer.get_ast(Document(md))
+    header = ast['children'][0]['children'][0]['content']
+    print(f'header {header}')
+    print(f'return {header.split(" ")[2]}')
+    return header.split(' ')[2]
