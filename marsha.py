@@ -163,7 +163,7 @@ async def main():
             files = list()
             for idx, md in enumerate(mds):
                 print('Writing generated code to files...')
-                files = files + write_files_from_markdown(md, sub_dir=f'{func_name}_{idx}')
+                files = files + write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
             print(f'files: {files}')
             if args.debug:
                 for file in files:
