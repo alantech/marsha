@@ -197,8 +197,9 @@ async def main():
             except Exception as e:
                 print('Failed to generate working code.')
                 print(e)
-                for name in task_names:
-                    delete_dir_and_content(name)
+                if not args.debug:
+                    for name in task_names:
+                        delete_dir_and_content(name)
                 print('Retrying...')
                 continue
             # Done! Add one back to `attempts` to avoid accidentally erroring out on success
