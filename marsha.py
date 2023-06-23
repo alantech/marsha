@@ -73,80 +73,80 @@ async def main():
                 print(f'# type {key}\n')
                 print(value)
                 print()
-    # for func in functions:
-    #     func_name = extract_function_name(func)
-    #     print(f'Compiling function {func_name}...')
-    #     attempts = args.attempts
-    #     if args.debug:
-    #         print(f'Number of attempts: {attempts}')
-    #     while attempts:
-    #         attempts = attempts - 1
-    #         print('Generating Python code...')
-    #         md = ''
-    #         try:
-    #             md = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
-    #         except Exception as e:
-    #             print('First stage failure')
-    #             print(e)
-    #             print('Retrying')
-    #             continue
-    #         files = write_files_from_markdown(md)
-    #         if args.debug:
-    #             for file in files:
-    #                 print(f'# {file}\n')
-    #                 f = open(file, 'r')
-    #                 print(f.read())
-    #                 f.close()
-    #                 print()
-    #         if args.quick_and_dirty:
-    #             break
-    #         print('Parsing generated code...')
-    #         try:
-    #             await lint_and_fix_files(files)
-    #         except Exception as e:
-    #             print('Second stage failure')
-    #             print(e)
-    #             print('Retrying')
-    #             continue
-    #         if args.debug:
-    #             for file in files:
-    #                 print(f'# {file}\n')
-    #                 f = open(file, 'r')
-    #                 print(f.read())
-    #                 f.close()
-    #                 print()
-    #         print('Verifying and correcting generated code...')
-    #         try:
-    #             await test_and_fix_files(func, files)
-    #         except Exception as e:
-    #             print('Third stage failure')
-    #             print(e)
-    #             print('Retrying')
-    #             continue
-    #         if args.debug:
-    #             for file in files:
-    #                 print(f'# {file}\n')
-    #                 f = open(file, 'r')
-    #                 print(f.read())
-    #                 f.close()
-    #                 print()
-    #         print('Formatting code...')
-    #         autoformat_files(files)
-    #         if args.debug:
-    #             for file in files:
-    #                 print(f'# {file}\n')
-    #                 f = open(file, 'r')
-    #                 print(f.read())
-    #                 f.close()
-    #                 print()
-    #         # Done! Add one back to `attempts` to avoid accidentally erroring out on success
-    #         attempts = attempts + 1
-    #         break
-    #     if attempts == 0:
-    #         t2 = time.time()
-    #         raise Exception(f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
-    #     t2 = time.time()
-    #     print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
+    for func in functions:
+        func_name = extract_function_name(func)
+        print(f'Compiling function {func_name}...')
+        attempts = args.attempts
+        if args.debug:
+            print(f'Number of attempts: {attempts}')
+        while attempts:
+            attempts = attempts - 1
+            print('Generating Python code...')
+            md = ''
+            try:
+                md = await gpt_func_to_python(func, types=classes_defined, debug=args.debug)
+            except Exception as e:
+                print('First stage failure')
+                print(e)
+                print('Retrying')
+                continue
+            files = write_files_from_markdown(md)
+            if args.debug:
+                for file in files:
+                    print(f'# {file}\n')
+                    f = open(file, 'r')
+                    print(f.read())
+                    f.close()
+                    print()
+            if args.quick_and_dirty:
+                break
+            print('Parsing generated code...')
+            try:
+                await lint_and_fix_files(files)
+            except Exception as e:
+                print('Second stage failure')
+                print(e)
+                print('Retrying')
+                continue
+            if args.debug:
+                for file in files:
+                    print(f'# {file}\n')
+                    f = open(file, 'r')
+                    print(f.read())
+                    f.close()
+                    print()
+            print('Verifying and correcting generated code...')
+            try:
+                await test_and_fix_files(func, files)
+            except Exception as e:
+                print('Third stage failure')
+                print(e)
+                print('Retrying')
+                continue
+            if args.debug:
+                for file in files:
+                    print(f'# {file}\n')
+                    f = open(file, 'r')
+                    print(f.read())
+                    f.close()
+                    print()
+            print('Formatting code...')
+            autoformat_files(files)
+            if args.debug:
+                for file in files:
+                    print(f'# {file}\n')
+                    f = open(file, 'r')
+                    print(f.read())
+                    f.close()
+                    print()
+            # Done! Add one back to `attempts` to avoid accidentally erroring out on success
+            attempts = attempts + 1
+            break
+        if attempts == 0:
+            t2 = time.time()
+            raise Exception(f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
+        t2 = time.time()
+        print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
 asyncio.run(main())
