@@ -434,7 +434,7 @@ async def test_and_fix_files(func, files, max_depth=8):
         return await test_and_fix_files(func, files, max_depth - 1)
 
 
-async def gpt_type_to_python(type, retries=1) -> str:
+async def gpt_type_to_python(type, retries=2) -> str:
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
