@@ -157,6 +157,7 @@ async def main():
                 print('Writing generated code to files...')
                 for md in mds[:2]:
                     write_files_from_markdown(md)
+                attempts = attempts + 1
                 break
             filenames = list()
             for idx, md in enumerate(mds):
