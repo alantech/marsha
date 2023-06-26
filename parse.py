@@ -68,7 +68,7 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_func_for_llm(func, defined_classes: list = None):
+def format_func_for_llm(func, referenced_classes: list = None, referenced_functions: list = None):
     break_line = '\n'
     ast = ast_renderer.get_ast(Document(func))
     if ast['children'][0]['type'] != 'Heading':
@@ -116,8 +116,12 @@ def format_func_for_llm(func, defined_classes: list = None):
 
 {desc}
 
-{defined_classes is not None and len(defined_classes) > 0 and f"""## Must include the following classes
-{break_line.join(defined_classes)}""" or ""
+{referenced_classes is not None and len(referenced_classes) > 0 and f"""## Must include the following classes
+{break_line.join(referenced_classes)}""" or ""
+}
+
+{referenced_functions is not None and len(referenced_functions) > 0 and f"""## Must import the following functions from a file in the parent directory with the same name as the function
+{break_line.join(referenced_functions)}""" or ""
 }
 
 ## Examples of expected behavior
@@ -237,6 +241,7 @@ def is_defined_from_file(md):
     if len(split_header) != 3:
         return False
     return True
+
 
 def extract_type_filename(md):
     ast = ast_renderer.get_ast(Document(md))

@@ -113,16 +113,25 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, types: dict = None, retries=4, debug=False):
-    defined_classes = list()
-    if types is not None and len(types.keys()) > 0:
+async def gpt_func_to_python(func, n_results, defined_types: dict = None, retries=4, debug=False, defined_functions: list = None):
+    current_function_name = extract_function_name(func)
+    referenced_classes = list()
+    if defined_types is not None and len(defined_types.keys()) > 0:
         # look if the func uses any of the types
-        for type in types.keys():
+        for type in defined_types.keys():
             if type in func:
                 # if so, we update the prompt to include the python class definition and use it in the completion
-                defined_classes.append(types[type])
+                referenced_classes.append(defined_types[type])
+    referenced_functions = list()
+    if defined_functions is not None and len(defined_functions) > 0:
+        # look if the func uses any of the functions
+        for function in defined_functions:
+            if function != current_function_name and function in func:
+                # if so, we update the prompt to include the python class definition and use it in the completion
+                referenced_functions.append(function)
 
-    func_for_llm = format_func_for_llm(func, defined_classes)
+    func_for_llm = format_func_for_llm(
+        func, referenced_classes, referenced_functions)
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
@@ -190,7 +199,7 @@ async def gpt_func_to_python(func, n_results, types: dict = None, retries=4, deb
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, n_results, types, retries - 1, debug)
+            return await gpt_func_to_python(func, n_results, defined_types, retries - 1, debug, defined_functions)
         else:
             raise Exception('Failed to generate code', func)
 

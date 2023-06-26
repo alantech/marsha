@@ -144,6 +144,7 @@ async def main():
                 print(f'# type {key}\n')
                 print(value)
                 print()
+    function_names = [extract_function_name(func) for func in functions]
     for func in functions:
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
@@ -157,7 +158,7 @@ async def main():
             print('Generating Python code...')
             mds = None
             try:
-                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug, n_results=n_results)
+                mds = await gpt_func_to_python(func, defined_types=classes_defined, debug=args.debug, n_results=n_results, defined_functions=function_names)
             except Exception as e:
                 print('First stage failure')
                 print(e)
