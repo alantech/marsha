@@ -449,33 +449,30 @@ async def gpt_type_to_python(type, retries=2) -> str:
         }, {
             'role': 'user',
             'content': '''# type SKU
-            name,price,quantity
-            "Widget",10.00,100
-            "Gadget",20.00,50
-            "Gizmo",30.00,25
-            '''
+name,price,quantity
+"Widget",10.00,100
+"Gadget",20.00,50
+"Gizmo",30.00,25'''
         }, {
             'role': 'assistant',
-            'content': f'''
-            # type SKU
+            'content': f'''# type SKU
 
-            ```py
-            class SKU:
-                def __init__(self, name, price, quantity):
-                    self.name = name
-                    self.price = price
-                    self.quantity = quantity
+```py
+class SKU:
+    def __init__(self, name, price, quantity):
+        self.name = name
+        self.price = price
+        self.quantity = quantity
 
-                def __repr__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __repr__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __str__(self):
-                    return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
+    def __str__(self):
+        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
 
-                def __eq__(self, other):
-                    return self.name == other.name and self.price == other.price and self.quantity == other.quantity
-            ```
-'''
+    def __eq__(self, other):
+        return self.name == other.name and self.price == other.price and self.quantity == other.quantity
+```'''
         }, {
             'role': 'user',
             'content': f'''{type}'''

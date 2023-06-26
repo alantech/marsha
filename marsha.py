@@ -8,7 +8,7 @@ import autopep8
 import openai
 
 from llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta, gpt_type_to_python
-from parse import extract_function_name, extract_functions_and_types, extract_type_name, write_files_from_markdown
+from parse import extract_function_name, extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -56,6 +56,16 @@ async def process_types(types: list[str]) -> dict:
     for type in types:
         type_name = extract_type_name(type)
         print(f'Compiling type {type_name}...')
+        # If type is defined from a file, read the file
+        if is_defined_from_file(type):
+            print('Reading type from file...')
+            filename = extract_type_filename(type)
+            f = open(filename, 'r')
+            file_data = f.read()
+            f.close()
+            type = f'''# type {type_name}
+{file_data}
+            '''
         class_defined = await gpt_type_to_python(type)
         classes_defined[type_name] = class_defined
     return classes_defined

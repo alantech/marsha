@@ -191,7 +191,7 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str]]:
     res = ([], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\('
-    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*'
+    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
     for section in sections:
         if re.match(func_regex, section):
             res[0].append(f'# {section.lstrip()}')
@@ -205,7 +205,7 @@ def extract_type_name(type):
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
     header = ast['children'][0]['children'][0]['content']
-    return header.split('(')[0].split('type')[1].strip()
+    return header.split(' ')[1].strip()
 
 
 def validate_type_markdown(md, type_name):
@@ -224,3 +224,21 @@ def validate_type_markdown(md, type_name):
 def extract_class_definition(md):
     ast = ast_renderer.get_ast(Document(md))
     return ast['children'][1]['children'][0]['content'].strip()
+
+
+def is_defined_from_file(md):
+    ast = ast_renderer.get_ast(Document(md))
+    if len(ast['children']) != 1:
+        return False
+    if ast['children'][0]['type'] != 'Heading':
+        return False
+    header = ast['children'][0]['children'][0]['content']
+    split_header = header.split(' ')
+    if len(split_header) != 3:
+        return False
+    return True
+
+def extract_type_filename(md):
+    ast = ast_renderer.get_ast(Document(md))
+    header = ast['children'][0]['children'][0]['content']
+    return header.split(' ')[2]
