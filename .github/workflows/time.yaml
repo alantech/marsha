@@ -12,6 +12,10 @@ on:
         description: "Number of attempts to run the test"
         required: true
         default: 1
+      parallel_runs:
+        description: "Number of parallel runs"
+        required: false
+        default: 1
 
 jobs:
   run:
@@ -27,7 +31,7 @@ jobs:
         run: python -c "import sys; print(sys.version)"
       - name: Run time script
         run: |
-          make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True time
+          make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           echo "results=$(results.md)" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
