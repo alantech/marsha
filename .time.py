@@ -20,7 +20,7 @@ args = parser.parse_args()
 
 exitcodes = []
 times = []
-total_runs = 2
+total_runs = 8
 for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
