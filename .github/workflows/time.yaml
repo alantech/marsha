@@ -25,6 +25,6 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
       - name: Run time script
-        run: make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} time
+        run: make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True time
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
