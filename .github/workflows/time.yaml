@@ -34,7 +34,7 @@ jobs:
         id: run
         run: |
           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
-          echo "results=$(results.md)" >> $GITHUB_OUTPUT
+          echo "results=$(cat results.md)" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
@@ -56,4 +56,4 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.inputs.test }}\nBranch: ${{ steps.extract_branch.outputs.branch }}\nResults: \n${{ needs.run.outputs.results }}'
+          description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
