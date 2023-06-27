@@ -296,7 +296,8 @@ async def main():
             stats['attempts'] = args.attempts
             stats['total_calls'] = stats['first_stage']['total_calls'] + \
                 stats['second_stage']['total_calls'] + \
-                stats['third_stage']['total_calls']
+                stats['third_stage']['total_calls'] + \
+                stats['class_generation']['total_calls']
             if args.stats:
                 stats_to_file()
             raise Exception(
@@ -306,7 +307,8 @@ async def main():
         stats['attempts'] = args.attempts - attempts + 1
         stats['total_calls'] = stats['first_stage']['total_calls'] + \
             stats['second_stage']['total_calls'] + \
-            stats['third_stage']['total_calls']
+            stats['third_stage']['total_calls'] + \
+            stats['class_generation']['total_calls']
         if args.stats:
             stats_to_file()
         print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
