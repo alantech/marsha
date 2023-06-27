@@ -60,9 +60,12 @@ results = f'''
 {sum(successes)} / {total_runs} runs successful
 Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddev)}
 '''
-
 print(results)
-if (args.stats):
-    with open('final_stats.md', 'a') as f:
-        f.write(results)
-        f.close()
+res_file = open('results.md', 'w')
+res_file.write(results)
+res_file.close()
+
+if args.stats:
+    with open('final_stats.md', 'r') as f:
+        stats = f.read()
+    print(stats)
