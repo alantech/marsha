@@ -15,6 +15,7 @@ on:
 
 jobs:
   run:
+    id: run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -25,6 +26,28 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
       - name: Run time script
-        run: make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True time
+        run: |
+          make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True time
+          echo "results=$(results.md)" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+
+  notify:
+    name: Discord Notification
+    runs-on: ubuntu-latest
+    needs: # make sure the notification is sent AFTER the jobs you want included have completed
+      - run
+    if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
+
+    steps:
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+        id: extract_branch
+      - name: Notify
+        uses: nobrayner/discord-webhook@v1
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: 'Test file: ${{ github.event.inputs.test }}\nBranch: ${{ steps.extract_branch.outputs.branch }}\n Results: \n${{ jobs.run.outputs.results }}'
