@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: # make sure the notification is sent AFTER the jobs you want included have completed
       - run
-    if: ${{ success() }} # You always want to be notified: success, failure, or cancelled
+    if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
 
     steps:
       - name: Extract branch name
@@ -58,3 +58,4 @@ jobs:
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
           description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
+          include-details: false
