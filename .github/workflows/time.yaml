@@ -20,6 +20,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.run.outputs.results }}
     steps:
       - uses: actions/checkout@v3
       - name: Set up Python 3.10
@@ -29,6 +31,7 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
       - name: Run time script
+        id: run
         run: |
           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           echo "results=$(results.md)" >> $GITHUB_OUTPUT
@@ -53,4 +56,4 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.inputs.test }}\nBranch: ${{ steps.extract_branch.outputs.branch }}\n Results: \n${{ jobs.run.outputs.results }}'
+          description: 'Test file: ${{ github.event.inputs.test }}\nBranch: ${{ steps.extract_branch.outputs.branch }}\nResults: \n${{ needs.run.outputs.results }}'
