@@ -34,7 +34,8 @@ jobs:
         id: run
         run: |
           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
-          echo "results=$(cat results.md)" >> $GITHUB_OUTPUT
+          results=$(echo $(cat results.md) | tr '\n' ' ')
+          echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
@@ -43,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: # make sure the notification is sent AFTER the jobs you want included have completed
       - run
-    if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
+    if: ${{ success() }} # You always want to be notified: success, failure, or cancelled
 
     steps:
       - name: Extract branch name
