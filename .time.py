@@ -36,7 +36,7 @@ for i in range(total_runs):
         run_stats_file = open('stats.md', 'r')
         run_stats = run_stats_file.read()
         run_stats_file.close()
-        with open('final_stats.md', 'a') as f:
+        with open('agg_stats.md', 'a') as f:
             f.write(f'''# Run {i + 1} / {total_runs}
 Exit code: {exitcode}
 Time: {prettify_time_delta(testtime)}
@@ -66,6 +66,6 @@ res_file.write(results)
 res_file.close()
 
 if args.stats:
-    with open('final_stats.md', 'r') as f:
+    with open('agg_stats.md', 'r') as f:
         stats = f.read()
     print(stats)
