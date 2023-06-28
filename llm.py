@@ -264,7 +264,7 @@ async def fix_file(filename, lint_text, stats, retries=3):
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=1):
+async def lint_and_fix_files(files, stats, max_depth=5):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -339,7 +339,7 @@ async def lint_and_fix_files(files, stats, max_depth=1):
     await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, stats, max_depth=1):
+async def test_and_fix_files(func, files, stats, max_depth=5):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
