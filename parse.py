@@ -126,7 +126,14 @@ def format_func_for_llm(func, referenced_classes: list = None, referenced_functi
 
 ## Examples of expected behavior
 
-{reqs}'''
+{reqs}
+
+
+## Absolute path for imports and file references not in the same directory as the function
+
+{os.getcwd()}
+
+'''
 
 
 def extract_function_name(func):

@@ -89,7 +89,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
     t1 = time.time()
     query['model'] = model
     query['n'] = n_results
-    query['temperature'] = 0.1
+    # query['temperature'] = 0.2
     while True:
         try:
             out = await openai.ChatCompletion.acreate(**query)
@@ -264,7 +264,7 @@ async def fix_file(filename, lint_text, stats, retries=3):
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=10):
+async def lint_and_fix_files(files, stats, max_depth=1):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -339,7 +339,7 @@ async def lint_and_fix_files(files, stats, max_depth=10):
     await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, stats, max_depth=8):
+async def test_and_fix_files(func, files, stats, max_depth=1):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file

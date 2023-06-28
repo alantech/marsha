@@ -200,6 +200,7 @@ async def main():
     f = open(args.source, 'r')
     marsha_file = f.read()
     f.close()
+    # cwd = os.getcwd()
     functions, types = extract_functions_and_types(marsha_file)
     classes_defined = None
     if len(types) > 0:
@@ -214,6 +215,7 @@ async def main():
                 print(value)
                 print()
     function_names = [extract_function_name(func) for func in functions]
+    # todo: do this in the just one call?
     for func in functions:
         func_name = extract_function_name(func)
         print(f'Compiling function {func_name}...')
