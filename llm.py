@@ -113,7 +113,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, defined_types: dict = None, retries=4, debug=False, defined_functions: list = None):
+async def gpt_func_to_python(func, n_results, stats: dict, defined_types: dict = None, defined_functions: list = None, retries=4, debug=False):
     current_function_name = extract_function_name(func)
     referenced_classes = list()
     if defined_types is not None and len(defined_types.keys()) > 0:
@@ -170,6 +170,7 @@ async def gpt_func_to_python(func, n_results, defined_types: dict = None, retrie
             'content': f'''{func_for_llm}'''
         }],
     }, n_results=n_results))
+    stats['first_stage']['total_calls'] += 2
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -199,12 +200,12 @@ async def gpt_func_to_python(func, n_results, defined_types: dict = None, retrie
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, n_results, defined_types, retries - 1, debug, defined_functions)
+            return await gpt_func_to_python(func, n_results, stats, defined_types, defined_functions, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', func)
 
 
-async def fix_file(filename, lint_text, retries=3):
+async def fix_file(filename, lint_text, stats, retries=3):
     f = open(filename, 'r')
     code = f.read()
     f.close()
@@ -247,6 +248,7 @@ async def fix_file(filename, lint_text, retries=3):
 ```''',
         }],
     })
+    stats['second_stage']['total_calls'] += 1
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -256,12 +258,12 @@ async def fix_file(filename, lint_text, retries=3):
         write_files_from_markdown(doc)
     except Exception:
         if retries > 0:
-            return await fix_file(filename, lint_text, retries - 1)
+            return await fix_file(filename, lint_text, stats, retries - 1)
         else:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, max_depth=10):
+async def lint_and_fix_files(files, stats, max_depth=10):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -330,13 +332,13 @@ async def lint_and_fix_files(files, max_depth=10):
                       for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
-            jobs.append(fix_file(file, lint_text))
+            jobs.append(fix_file(file, lint_text, stats))
     await asyncio.gather(*jobs)
 
-    await lint_and_fix_files(files, max_depth - 1)
+    await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, max_depth=8):
+async def test_and_fix_files(func, files, stats, max_depth=8):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
@@ -423,7 +425,7 @@ async def test_and_fix_files(func, files, max_depth=8):
 {test_results}''',
             }],
         }, 'gpt-4')
-
+        stats['third_stage']['total_calls'] += 1
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -447,10 +449,10 @@ async def test_and_fix_files(func, files, max_depth=8):
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(func, files, max_depth - 1)
+        return await test_and_fix_files(func, files, stats, max_depth - 1)
 
 
-async def gpt_type_to_python(type, retries=2) -> str:
+async def gpt_type_to_python(type, stats, retries=2) -> str:
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
@@ -487,6 +489,7 @@ class SKU:
             'content': f'''{type}'''
         }],
     })
+    stats['class_generation']['total_calls'] += 1
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -503,6 +506,6 @@ class SKU:
         return extract_class_definition(doc)
     except Exception:
         if retries > 0:
-            return await gpt_type_to_python(type, retries - 1)
+            return await gpt_type_to_python(type, stats, retries - 1)
         else:
             raise Exception('Failed to generate code', type)
