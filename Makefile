@@ -19,4 +19,4 @@ format:
 
 .PHONY: time
 time: ./dist/marsha .time.py
-	. ./venv/bin/activate; ./.time.py $(test) $(attempts) $(n_parallel_executions)
+	. ./venv/bin/activate; ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)

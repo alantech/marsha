@@ -26,8 +26,63 @@ parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
 parser.add_argument('-a', '--attempts', type=int, default=1)
 parser.add_argument('-n', '--n-parallel-executions', type=int, default=1)
+parser.add_argument('-s', '--stats', action='store_true',
+                    help='Save stats and write them to a file')
 
 args = parser.parse_args()
+
+# TODO: make this a class?
+# Stats for the run of the compiler
+stats = {
+    'class_generation': {
+        'total_time': 0,
+        'total_calls': 0,
+    },
+    'first_stage': {
+        'total_time': 0,
+        'total_calls': 0,
+    },
+    'second_stage': {
+        'total_time': 0,
+        'total_calls': 0,
+    },
+    'third_stage': {
+        'total_time': 0,
+        'total_calls': 0,
+    },
+    'total_time': 0,
+    'total_calls': 0,
+    'attempts': 0,
+}
+
+
+def stats_to_file():
+    f = open('stats.md', 'w')
+    f.write(f'''# Stats
+{stats['class_generation']['total_time'] != 0 and f"""## Class generation
+Total time: {stats['class_generation']['total_time']}
+Total calls: {stats['class_generation']['total_calls']}
+
+"""}
+## First stage
+Total time: {stats['first_stage']['total_time']}
+Total calls: {stats['first_stage']['total_calls']}
+
+## Second stage
+Total time: {stats['second_stage']['total_time']}
+Total calls: {stats['second_stage']['total_calls']}
+
+## Third stage
+Total time: {stats['third_stage']['total_time']}
+Total calls: {stats['third_stage']['total_calls']}
+
+## Total
+Total time: {stats['total_time']}
+Total calls: {stats['total_calls']}
+Attempts: {stats['attempts']}
+
+''')
+    f.close()
 
 
 def autoformat_files(files):
@@ -51,7 +106,7 @@ def delete_dir_and_content(filename):
         shutil.rmtree(dir)
 
 
-async def process_types(types: list[str]) -> dict:
+async def process_types(types: list[str], stats: dict) -> dict:
     classes_defined = {}
     for type in types:
         type_name = extract_type_name(type)
@@ -66,19 +121,24 @@ async def process_types(types: list[str]) -> dict:
             type = f'''# type {type_name}
 {file_data}
             '''
-        class_defined = await gpt_type_to_python(type)
+        class_defined = await gpt_type_to_python(type, stats)
         classes_defined[type_name] = class_defined
     return classes_defined
 
 
-async def fix_files_func(files, func):
+async def fix_files_func(files, func, stats):
+    t_ssi = time.time()
     print('Parsing generated code...')
     try:
-        await lint_and_fix_files(files)
+        await lint_and_fix_files(files, stats)
     except Exception as e:
         print('Second stage failure')
         print(e)
         raise e
+    finally:
+        t_ssii = time.time()
+        stats['second_stage']['total_time'] = prettify_time_delta(
+            t_ssii - t_ssi)
     if args.debug:
         for file in files:
             print(f'# {file}\n')
@@ -86,13 +146,18 @@ async def fix_files_func(files, func):
             print(f.read())
             f.close()
             print()
+    t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(func, files)
+        await test_and_fix_files(func, files, stats)
     except Exception as e:
         print('Third stage failure')
         print(e)
         raise e
+    finally:
+        t_tsii = time.time()
+        stats['third_stage']['total_time'] = prettify_time_delta(
+            t_tsii - t_tsi)
     if args.debug:
         for file in files:
             print(f'# {file}\n')
@@ -138,7 +203,11 @@ async def main():
     functions, types = extract_functions_and_types(marsha_file)
     classes_defined = None
     if len(types) > 0:
-        classes_defined = await process_types(types)
+        t_clsi = time.time()
+        classes_defined = await process_types(types, stats)
+        t_clsii = time.time()
+        stats['class_generation']['total_time'] = prettify_time_delta(
+            t_clsii - t_clsi)
         if args.debug:
             for key, value in classes_defined.items():
                 print(f'# type {key}\n')
@@ -154,15 +223,20 @@ async def main():
             print(f'Number of parallel executions: {n_results}')
         while attempts:
             attempts = attempts - 1
+            t_fsi = time.time()
             print('Generating Python code...')
             mds = None
             try:
-                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug, n_results=n_results)
+                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug, n_results=n_results, stats=stats)
             except Exception as e:
                 print('First stage failure')
                 print(e)
                 print('Retrying')
                 continue
+            finally:
+                t_fsii = time.time()
+                stats['first_stage']['total_time'] = prettify_time_delta(
+                    t_fsii - t_fsi)
             if args.quick_and_dirty:
                 print('Writing generated code to files...')
                 for md in mds[:2]:
@@ -191,7 +265,7 @@ async def main():
             tasks = []
             for file_group in files_grouped:
                 tasks.append(asyncio.create_task(
-                    fix_files_func(file_group, func), name=file_group[0]))
+                    fix_files_func(file_group, func, stats), name=file_group[0]))
             task_names = [task.get_name() for task in tasks]
             try:
                 done_task_name = await run_parallel_tasks(tasks)
@@ -218,9 +292,25 @@ async def main():
             break
         if attempts == 0:
             t2 = time.time()
+            stats['total_time'] = prettify_time_delta(t2 - t1)
+            stats['attempts'] = args.attempts
+            stats['total_calls'] = stats['first_stage']['total_calls'] + \
+                stats['second_stage']['total_calls'] + \
+                stats['third_stage']['total_calls'] + \
+                stats['class_generation']['total_calls']
+            if args.stats:
+                stats_to_file()
             raise Exception(
                 f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
         t2 = time.time()
+        stats['total_time'] = prettify_time_delta(t2 - t1)
+        stats['attempts'] = args.attempts - attempts + 1
+        stats['total_calls'] = stats['first_stage']['total_calls'] + \
+            stats['second_stage']['total_calls'] + \
+            stats['third_stage']['total_calls'] + \
+            stats['class_generation']['total_calls']
+        if args.stats:
+            stats_to_file()
         print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
