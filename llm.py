@@ -124,19 +124,26 @@ async def gpt_func_to_python(func, n_results, stats: dict, defined_types: dict =
                 referenced_classes.append(defined_types[type])
     referenced_functions = list()
     if defined_functions is not None and len(defined_functions) > 0:
-        # look if the func uses any of the functions
-        for function in defined_functions:
+        # find index of current function
+        current_function_index = defined_functions.index(
+            current_function_name)
+        # look if the func uses any of the previous functions
+        filter_fns = defined_functions[:current_function_index]
+        print(f'''filter_fns = {filter_fns}''')
+        for function in defined_functions[:current_function_index]:
             if function != current_function_name and function in func:
                 # if so, we update the prompt to include the python class definition and use it in the completion
                 referenced_functions.append(function)
 
     func_for_llm = format_func_for_llm(
         func, referenced_classes, referenced_functions)
+    
+    print(func_for_llm)
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
+            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence. You must always append the parent directory `..` to the `sys.path`.',
         }, {
             'role': 'user',
             'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
@@ -263,7 +270,7 @@ async def fix_file(filename, lint_text, stats, retries=3):
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=10):
+async def lint_and_fix_files(files, stats, max_depth=3):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -331,14 +338,27 @@ async def lint_and_fix_files(files, stats, max_depth=10):
         file_lints = [e.format(DEFAULT_FORMAT)
                       for e in lints if e.filename == file]
         if len(file_lints) > 0:
-            lint_text = '\n'.join(file_lints)
+            print('file lints before')
+            print(file_lints)
+            new_file_lints = []
+            for lint in file_lints:
+                lint_split = lint.split('.py')
+                filename = lint_split[0].split('/')[-1]
+                print(filename)
+                lint = '.py'.join([filename, lint_split[1]]).strip()
+                print(lint)
+                new_file_lints.append(lint)
+            print('file lints after')
+            print(new_file_lints)
+            lint_text = '\n'.join(new_file_lints)
+            print(lint_text)
             jobs.append(fix_file(file, lint_text, stats))
     await asyncio.gather(*jobs)
 
     await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, stats, max_depth=8):
+async def test_and_fix_files(func, files, stats, max_depth=3):
     if max_depth == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
@@ -359,6 +379,7 @@ async def test_and_fix_files(func, files, stats, max_depth=8):
             pass
         raise
     test_results = f'''{stdout.decode('utf-8')}{stderr.decode('utf-8')}'''
+    print(f'Test results:\n{test_results}\n')
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:

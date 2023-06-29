@@ -120,8 +120,8 @@ def format_func_for_llm(func, referenced_classes: list = None, referenced_functi
 {break_line.join(referenced_classes)}""" or ""
 }
 
-{referenced_functions is not None and len(referenced_functions) > 0 and f"""## Must import the following functions from a file in the parent directory with the same name as the function
-{break_line.join(referenced_functions)}""" or ""
+{referenced_functions is not None and len(referenced_functions) > 0 and f"""## Must import the following functions
+{break_line.join(map(lambda f: break_line.join(['import sys', 'sys.append("..")', f'from imports import {f}']), referenced_functions))}""" or ""
 }
 
 ## Examples of expected behavior
