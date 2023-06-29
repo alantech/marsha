@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+import re
 
 import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
@@ -353,6 +354,9 @@ async def test_and_fix_files(func, files, stats, retries=3):
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
+        print(f'test_results: {test_results}')
+        formatted_test_results = format_test_results(test_results)
+        print(f'formatted_test_results: {formatted_test_results}')
         f = open(test_file, 'r')
         test = f.read()
         f.close()
@@ -413,7 +417,7 @@ async def test_and_fix_files(func, files, stats, retries=3):
 
 # Test Results
 
-{test_results}''',
+{formatted_test_results}''',
             }],
         }, 'gpt-4')
         stats['third_stage']['total_calls'] += 1
@@ -500,3 +504,52 @@ class SKU:
             return await gpt_type_to_python(type, stats, retries - 1)
         else:
             raise Exception('Failed to generate code', type)
+
+
+def format_test_results(test_results):
+    output_sections = test_results.split('=' * 70)
+    new_errors = []
+    # Loop over sections except the first one
+    for section in output_sections[1:]:
+        split_section = section.split('-' * 70)
+        # Get the test name
+        test_name_regex = r'.* (.*) \(.*\)'
+        matches = re.finditer(test_name_regex, split_section[0])
+        # print(f' len matches: {len(matches)}')
+        for match in matches:
+            test_name = match.group(1).strip()
+            print(f'Test name: {test_name}')
+        # Custom format for traceback
+        split_trace = split_section[1].splitlines()
+        # Get the latest 3 lines of the trace
+        split_trace = split_trace[:-1]
+        trace = ''
+        for idx, el in enumerate(split_trace):
+            print(f'el: {el}')
+            if idx != 0 and el == '\n':
+                trace = '\n'.join(split_trace[:idx])
+        if trace == '':
+            trace = '\n'.join(split_trace)
+        # split_trace[0] will be the file with the error, we want to remove the path and leave the file name. We need to use a regex to match the File "", then the path, then the file name
+        regex = r'File (".*\/(.*)"), line \d+, in .*'
+        matches = re.finditer(regex, split_section[1])
+        new_line = ''
+        for match in matches:
+            path = match.group(1).strip()
+            print(f'path: {path}')
+            # Remove filename from path
+            path = '/'.join(path.split('/')[:-1])
+            print(f'new path: {path}')
+            filename = match.group(2).strip()
+            print(f'filename: {filename}')
+            new_line = f'{trace.replace(path, "").strip()}'
+            print(f'new_line: {new_line}')
+        # split_trace[1] will be the statement that caused the error
+        # statement = split_trace[1].strip()
+        # print(f'statement: {statement}')
+        # split_trace[2] will be the error message
+        # error_message = split_trace[2].strip()
+        # print(f'error_message: {error_message}')
+        new_errors.append(f"## Test case: {test_name}\n\n```\n{new_line.strip()}\n```")
+    print(f'new_errors: {new_errors}')
+    return '\n'.join(new_errors)
