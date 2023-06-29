@@ -113,7 +113,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, retries=4, debug=False):
+async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, retries=3, debug=False):
     defined_classes = list()
     if types is not None and len(types.keys()) > 0:
         # look if the func uses any of the types
@@ -254,7 +254,7 @@ async def fix_file(filename, lint_text, stats, retries=3):
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=10):
+async def lint_and_fix_files(files, stats, max_depth=4):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -329,8 +329,8 @@ async def lint_and_fix_files(files, stats, max_depth=10):
     await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, stats, max_depth=8):
-    if max_depth == 0:
+async def test_and_fix_files(func, files, stats, retries=3):
+    if retries == 0:
         raise Exception('Failed to fix code', func)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith('_test.py')][0]
@@ -435,12 +435,12 @@ async def test_and_fix_files(func, files, stats, max_depth=8):
             subdir = '/'.join(code_file.split('/')[:-1])
             write_files_from_markdown(doc, subdir=subdir)
         except Exception:
-            if max_depth == 0:
+            if retries == 0:
                 raise Exception('Failed to fix code', func)
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(func, files, stats, max_depth - 1)
+        return await test_and_fix_files(func, files, stats, retries - 1)
 
 
 async def gpt_type_to_python(type, stats, retries=2) -> str:
