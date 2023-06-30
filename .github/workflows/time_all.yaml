@@ -2,6 +2,15 @@ name: Run all time scripts
 
 on:
   workflow_dispatch:
+    inputs:
+      attempts:
+        description: "Number of attempts to run the test"
+        required: false
+        default: 1
+      parallel_runs:
+        description: "Number of parallel runs"
+        required: false
+        default: 1
 
 jobs:
   time_all:
@@ -25,5 +34,5 @@ jobs:
             echo "Calling 'time' job with 'test' input: $TEST_STRING"
             curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'", "ref": "${{ github.sha }}"}'
+              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.sha }}"}'
           done
