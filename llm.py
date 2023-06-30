@@ -18,43 +18,6 @@ t0 = time.time()
 base_path = '.'
 if hasattr(sys, '_MEIPASS'):
     base_path = sys._MEIPASS
-# Load examples used with ChatGPT
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci.mrsh'), 'r')
-fibonacci_mrsh = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci.py'), 'r')
-fibonacci_py = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci_test.py'), 'r')
-fibonacci_test = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/before.py'), 'r')
-connection_lint_before = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/pylama.txt'), 'r')
-connection_lint_pylama = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/after.py'), 'r')
-connection_lint_after = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/func.mrsh'), 'r')
-func_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/before.py'), 'r')
-before_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/before_test.py'), 'r')
-before_test_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/test_results.txt'), 'r')
-test_results_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/after.py'), 'r')
-after_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/after_test.py'), 'r')
-after_test_correction = f.read()
-f.close()
 
 # Determine what name the user's `python` executable is (`python` or `python3`)
 python = 'python' if shutil.which('python') is not None else 'python3'
@@ -117,10 +80,11 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
 async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
     func_for_llm = format_func_for_llm(
         marsha_filename, functions, defined_types)
-    print(f'''func_for_llm = 
-        ---- start ----
+    if debug:
+        print(f'''func_for_llm = 
+    ---- start ----
 {func_for_llm}
-        ---- end ----''')
+    ---- end ----''')
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
@@ -233,29 +197,7 @@ Your response must match exactly the following markdown format and nothing else:
 
 In your response, do not include any explanation, notes, or comments.
 ''',
-        },
-            #         {
-            #             'role': 'user',
-            #             'content': f'''# extract_connection_info.py
-
-            # ```py
-            # {connection_lint_before}
-            # ```
-
-            # # pylama results
-
-            # ```
-            # {connection_lint_pylama}
-            # ```''',
-            #         }, {
-            #             'role': 'assistant',
-            #             'content': f'''# extract_connection_info.py
-
-            # ```py
-            # {connection_lint_after}
-            # ```'''
-            #         },
-            {
+        }, {
             'role': 'user',
             'content': f'''# {filename}
 
@@ -414,41 +356,7 @@ Your response must match exactly the following markdown format and nothing else:
 
 In your response, do not include any explanation, notes, or comments.
 ''',
-            },
-                #             {
-                #                 'role': 'user',
-                #                 'content': f'''{format_func_for_llm([func_correction])}
-
-                # # extract_connection_info.py
-
-                # ```py
-                # {before_correction}
-                # ```
-
-                # # extract_connection_info_test.py
-
-                # ```py
-                # {before_test_correction}
-                # ```
-
-                # # Test Results
-
-                # {test_results_correction}''',
-                #             }, {
-                #                 'role': 'assistant',
-                #                 'content': f'''# extract_connection_info.py
-
-                # ```py
-                # {after_correction}
-                # ```
-
-                # # extract_connection_info_test.py
-
-                # ```py
-                # {after_test_correction}
-                # ```''',
-                #             },
-                {
+            }, {
                 'role': 'user',
                 'content': f'''{format_func_for_llm(marsha_filename, functions)}
 
