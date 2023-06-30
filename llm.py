@@ -8,7 +8,8 @@ import time
 import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import extract_function_name, extract_type_name, validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
+from marsha import read_file
+from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -113,17 +114,9 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], n_results: int, stats: dict, defined_types: list[str] = None, retries: int=3, debug: bool=False):
-    # defined_classes = list()
-    # if types is not None and len(types.keys()) > 0:
-    #     # look if the func uses any of the types
-    #     for type in types.keys():
-    #         if type in func:
-    #             # if so, we update the prompt to include the python class definition and use it in the completion
-    #             defined_classes.append(types[type])
-    # defined_classes = defined_types.values() if defined_types is not None else []
-
-    func_for_llm = format_func_for_llm(marsha_filename, functions, defined_types)
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
+    func_for_llm = format_func_for_llm(
+        marsha_filename, functions, defined_types)
     print(f'''func_for_llm = 
         ---- start ----
 {func_for_llm}
@@ -150,19 +143,7 @@ Your response must match exactly the following markdown format and nothing else:
 
 In your response, do not include any explanation, notes, or comments.
 ''',
-        }, 
-#         {
-#             'role': 'user',
-#             'content': f'''{format_func_for_llm([fibonacci_mrsh])}'''
-#         }, {
-#             'role': 'assistant',
-#             'content': f'''# fibonnaci.py
-
-# ```py
-# {fibonacci_py}
-# ```'''
-#         }, 
-        {
+        }, {
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
@@ -187,19 +168,7 @@ Your response must match exactly the following markdown format and nothing else:
 
 In your response, do not include any explanation, notes, or comments.
 ''',
-        }, 
-#         {
-#             'role': 'user',
-#             'content': f'''{format_func_for_llm([fibonacci_mrsh])}'''
-#         }, {
-#             'role': 'assistant',
-#             'content': f'''# fibonnaci_test.py
-
-# ```py
-# {fibonacci_test}
-# ```'''
-#         }, 
-        {
+        }, {
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
@@ -212,7 +181,6 @@ In your response, do not include any explanation, notes, or comments.
         for i in range(n_results):
             doc = reses[0].choices[i].message.content + \
                 '\n\n' + reses[1].choices[i].message.content
-            print(f'''doc = {doc}''')
             # Some validation that the generated file matches the expected format of:
             # # function_name.py
             # ```py
@@ -235,40 +203,59 @@ In your response, do not include any explanation, notes, or comments.
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, n_results, stats, defined_types, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, defined_types, n_results, stats, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', marsha_filename)
 
 
-async def fix_file(filename, lint_text, stats, retries=3):
-    f = open(filename, 'r')
-    code = f.read()
-    f.close()
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: dict, retries=3):
+    code = read_file(filename)
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer working on a Python 3 function. You are using the pylama linting tool to find obvious errors and then fixing them. It uses pyflakes and pycodestyle under the hood to provide its recommendations, and all of the lint errors require fixing.',
-        }, {
-            'role': 'user',
-            'content': f'''# extract_connection_info.py
+            'content': f'''You are a senior software engineer working on a Python 3 function.
+You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
+All of the lint errors require fixing.
+You should only fix the lint errors and not change anything else.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
 
 ```py
-{connection_lint_before}
+<fixed code>
 ```
 
-# pylama results
-
-```
-{connection_lint_pylama}
-```''',
-        }, {
-            'role': 'assistant',
-            'content': f'''# extract_connection_info.py
+# {marsha_filename}_test.py
 
 ```py
-{connection_lint_after}
-```'''
-        }, {
+<fixed code>
+```
+
+In your response, do not include any explanation, notes, or comments.
+''',
+        },
+            #         {
+            #             'role': 'user',
+            #             'content': f'''# extract_connection_info.py
+
+            # ```py
+            # {connection_lint_before}
+            # ```
+
+            # # pylama results
+
+            # ```
+            # {connection_lint_pylama}
+            # ```''',
+            #         }, {
+            #             'role': 'assistant',
+            #             'content': f'''# extract_connection_info.py
+
+            # ```py
+            # {connection_lint_after}
+            # ```'''
+            #         },
+            {
             'role': 'user',
             'content': f'''# {filename}
 
@@ -293,12 +280,12 @@ async def fix_file(filename, lint_text, stats, retries=3):
         write_files_from_markdown(doc)
     except Exception:
         if retries > 0:
-            return await fix_file(filename, lint_text, stats, retries - 1)
+            return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1)
         else:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=4):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict, max_depth: int = 4):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -367,13 +354,13 @@ async def lint_and_fix_files(files, stats, max_depth=4):
                       for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
-            jobs.append(fix_file(file, lint_text, stats))
+            jobs.append(fix_file(marsha_filename, file, lint_text, stats))
     await asyncio.gather(*jobs)
 
-    await lint_and_fix_files(files, stats, max_depth - 1)
+    await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int=4):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
@@ -397,12 +384,8 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
-        f = open(test_file, 'r')
-        test = f.read()
-        f.close()
-        f = open(code_file, 'r')
-        code = f.read()
-        f.close()
+        test = read_file(test_file)
+        code = read_file(code_file)
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
@@ -425,42 +408,44 @@ Your response must match exactly the following markdown format and nothing else:
 ```py
 <fixed code>
 ```
+
+In your response, do not include any explanation, notes, or comments.
 ''',
-            }, 
-#             {
-#                 'role': 'user',
-#                 'content': f'''{format_func_for_llm([func_correction])}
+            },
+                #             {
+                #                 'role': 'user',
+                #                 'content': f'''{format_func_for_llm([func_correction])}
 
-# # extract_connection_info.py
+                # # extract_connection_info.py
 
-# ```py
-# {before_correction}
-# ```
+                # ```py
+                # {before_correction}
+                # ```
 
-# # extract_connection_info_test.py
+                # # extract_connection_info_test.py
 
-# ```py
-# {before_test_correction}
-# ```
+                # ```py
+                # {before_test_correction}
+                # ```
 
-# # Test Results
+                # # Test Results
 
-# {test_results_correction}''',
-#             }, {
-#                 'role': 'assistant',
-#                 'content': f'''# extract_connection_info.py
+                # {test_results_correction}''',
+                #             }, {
+                #                 'role': 'assistant',
+                #                 'content': f'''# extract_connection_info.py
 
-# ```py
-# {after_correction}
-# ```
+                # ```py
+                # {after_correction}
+                # ```
 
-# # extract_connection_info_test.py
+                # # extract_connection_info_test.py
 
-# ```py
-# {after_test_correction}
-# ```''',
-#             }, 
-            {
+                # ```py
+                # {after_test_correction}
+                # ```''',
+                #             },
+                {
                 'role': 'user',
                 'content': f'''{format_func_for_llm(marsha_filename, functions)}
 
@@ -506,62 +491,3 @@ Your response must match exactly the following markdown format and nothing else:
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
         return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1)
-
-
-async def gpt_type_to_python(type, stats, retries=2) -> str:
-    res = await retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 class. The assignment is written in markdown format, with a markdown title consisting of the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Just return the markdown as is in the example below, do not add any additional code or info. Make sure to add the __str__, __repr__, and __eq__ methods to the class.',
-        }, {
-            'role': 'user',
-            'content': '''# type SKU
-name,price,quantity
-"Widget",10.00,100
-"Gadget",20.00,50
-"Gizmo",30.00,25'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# type SKU
-
-```py
-class SKU:
-    def __init__(self, name, price, quantity):
-        self.name = name
-        self.price = price
-        self.quantity = quantity
-
-    def __repr__(self):
-        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
-
-    def __str__(self):
-        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
-
-    def __eq__(self, other):
-        return self.name == other.name and self.price == other.price and self.quantity == other.quantity
-```'''
-        }, {
-            'role': 'user',
-            'content': f'''{type}'''
-        }],
-    })
-    stats['class_generation']['total_calls'] += 1
-    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
-    # try again (or fully error out, for now)
-    try:
-        # If it fails to parse, it will throw here
-        doc = res.choices[0].message.content
-        # Some validation that the generated file matches the expected format of:
-        # # type Person
-        #
-        # ```py
-        # <insert code here>
-        # ```
-        if not validate_type_markdown(doc, extract_type_name(type)):
-            raise Exception('Invalid output format')
-        return extract_class_definition(doc)
-    except Exception:
-        if retries > 0:
-            return await gpt_type_to_python(type, stats, retries - 1)
-        else:
-            raise Exception('Failed to generate code', type)

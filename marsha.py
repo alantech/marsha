@@ -232,7 +232,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
-        await lint_and_fix_files(files, stats)
+        await lint_and_fix_files(marsha_filename, files, stats)
     except Exception as e:
         print('Second stage failure')
         print(e)
