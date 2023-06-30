@@ -10,12 +10,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Call 'time' job for each string
-        shell: bash
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
+      - name: Call 'time' job for each test file
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           TEST_STRINGS: '["./examples/test/sort_modules.mrsh", "./examples/test/data_mangling.mrsh"]'
         run: |
           for TEST_STRING in $TEST_STRINGS
