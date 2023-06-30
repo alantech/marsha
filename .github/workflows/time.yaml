@@ -69,11 +69,21 @@ jobs:
         shell: bash
         run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
         id: extract_branch
-      - name: Notify
+      - name: Notify from input
         uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.inputs.test != '' }}
         with:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
           description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
+          include-details: false
+      - name: Notify from payload
+        uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.client_payload.test != '' }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: 'Test file: ${{ github.event.client_payload.test }} - Branch: ${{ github.event.client_payload.ref }} - Results: ${{ needs.run.outputs.results }}'
           include-details: false
