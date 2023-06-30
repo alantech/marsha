@@ -23,16 +23,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          TEST_STRINGS: "
-              ./examples/test/sort_modules.mrsh
-              ./examples/test/data_mangling.mrsh
-            "
 
         run: |
-          for TEST_STRING in $TEST_STRINGS
-          do
-            echo "Calling 'time' job with 'test' input: $TEST_STRING"
-            curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.sha }}"}'
+          for file in "./examples"/*/".mrsh"; do
+            if [[ -f "$file" ]]; then
+              echo "Calling 'time' job with 'test' input: $file"
+              curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
+                -d '{"event_type": "time", "client_payload": {"test": "'"$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.sha }}"}'
+            fi
           done
