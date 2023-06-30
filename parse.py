@@ -102,7 +102,8 @@ def format_func_for_llm(marsha_filename: str, functions: list[str], defined_type
             desc_parts.append(to_markdown(child))
         desc = '\n\n'.join(desc_parts)
 
-        arg_fmt = '\n'.join([f'{i + 1}. {arg}' for (i, arg) in enumerate(args)])
+        arg_fmt = '\n'.join(
+            [f'{i + 1}. {arg}' for (i, arg) in enumerate(args)])
 
         fn_def = f'''## Requirements for function `{name}`
 
@@ -131,14 +132,6 @@ def format_func_for_llm(marsha_filename: str, functions: list[str], defined_type
 '''
             res.append(type_def)
     return break_line.join(res)
-
-
-def extract_function_name(func):
-    ast = ast_renderer.get_ast(Document(func))
-    if ast['children'][0]['type'] != 'Heading':
-        raise Exception('Invalid Marsha function')
-    header = ast['children'][0]['children'][0]['content']
-    return header.split('(')[0].split('func')[1].strip()
 
 
 # TODO: Potentially re-org this so the stages are together?
@@ -245,6 +238,7 @@ def is_defined_from_file(md):
     if len(split_header) != 3:
         return False
     return True
+
 
 def extract_type_filename(md):
     ast = ast_renderer.get_ast(Document(md))
