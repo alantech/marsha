@@ -115,7 +115,8 @@ async def process_types(types: list[str], stats: dict) -> dict:
         if is_defined_from_file(type):
             print('Reading type from file...')
             filename = extract_type_filename(type)
-            f = open(filename, 'r')
+            full_path = os.path.dirname(filename) + os.path.basename(filename)
+            f = open(full_path, 'r')
             file_data = f.read()
             f.close()
             type = f'''# type {type_name}
