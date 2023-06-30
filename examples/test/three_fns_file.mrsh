@@ -1,0 +1,42 @@
+# func fibonacci(integer): integer in the set of fibonacci numbers
+
+This function calculates the nth fibonacci number, where n is provided to it and starts with 1.
+
+fibonacci(n) = fibonacci(n - 1) + fibonacci(n - 2)
+
+* fibonacci(1) = 1
+* fibonacci(2) = 1
+* fibonacci(3) = 2
+* fibonacci(0) throws an error
+
+# func extract_args(function call string): list of all arguments
+
+This function extracts all arguments from a given function call string. Some arguments might be function calls themselves, so it need to work recursively in order to just keep constants and named variable. It returns a list of arguments (constants and named variables).
+
+* extract_args('fn()') = []
+* extract_args('sum(a, b)') = ['a', 'b']
+* extract_args('sum(a, sub(b, 0))') = ['a', 'b', 0]
+* extract_args('sum(a, sub(b, id(c)))') = ['a', 'b', 'c']
+* extract_args('') throws a not a function error
+* extract_args('a') throws a not a function error
+* extract_args('what ever string') throws a not a function error
+* extract_args(3) throws an error for invalid type
+
+# type person
+name, age
+Joe, 20
+Jane, 50
+Felix, 10
+Alex, 60
+
+# func sort_by_age(person list, ascending boolean flag): person list ordered by age
+
+This function receives a list of `person` objects and return them ordered by age ascending or descending depending on the boolean flag. The default value for the ascending flag is true.
+
+* sort_by_age([person('Joe', 20)]) = [person('Joe', 20)]
+* sort_by_age([person('Joe', 20)], false) = [person('Joe', 20)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)]) = [person('Felix', 10), person('Joe', 20), person('Jane', 50), person('Alex', 60)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)], true) = [person('Felix', 10), person('Joe', 20), person('Jane', 50), person('Alex', 60)]
+* sort_by_age([person('Joe', 20), person('Jane', 50), person('Felix', 10), person('Alex', 60)], false) = [person('Alex', 60), person('Jane', 50), person('Joe', 20), person('Felix', 10)]
+* sort_by_age([]) = []
+* sort_by_age() = throws a no list received error
