@@ -15,7 +15,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TEST_STRINGS: "
-              ./examples/test/sort_modules.mrsh,
+              ./examples/test/sort_modules.mrsh
               ./examples/test/data_mangling.mrsh
             "
 
@@ -25,5 +25,5 @@ jobs:
             echo "Calling 'time' job with 'test' input: $TEST_STRING"
             curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'"}'
+              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'", "ref": "${{ github.ref }}"}'
           done
