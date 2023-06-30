@@ -68,6 +68,7 @@ async def main():
     print(f'Compiling functions for {marsha_filename}...')
     quick_and_dirty = args.quick_and_dirty
     debug = args.debug
+    should_write_stats = args.stats
     attempts = args.attempts
     n_results = args.n_parallel_executions
     if args.debug:
@@ -141,8 +142,8 @@ async def main():
             stats['second_stage']['total_calls'] + \
             stats['third_stage']['total_calls'] + \
             stats['class_generation']['total_calls']
-        if args.stats:
-            stats_to_file()
+        if should_write_stats:
+            stats_to_file(stats)
         raise Exception(
             f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
     t2 = time.time()
@@ -152,8 +153,8 @@ async def main():
         stats['second_stage']['total_calls'] + \
         stats['third_stage']['total_calls'] + \
         stats['class_generation']['total_calls']
-    if args.stats:
-        stats_to_file()
+    if should_write_stats:
+        stats_to_file(stats)
     print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
