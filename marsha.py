@@ -197,6 +197,11 @@ async def run_parallel_tasks(tasks) -> str:
 
 async def main():
     t1 = time.time()
+    input_file = args.source
+    marsha_filename = os.path.basename(input_file)
+    # Name without extension
+    marsha_filename = os.path.splitext(marsha_filename)[0]
+    print(f'marsha_filename: {marsha_filename}')
     f = open(args.source, 'r')
     marsha_file = f.read()
     f.close()
@@ -213,105 +218,105 @@ async def main():
                 print(f'# type {key}\n')
                 print(value)
                 print()
-    for func in functions:
-        func_name = extract_function_name(func)
-        print(f'Compiling function {func_name}...')
-        attempts = args.attempts
-        n_results = args.n_parallel_executions
-        if args.debug:
-            print(f'Number of attempts: {attempts}')
-            print(f'Number of parallel executions: {n_results}')
-        while attempts:
-            attempts = attempts - 1
-            t_fsi = time.time()
-            print('Generating Python code...')
-            mds = None
-            try:
-                mds = await gpt_func_to_python(func, types=classes_defined, debug=args.debug, n_results=n_results, stats=stats)
-            except Exception as e:
-                print('First stage failure')
-                print(e)
-                print('Retrying')
-                continue
-            finally:
-                t_fsii = time.time()
-                stats['first_stage']['total_time'] = prettify_time_delta(
-                    t_fsii - t_fsi)
-            if args.quick_and_dirty:
-                print('Writing generated code to files...')
-                for md in mds[:2]:
-                    write_files_from_markdown(md)
-                attempts = attempts + 1
-                break
-            filenames = list()
-            for idx, md in enumerate(mds):
-                print('Writing generated code to temporal files...')
-                filenames = filenames + \
-                    write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
-            if args.debug:
-                for filename in filenames:
-                    print(f'# {filename}\n')
-                    f = open(filename, 'r')
-                    print(f.read())
-                    f.close()
-                    print()
-            # Create a new list of files having the i and i+1 files together
-            # This is because we want to run the linting and testing in parallel
-            # but we need to make sure that the linting and testing is done on
-            # the same files (func and test) together
-            files_grouped = [filenames[i:i + 2]
-                             for i in range(0, len(filenames), 2)]
-            # Create tasks to run in parallel using asyncio
-            tasks = []
-            for file_group in files_grouped:
-                tasks.append(asyncio.create_task(
-                    fix_files_func(file_group, func, stats), name=file_group[0]))
-            task_names = [task.get_name() for task in tasks]
-            try:
-                done_task_name = await run_parallel_tasks(tasks)
-                for name in task_names:
-                    if name != done_task_name:
-                        delete_dir_and_content(name)
-                    else:
-                        print('Writing generated code to files...')
-                        filename = name
-                        test_filename = filename.replace('.py', '_test.py')
-                        copy_file(filename, f'{func_name}.py')
-                        copy_file(test_filename, f'{func_name}_test.py')
-                        delete_dir_and_content(filename)
-            except Exception as e:
-                print('Failed to generate working code.')
-                print(e)
-                if not args.debug:
-                    for name in task_names:
-                        delete_dir_and_content(name)
-                print('Retrying...')
-                continue
-            # Done! Add one back to `attempts` to avoid accidentally erroring out on success
-            attempts = attempts + 1
-            break
-        if attempts == 0:
-            t2 = time.time()
-            stats['total_time'] = prettify_time_delta(t2 - t1)
-            stats['attempts'] = args.attempts
-            stats['total_calls'] = stats['first_stage']['total_calls'] + \
-                stats['second_stage']['total_calls'] + \
-                stats['third_stage']['total_calls'] + \
-                stats['class_generation']['total_calls']
-            if args.stats:
-                stats_to_file()
-            raise Exception(
-                f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
-        t2 = time.time()
-        stats['total_time'] = prettify_time_delta(t2 - t1)
-        stats['attempts'] = args.attempts - attempts + 1
-        stats['total_calls'] = stats['first_stage']['total_calls'] + \
-            stats['second_stage']['total_calls'] + \
-            stats['third_stage']['total_calls'] + \
-            stats['class_generation']['total_calls']
-        if args.stats:
-            stats_to_file()
-        print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
+    # for func in functions:
+    # func_name = extract_function_name(func)
+    print(f'Compiling functions for {marsha_filename}...')
+    attempts = args.attempts
+    n_results = args.n_parallel_executions
+    if args.debug:
+        print(f'Number of attempts: {attempts}')
+        print(f'Number of parallel executions: {n_results}')
+    while attempts:
+        attempts = attempts - 1
+        t_fsi = time.time()
+        print('Generating Python code...')
+        mds = None
+        try:
+            mds = await gpt_func_to_python(marsha_filename, functions, types=classes_defined, debug=args.debug, n_results=n_results, stats=stats)
+        except Exception as e:
+            print('First stage failure')
+            print(e)
+            print('Retrying')
+            continue
+        finally:
+            t_fsii = time.time()
+            stats['first_stage']['total_time'] = prettify_time_delta(
+                t_fsii - t_fsi)
+    #     if args.quick_and_dirty:
+    #         print('Writing generated code to files...')
+    #         for md in mds[:2]:
+    #             write_files_from_markdown(md)
+    #         attempts = attempts + 1
+    #         break
+    #     filenames = list()
+    #     for idx, md in enumerate(mds):
+    #         print('Writing generated code to temporal files...')
+    #         filenames = filenames + \
+    #             write_files_from_markdown(md, subdir=f'{marsha_filename}_{idx}')
+    #     if args.debug:
+    #         for filename in filenames:
+    #             print(f'# {filename}\n')
+    #             f = open(filename, 'r')
+    #             print(f.read())
+    #             f.close()
+    #             print()
+    #     # Create a new list of files having the i and i+1 files together
+    #     # This is because we want to run the linting and testing in parallel
+    #     # but we need to make sure that the linting and testing is done on
+    #     # the same files (func and test) together
+    #     files_grouped = [filenames[i:i + 2]
+    #                         for i in range(0, len(filenames), 2)]
+    #     # Create tasks to run in parallel using asyncio
+    #     tasks = []
+    #     for file_group in files_grouped:
+    #         tasks.append(asyncio.create_task(
+    #             fix_files_func(marsha_filename, file_group, functions, stats), name=file_group[0]))
+    #     task_names = [task.get_name() for task in tasks]
+    #     try:
+    #         done_task_name = await run_parallel_tasks(tasks)
+    #         for name in task_names:
+    #             if name != done_task_name:
+    #                 delete_dir_and_content(name)
+    #             else:
+    #                 print('Writing generated code to files...')
+    #                 filename = name
+    #                 test_filename = filename.replace('.py', '_test.py')
+    #                 # copy_file(filename, f'{func_name}.py')
+    #                 # copy_file(test_filename, f'{func_name}_test.py')
+    #                 # delete_dir_and_content(filename)
+    #     except Exception as e:
+    #         print('Failed to generate working code.')
+    #         print(e)
+    #         # if not args.debug:
+    #         #     for name in task_names:
+    #         #         delete_dir_and_content(name)
+    #         print('Retrying...')
+    #         continue
+    #     # Done! Add one back to `attempts` to avoid accidentally erroring out on success
+    #     attempts = attempts + 1
+    #     break
+    # if attempts == 0:
+    #     t2 = time.time()
+    #     stats['total_time'] = prettify_time_delta(t2 - t1)
+    #     stats['attempts'] = args.attempts
+    #     stats['total_calls'] = stats['first_stage']['total_calls'] + \
+    #         stats['second_stage']['total_calls'] + \
+    #         stats['third_stage']['total_calls'] + \
+    #         stats['class_generation']['total_calls']
+    #     if args.stats:
+    #         stats_to_file()
+    #     raise Exception(
+    #         f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
+    # t2 = time.time()
+    # stats['total_time'] = prettify_time_delta(t2 - t1)
+    # stats['attempts'] = args.attempts - attempts + 1
+    # stats['total_calls'] = stats['first_stage']['total_calls'] + \
+    #     stats['second_stage']['total_calls'] + \
+    #     stats['third_stage']['total_calls'] + \
+    #     stats['class_generation']['total_calls']
+    # if args.stats:
+    #     stats_to_file()
+    # print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
 asyncio.run(main())

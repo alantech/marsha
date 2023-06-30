@@ -113,50 +113,83 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, retries=3, debug=False):
-    defined_classes = list()
-    if types is not None and len(types.keys()) > 0:
-        # look if the func uses any of the types
-        for type in types.keys():
-            if type in func:
-                # if so, we update the prompt to include the python class definition and use it in the completion
-                defined_classes.append(types[type])
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], n_results, stats: dict, types: dict = None, retries=3, debug=False):
+    # defined_classes = list()
+    # if types is not None and len(types.keys()) > 0:
+    #     # look if the func uses any of the types
+    #     for type in types.keys():
+    #         if type in func:
+    #             # if so, we update the prompt to include the python class definition and use it in the completion
+    #             defined_classes.append(types[type])
+    defined_classes = types.values() if types is not None else []
 
-    func_for_llm = format_func_for_llm(func, defined_classes)
+    func_for_llm = format_func_for_llm(marsha_filename, functions, defined_classes)
+    print(f'''func_for_llm = {func_for_llm}''')
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
-        }, {
-            'role': 'user',
-            'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# fibonnaci.py
+            'content': f'''You are a senior software engineer assigned to write Python 3 functions. 
+The assignment is written in markdown format.
+The description of each function should be included as a docstring.
+Add type hints if feasible.
+The filename should exactly match the name `{marsha_filename}.py`.
+Make sure to follow PEP8 guidelines.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
 
 ```py
-{fibonacci_py}
-```'''
-        }, {
+<generated code>
+```
+''',
+        }, 
+#         {
+#             'role': 'user',
+#             'content': f'''{format_func_for_llm([fibonacci_mrsh])}'''
+#         }, {
+#             'role': 'assistant',
+#             'content': f'''# fibonnaci.py
+
+# ```py
+# {fibonacci_py}
+# ```'''
+#         }, 
+        {
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
     }, n_results=n_results), retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py. Unknown imports might come from the file where the function is defined, or from the standard library.',
-        }, {
-            'role': 'user',
-            'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# fibonnaci_test.py
+            'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+The assignment is written in markdown format.
+The unit tests created should exactly match the example cases provided for each function.
+You have to create a TestCase per function provided.
+The filename should exactly match the name `{marsha_filename}_test.py`.
+Unknown imports might come from the file where the function is defined, or from the standard library.
+Make sure to follow PEP8 guidelines.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}_test.py
 
 ```py
-{fibonacci_test}
-```'''
-        }, {
+<generated code>
+```
+''',
+        }, 
+#         {
+#             'role': 'user',
+#             'content': f'''{format_func_for_llm([fibonacci_mrsh])}'''
+#         }, {
+#             'role': 'assistant',
+#             'content': f'''# fibonnaci_test.py
+
+# ```py
+# {fibonacci_test}
+# ```'''
+#         }, 
+        {
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
@@ -169,6 +202,7 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
         for i in range(n_results):
             doc = reses[0].choices[i].message.content + \
                 '\n\n' + reses[1].choices[i].message.content
+            print(f'''doc = {doc}''')
             # Some validation that the generated file matches the expected format of:
             # # function_name.py
             # ```py
@@ -178,7 +212,7 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
             # ```py
             # <insert code here>
             # ```
-            if validate_first_stage_markdown(doc, extract_function_name(func)):
+            if validate_first_stage_markdown(doc, marsha_filename):
                 mds.append(doc)
             else:
                 if debug:
@@ -191,9 +225,9 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, n_results, stats, types, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, n_results, stats, types, retries - 1, debug)
         else:
-            raise Exception('Failed to generate code', func)
+            raise Exception('Failed to generate code', marsha_filename)
 
 
 async def fix_file(filename, lint_text, stats, retries=3):
