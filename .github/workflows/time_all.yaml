@@ -10,20 +10,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Call 'time' job for each test file
+      - name: Call 'time' job for each test file in 'examples'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          TEST_STRINGS: "
-              ./examples/test/sort_modules.mrsh,
-              ./examples/test/data_mangling.mrsh
-            "
 
         run: |
-          for TEST_STRING in $TEST_STRINGS
-          do
-            echo "Calling 'time' job with 'test' input: $TEST_STRING"
+          for file in "./examples/*/*.mrsh"; do
+            echo "Calling 'time' job with 'test' input: $file"
             curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "$TEST_STRING"}}'
+              -d '{"event_type": "time", "client_payload": {"test": "$file"}}'
           done
