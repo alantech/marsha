@@ -46,9 +46,9 @@ jobs:
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
-          TEST: ${{ github.event.inputs.test }} ${{ github.event.client_payload.test }}
-          ATTEMPTS: ${{ github.event.inputs.attempts }} ${{ github.event.client_payload.attempts }}
-          PARALLEL_RUNS: ${{ github.event.inputs.parallel_runs }} ${{ github.event.client_payload.parallel_runs }}
+          TEST: (${{ github.event.inputs.test }} ${{ github.event.client_payload.test }})
+          ATTEMPTS: (${{ github.event.inputs.attempts }} ${{ github.event.client_payload.attempts }})
+          PARALLEL_RUNS: (${{ github.event.inputs.parallel_runs }} ${{ github.event.client_payload.parallel_runs }})
 
   notify:
     name: Discord Notification
