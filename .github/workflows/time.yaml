@@ -39,7 +39,7 @@ jobs:
       - name: Output Payload
         run: echo "${{ toJSON(github.event.client_payload) }}"
       - name: Run time script from payload
-        id: run-hook
+        id: run-payload
         if: "${{ github.event.client_payload.test != '' }}"
         run: |
           make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
@@ -48,7 +48,7 @@ jobs:
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
       - name: Run time script from input
-        id: run-manual
+        id: run-input
         if: "${{ github.event.inputs.test != '' }}"
         run: |
           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
@@ -76,7 +76,7 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
+          description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run-input.outputs.results }}'
           include-details: false
       - name: Notify from payload
         uses: nobrayner/discord-webhook@v1
@@ -85,5 +85,5 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.client_payload.test }} - Branch: ${{ github.event.client_payload.ref }} - Results: ${{ needs.run.outputs.results }}'
+          description: 'Test file: ${{ github.event.client_payload.test }} - Branch: ${{ github.event.client_payload.ref }} - Results: ${{ needs.run-payload.outputs.results }}'
           include-details: false
