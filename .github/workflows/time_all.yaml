@@ -11,19 +11,16 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Call 'time' job for each string
-        uses: peter-evans/repository-dispatch@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          event-type: time
-          client-payload: '{"test": "${{ matrix.test_string }}"}'
         env:
           TEST_STRINGS: '["./examples/test/sort_modules.mrsh", "./examples/test/data_mangling.mrsh"]'
         run: |
           for TEST_STRING in $TEST_STRINGS
           do
             echo "Calling 'time' job with 'test' input: $TEST_STRING"
-            curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.everest-preview+json" \
+            curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "'"$TEST_STRING"'"}}'
+              -d '{"event_type": "time", "client_payload": {"test": "$TEST_STRING"}}'
           done
