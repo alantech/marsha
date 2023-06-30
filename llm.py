@@ -113,7 +113,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], n_results, stats: dict, types: dict = None, retries=3, debug=False):
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], n_results: int, stats: dict, defined_types: list[str] = None, retries: int=3, debug: bool=False):
     # defined_classes = list()
     # if types is not None and len(types.keys()) > 0:
     #     # look if the func uses any of the types
@@ -121,10 +121,13 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], n_resul
     #         if type in func:
     #             # if so, we update the prompt to include the python class definition and use it in the completion
     #             defined_classes.append(types[type])
-    defined_classes = types.values() if types is not None else []
+    # defined_classes = defined_types.values() if defined_types is not None else []
 
-    func_for_llm = format_func_for_llm(marsha_filename, functions, defined_classes)
-    print(f'''func_for_llm = {func_for_llm}''')
+    func_for_llm = format_func_for_llm(marsha_filename, functions, defined_types)
+    print(f'''func_for_llm = 
+        ---- start ----
+{func_for_llm}
+        ---- end ----''')
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
@@ -136,6 +139,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
+If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must match exactly the following markdown format and nothing else:
 
 # {marsha_filename}.py
@@ -143,6 +147,8 @@ Your response must match exactly the following markdown format and nothing else:
 ```py
 <generated code>
 ```
+
+In your response, do not include any explanation, notes, or comments.
 ''',
         }, 
 #         {
@@ -178,6 +184,8 @@ Your response must match exactly the following markdown format and nothing else:
 ```py
 <generated code>
 ```
+
+In your response, do not include any explanation, notes, or comments.
 ''',
         }, 
 #         {
@@ -227,7 +235,7 @@ Your response must match exactly the following markdown format and nothing else:
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, n_results, stats, types, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, n_results, stats, defined_types, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', marsha_filename)
 

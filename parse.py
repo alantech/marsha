@@ -68,7 +68,7 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_func_for_llm(marsha_filename: str, functions: list[str], defined_classes: list[str] = None):
+def format_func_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
     break_line = '\n'
     res = [f'# Requirements for file `{marsha_filename}`']
     for func in functions:
@@ -118,15 +118,18 @@ def format_func_for_llm(marsha_filename: str, functions: list[str], defined_clas
 
 {desc}
 
-{defined_classes is not None and len(defined_classes) > 0 and f"""### Must include the following classes
-{break_line.join(defined_classes)}""" or ""
-}
-
 ### Examples of expected behavior
 
 {reqs}
 '''
         res.append(fn_def)
+    if defined_types is not None:
+        res.append(f'## Convert the following type into classes')
+        for defined_type in defined_types:
+            type_def = f'''
+##{defined_type}
+'''
+            res.append(type_def)
     return break_line.join(res)
 
 
