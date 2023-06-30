@@ -1,4 +1,4 @@
-name: Time All
+name: Run all time scripts
 
 on:
   workflow_dispatch:
