@@ -38,13 +38,20 @@ jobs:
         run: echo "${{ toJSON(github.event.inputs) }}"
       - name: Output Payload
         run: echo "${{ toJSON(github.event.client_payload) }}"
-      - name: Run time script
-        id: run
+      - name: Run time script from payload
+        id: run-hook
+        if: "${{ github.event.client_payload.test != '' }}"
         run: |
-          TEST=(${{ github.event.inputs.test }} ${{ github.event.client_payload.test }})
-          ATTEMPTS=(${{ github.event.inputs.attempts }} ${{ github.event.client_payload.attempts }})
-          PARALLEL_RUNS=(${{ github.event.inputs.parallel_runs }} ${{ github.event.client_payload.parallel_runs }})
-          make attempts=$ATTEMPTS test=$TEST stats=True n_parallel_executions=$PARALLEL_RUNS time
+          make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+          results=$(echo $(cat results.md) | tr '\n' ' ')
+          echo "results=$results" >> $GITHUB_OUTPUT
+        env:
+          OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+      - name: Run time script from input
+        id: run-manual
+        if: "${{ github.event.inputs.test != '' }}"
+        run: |
+          make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           results=$(echo $(cat results.md) | tr '\n' ' ')
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
