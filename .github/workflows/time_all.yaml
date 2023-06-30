@@ -1,0 +1,26 @@
+name: Time All
+
+on:
+  workflow_dispatch:
+
+jobs:
+  time_all:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Call 'time' job for each string
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+        env:
+          TEST_STRINGS: '["./examples/test/sort_modules.mrsh", "./examples/test/data_mangling.mrsh"]'
+        run: |
+          for TEST_STRING in $TEST_STRINGS
+          do
+            echo "Calling 'time' job with 'test' input: $TEST_STRING"
+            curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
+              -d '{"event_type": "time", "client_payload": {"test": "$TEST_STRING"}}'
+          done

@@ -2,6 +2,8 @@ name: Run time script
 
 # Trigger workflow manually
 on:
+  repository_dispatch:
+    types: [time]
   workflow_dispatch:
     inputs:
       test:
@@ -10,7 +12,7 @@ on:
         default: "./examples/test/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
-        required: true
+        required: false
         default: 1
       parallel_runs:
         description: "Number of parallel runs"
