@@ -1,0 +1,29 @@
+# type student
+name, age
+Joe, 20
+Jane, 50
+Felix, 10
+Alex, 60
+
+# func sort_by_age(student list, ascending boolean flag): student list ordered by age
+
+This function receives a list of `student` objects and return them ordered by age ascending or descending depending on the boolean flag. The default value for the ascending flag is true.
+
+* sort_by_age([student('Joe', 20)]) = [student('Joe', 20)]
+* sort_by_age([student('Joe', 20)], false) = [student('Joe', 20)]
+* sort_by_age([student('Joe', 20), student('Jane', 50), student('Felix', 10), student('Alex', 60)]) = [student('Felix', 10), student('Joe', 20), student('Jane', 50), student('Alex', 60)]
+* sort_by_age([student('Joe', 20), student('Jane', 50), student('Felix', 10), student('Alex', 60)], true) = [student('Felix', 10), student('Joe', 20), student('Jane', 50), student('Alex', 60)]
+* sort_by_age([student('Joe', 20), student('Jane', 50), student('Felix', 10), student('Alex', 60)], false) = [student('Alex', 60), student('Jane', 50), student('Joe', 20), student('Felix', 10)]
+* sort_by_age([]) = []
+* sort_by_age() = throws a no list received error
+
+
+# func take_youngest(student list): youngest student
+
+This function receive a list of students and should get the youngest one using the `sort_by_age` method.
+
+* take_youngest() = throws a no list received error
+* take_youngest([]) = None
+* take_youngest([student('Joe', 20)]) = student('Joe', 20)
+* take_youngest([student('Joe', 20), student('Jane', 50), student('Felix', 10), student('Alex', 60)]) = student('Felix', 10)
+
