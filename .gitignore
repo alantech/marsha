@@ -3,3 +3,4 @@ build/
 dist/
 venv/
 .env
+examples/test/*.py
