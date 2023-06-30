@@ -1,7 +1,9 @@
-import re
 import os
+import re
 
 from mistletoe import Document, ast_renderer
+
+from utils import write_file
 
 
 def to_markdown(node):
@@ -182,9 +184,7 @@ def write_files_from_markdown(md, subdir=None):
             filedata = section['children'][0]['content']
             if subdir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
-            f = open(filename, 'w')
-            f.write(filedata)
-            f.close()
+            write_file(filename, filedata)
     return filenames
 
 

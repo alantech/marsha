@@ -1,14 +1,12 @@
 import argparse
 import asyncio
 import os
-import shutil
-import time
-
-import autopep8
 import openai
+import time
 
 from llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
+from utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -163,19 +161,6 @@ def get_marsha_filename(filename: str):
     return os.path.splitext(os.path.basename(filename))[0]
 
 
-def read_file(filename: str, mode: str = 'r'):
-    f = open(filename, mode)
-    content = f.read()
-    f.close()
-    return content
-
-
-def write_file(filename: str, content: str, mode: str = 'w'):
-    f = open(filename, mode)
-    f.write(content)
-    f.close()
-
-
 async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
@@ -192,23 +177,6 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
         stats['first_stage']['total_time'] = prettify_time_delta(
             t2 - t1)
     return mds
-
-
-def autoformat_files(files: list[str]):
-    for file in files:
-        before = read_file(file)
-        after = autopep8.fix_code(before)
-        write_file(file, after)
-
-
-def copy_file(src: str, dest: str):
-    shutil.copyfile(src, dest)
-
-
-def delete_dir_and_content(filename: str):
-    dir = os.path.dirname(filename)
-    if os.path.isdir(dir):
-        shutil.rmtree(dir)
 
 
 async def process_types(raw_types: list[str]) -> list[str]:
@@ -311,6 +279,7 @@ Attempts: {stats['attempts']}
 
 '''
     write_file('stats.md', stats_md)
+
 
 # Entry point
 asyncio.run(main())

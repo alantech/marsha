@@ -1,15 +1,15 @@
 import asyncio
+import openai
 import os
 import shutil
 import subprocess
 import sys
 import time
 
-import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from marsha import read_file
 from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
+from utils import read_file
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
