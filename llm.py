@@ -135,6 +135,7 @@ The description of each function should be included as a docstring.
 Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
 Your response must match exactly the following markdown format and nothing else:
 
 # {marsha_filename}.py
@@ -169,6 +170,7 @@ You have to create a TestCase per function provided.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
 Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
 Your response must match exactly the following markdown format and nothing else:
 
 # {marsha_filename}_test.py
@@ -363,9 +365,9 @@ async def lint_and_fix_files(files, stats, max_depth=4):
     await lint_and_fix_files(files, stats, max_depth - 1)
 
 
-async def test_and_fix_files(func, files, stats, retries=3):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int=4):
     if retries == 0:
-        raise Exception('Failed to fix code', func)
+        raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
@@ -396,42 +398,63 @@ async def test_and_fix_files(func, files, stats, retries=3):
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
-                'content': 'You are a senior software engineer helping a junior engineer fix some code that is failing. You are given the documentation of the function they were assigned to write, followed by the function they wrote, the unit tests they wrote, and the unit test results. There is little time before this feature must be included, so you are simply correcting their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.',
-            }, {
+                'content': f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
+You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results. 
+Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
+Make sure to produce working code that passes the unit tests.
+Make sure to follow PEP8 style guidelines.
+Make sure to include all needed standard Python libraries imports.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
+
+```py
+<fixed code>
+```
+
+# {marsha_filename}_test.py
+
+```py
+<fixed code>
+```
+''',
+            }, 
+#             {
+#                 'role': 'user',
+#                 'content': f'''{format_func_for_llm([func_correction])}
+
+# # extract_connection_info.py
+
+# ```py
+# {before_correction}
+# ```
+
+# # extract_connection_info_test.py
+
+# ```py
+# {before_test_correction}
+# ```
+
+# # Test Results
+
+# {test_results_correction}''',
+#             }, {
+#                 'role': 'assistant',
+#                 'content': f'''# extract_connection_info.py
+
+# ```py
+# {after_correction}
+# ```
+
+# # extract_connection_info_test.py
+
+# ```py
+# {after_test_correction}
+# ```''',
+#             }, 
+            {
                 'role': 'user',
-                'content': f'''{format_func_for_llm(func_correction)}
-
-# extract_connection_info.py
-
-```py
-{before_correction}
-```
-
-# extract_connection_info_test.py
-
-```py
-{before_test_correction}
-```
-
-# Test Results
-
-{test_results_correction}''',
-            }, {
-                'role': 'assistant',
-                'content': f'''# extract_connection_info.py
-
-```py
-{after_correction}
-```
-
-# extract_connection_info_test.py
-
-```py
-{after_test_correction}
-```''',
-            }, {
-                'role': 'user',
-                'content': f'''{format_func_for_llm(func)}
+                'content': f'''{format_func_for_llm(marsha_filename, functions)}
 
 # {code_file}
 
@@ -464,17 +487,17 @@ async def test_and_fix_files(func, files, stats, retries=3):
             # ```py
             # <insert code here>
             # ```
-            if not validate_first_stage_markdown(doc, extract_function_name(func)):
+            if not validate_first_stage_markdown(doc, marsha_filename):
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             write_files_from_markdown(doc, subdir=subdir)
         except Exception:
             if retries == 0:
-                raise Exception('Failed to fix code', func)
+                raise Exception('Failed to fix code', marsha_filename)
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(func, files, stats, retries - 1)
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1)
 
 
 async def gpt_type_to_python(type, stats, retries=2) -> str:

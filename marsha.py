@@ -126,7 +126,7 @@ async def process_types(types: list[str], stats: dict) -> dict:
     return classes_defined
 
 
-async def fix_files_func(files, func, stats):
+async def fix_files_func(marsha_filename: str, files: list[str], functions: list[str], stats: dict):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
@@ -149,7 +149,7 @@ async def fix_files_func(files, func, stats):
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(func, files, stats)
+        await test_and_fix_files(marsha_filename, functions, files, stats)
     except Exception as e:
         print('Third stage failure')
         print(e)
@@ -242,81 +242,81 @@ async def main():
             t_fsii = time.time()
             stats['first_stage']['total_time'] = prettify_time_delta(
                 t_fsii - t_fsi)
-    #     if args.quick_and_dirty:
-    #         print('Writing generated code to files...')
-    #         for md in mds[:2]:
-    #             write_files_from_markdown(md)
-    #         attempts = attempts + 1
-    #         break
-    #     filenames = list()
-    #     for idx, md in enumerate(mds):
-    #         print('Writing generated code to temporal files...')
-    #         filenames = filenames + \
-    #             write_files_from_markdown(md, subdir=f'{marsha_filename}_{idx}')
-    #     if args.debug:
-    #         for filename in filenames:
-    #             print(f'# {filename}\n')
-    #             f = open(filename, 'r')
-    #             print(f.read())
-    #             f.close()
-    #             print()
-    #     # Create a new list of files having the i and i+1 files together
-    #     # This is because we want to run the linting and testing in parallel
-    #     # but we need to make sure that the linting and testing is done on
-    #     # the same files (func and test) together
-    #     files_grouped = [filenames[i:i + 2]
-    #                         for i in range(0, len(filenames), 2)]
-    #     # Create tasks to run in parallel using asyncio
-    #     tasks = []
-    #     for file_group in files_grouped:
-    #         tasks.append(asyncio.create_task(
-    #             fix_files_func(marsha_filename, file_group, functions, stats), name=file_group[0]))
-    #     task_names = [task.get_name() for task in tasks]
-    #     try:
-    #         done_task_name = await run_parallel_tasks(tasks)
-    #         for name in task_names:
-    #             if name != done_task_name:
-    #                 delete_dir_and_content(name)
-    #             else:
-    #                 print('Writing generated code to files...')
-    #                 filename = name
-    #                 test_filename = filename.replace('.py', '_test.py')
-    #                 # copy_file(filename, f'{func_name}.py')
-    #                 # copy_file(test_filename, f'{func_name}_test.py')
-    #                 # delete_dir_and_content(filename)
-    #     except Exception as e:
-    #         print('Failed to generate working code.')
-    #         print(e)
-    #         # if not args.debug:
-    #         #     for name in task_names:
-    #         #         delete_dir_and_content(name)
-    #         print('Retrying...')
-    #         continue
-    #     # Done! Add one back to `attempts` to avoid accidentally erroring out on success
-    #     attempts = attempts + 1
-    #     break
-    # if attempts == 0:
-    #     t2 = time.time()
-    #     stats['total_time'] = prettify_time_delta(t2 - t1)
-    #     stats['attempts'] = args.attempts
-    #     stats['total_calls'] = stats['first_stage']['total_calls'] + \
-    #         stats['second_stage']['total_calls'] + \
-    #         stats['third_stage']['total_calls'] + \
-    #         stats['class_generation']['total_calls']
-    #     if args.stats:
-    #         stats_to_file()
-    #     raise Exception(
-    #         f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
-    # t2 = time.time()
-    # stats['total_time'] = prettify_time_delta(t2 - t1)
-    # stats['attempts'] = args.attempts - attempts + 1
-    # stats['total_calls'] = stats['first_stage']['total_calls'] + \
-    #     stats['second_stage']['total_calls'] + \
-    #     stats['third_stage']['total_calls'] + \
-    #     stats['class_generation']['total_calls']
-    # if args.stats:
-    #     stats_to_file()
-    # print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
+        if args.quick_and_dirty:
+            print('Writing generated code to files...')
+            for md in mds[:2]:
+                write_files_from_markdown(md)
+            attempts = attempts + 1
+            break
+        filenames = list()
+        for idx, md in enumerate(mds):
+            print('Writing generated code to temporal files...')
+            filenames = filenames + \
+                write_files_from_markdown(md, subdir=f'{marsha_filename}_{idx}')
+        if args.debug:
+            for filename in filenames:
+                print(f'# {filename}\n')
+                f = open(filename, 'r')
+                print(f.read())
+                f.close()
+                print()
+        # Create a new list of files having the i and i+1 files together
+        # This is because we want to run the linting and testing in parallel
+        # but we need to make sure that the linting and testing is done on
+        # the same files (func and test) together
+        files_grouped = [filenames[i:i + 2]
+                            for i in range(0, len(filenames), 2)]
+        # Create tasks to run in parallel using asyncio
+        tasks = []
+        for file_group in files_grouped:
+            tasks.append(asyncio.create_task(
+                fix_files_func(marsha_filename, file_group, functions, stats), name=file_group[0]))
+        task_names = [task.get_name() for task in tasks]
+        try:
+            done_task_name = await run_parallel_tasks(tasks)
+            for name in task_names:
+                if name != done_task_name:
+                    delete_dir_and_content(name)
+                else:
+                    print('Writing generated code to files...')
+                    filename = name
+                    test_filename = filename.replace('.py', '_test.py')
+                    copy_file(filename, f'{marsha_filename}.py')
+                    copy_file(test_filename, f'{marsha_filename}_test.py')
+                    delete_dir_and_content(filename)
+        except Exception as e:
+            print('Failed to generate working code.')
+            print(e)
+            if not args.debug:
+                for name in task_names:
+                    delete_dir_and_content(name)
+            print('Retrying...')
+            continue
+        # Done! Add one back to `attempts` to avoid accidentally erroring out on success
+        attempts = attempts + 1
+        break
+    if attempts == 0:
+        t2 = time.time()
+        stats['total_time'] = prettify_time_delta(t2 - t1)
+        stats['attempts'] = args.attempts
+        stats['total_calls'] = stats['first_stage']['total_calls'] + \
+            stats['second_stage']['total_calls'] + \
+            stats['third_stage']['total_calls'] + \
+            stats['class_generation']['total_calls']
+        if args.stats:
+            stats_to_file()
+        raise Exception(
+            f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
+    t2 = time.time()
+    stats['total_time'] = prettify_time_delta(t2 - t1)
+    stats['attempts'] = args.attempts - attempts + 1
+    stats['total_calls'] = stats['first_stage']['total_calls'] + \
+        stats['second_stage']['total_calls'] + \
+        stats['third_stage']['total_calls'] + \
+        stats['class_generation']['total_calls']
+    if args.stats:
+        stats_to_file()
+    print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
 asyncio.run(main())
