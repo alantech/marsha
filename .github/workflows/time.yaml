@@ -26,14 +26,28 @@ jobs:
       results: ${{ steps.run.outputs.results }}
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.client_payload.ref }}
       - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
-      - name: Run time script
-        id: run
+      - name: Output Inputs
+        run: echo "${{ toJSON(github.event.inputs) }}"
+      - name: Output Payload
+        run: echo "${{ toJSON(github.event.client_payload) }}"
+      - name: Run time script from payload
+        if: "${{ github.event.client_payload.test != '' }}"
+        run: |
+          make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+          results=$(echo $(cat results.md) | tr '\n' ' ')
+          echo "results=$results" >> $GITHUB_OUTPUT
+        env:
+          OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+      - name: Run time script from input
+        if: "${{ github.event.inputs.test != '' }}"
         run: |
           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           results=$(echo $(cat results.md) | tr '\n' ' ')
@@ -53,11 +67,21 @@ jobs:
         shell: bash
         run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
         id: extract_branch
-      - name: Notify
+      - name: Notify from input
         uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.inputs.test != '' }}
         with:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
           description: 'Test file: ${{ github.event.inputs.test }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
+          include-details: false
+      - name: Notify from payload
+        uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.client_payload.test != '' }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: 'Test file: ${{ github.event.client_payload.test }} - Branch: ${{ github.event.client_payload.ref }} - Results: ${{ needs.run.outputs.results }}'
           include-details: false
