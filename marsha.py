@@ -105,6 +105,11 @@ def delete_dir_and_content(filename):
     if os.path.isdir(dir):
         shutil.rmtree(dir)
 
+def get_file_fullpath(filename) -> str:
+    for root, dirs, files in os.walk('.'):
+        for file in files:
+            if file == filename:
+                return os.path.join(root, file)
 
 async def process_types(types: list[str], stats: dict) -> dict:
     classes_defined = {}
@@ -115,7 +120,7 @@ async def process_types(types: list[str], stats: dict) -> dict:
         if is_defined_from_file(type):
             print('Reading type from file...')
             filename = extract_type_filename(type)
-            full_path = os.path.dirname(filename) + os.path.basename(filename)
+            full_path = get_file_fullpath(filename)
             f = open(full_path, 'r')
             file_data = f.read()
             f.close()
