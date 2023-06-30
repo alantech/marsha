@@ -41,11 +41,14 @@ jobs:
       - name: Run time script
         id: run
         run: |
-          make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+          make attempts=$ATTEMPTS test=$TEST stats=True n_parallel_executions=$PARALLEL_RUNS time
           results=$(echo $(cat results.md) | tr '\n' ' ')
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+          TEST: ${{ github.event.inputs.test }} ${{ github.event.client_payload.inputs.test }}
+          ATTEMPTS: ${{ github.event.inputs.attempts }} ${{ github.event.client_payload.inputs.attempts }}
+          PARALLEL_RUNS: ${{ github.event.inputs.parallel_runs }} ${{ github.event.client_payload.inputs.parallel_runs }}
 
   notify:
     name: Discord Notification
