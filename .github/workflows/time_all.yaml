@@ -30,6 +30,6 @@ jobs:
               echo "Calling 'time' job with 'test' input: $file"
               curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
                 "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-                -d '{"event_type": "time", "client_payload": {"test": "'"$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.sha }}"}'
+                -d '{"event_type": "time", "client_payload": {"test": "'"$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.ref_name }}"}'
             fi
           done
