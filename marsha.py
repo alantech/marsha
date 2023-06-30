@@ -77,8 +77,8 @@ async def main():
         attempts = attempts - 1
         # First stage: generate code for functions and classes
         try:
-            mds = generate_python_code(
-                marsha_file_content, functions, types_defined, n_results, debug, stats)
+            mds = await generate_python_code(
+                marsha_filename, functions, types_defined, n_results, debug, stats)
         except Exception as e:
             continue
         # Early exit if quick and dirty
@@ -108,7 +108,7 @@ async def main():
         tasks = []
         for file_group in files_grouped:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions, stats), name=file_group[0]))
+                review_and_fix(marsha_filename, file_group, functions, stats, debug), name=file_group[0]))
         task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
@@ -196,11 +196,11 @@ async def process_types(raw_types: list[str]) -> list[str]:
     return types_defined
 
 
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], stats: dict):
+async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], stats: dict, debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
-        await lint_and_fix_files(marsha_filename, files, stats)
+        await lint_and_fix_files(marsha_filename, files, stats, debug=debug)
     except Exception as e:
         print('Second stage failure')
         print(e)

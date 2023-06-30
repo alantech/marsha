@@ -208,12 +208,12 @@ In your response, do not include any explanation, notes, or comments.
             raise Exception('Failed to generate code', marsha_filename)
 
 
-async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: dict, retries=3):
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: dict, retries: int = 3, debug: bool = False):
     code = read_file(filename)
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': f'''You are a senior software engineer working on a Python 3 function.
+            'content': f'''You are a senior software engineer working with Python 3.
 You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
 All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
@@ -276,16 +276,18 @@ In your response, do not include any explanation, notes, or comments.
     try:
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
+            if debug:
+                print(f'''Invalid doc = {doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
         if retries > 0:
-            return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1)
+            return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict, max_depth: int = 4):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict, max_depth: int = 4, debug: bool = False):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -354,10 +356,11 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
                       for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
-            jobs.append(fix_file(marsha_filename, file, lint_text, stats))
+            jobs.append(fix_file(marsha_filename, file,
+                        lint_text, stats, debug=debug))
     await asyncio.gather(*jobs)
 
-    await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1)
+    await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
 
 async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
