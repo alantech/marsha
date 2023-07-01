@@ -38,7 +38,7 @@ jobs:
         run: echo "${{ toJSON(github.event.inputs) }}"
       - name: Output Payload
         run: echo "${{ toJSON(github.event.client_payload) }}"
-      - name: Run time script from payload
+      - name: Run time script
         id: run
         run: |
           if ${{ github.event.client_payload.test != '' }}; then
