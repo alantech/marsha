@@ -11,7 +11,7 @@ Sue,	spreadsheets
 
 # func get_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
 
-This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 list by department. You might use pandas library if needed.
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 lists by department. You might use pandas library if needed.
 
 * get_employee_skills() = throws an error
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')]) = throws an error
@@ -21,3 +21,19 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
+
+# func get_eng_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
+
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. It should exclude any data from the input lists with missing or invalid data and filter through EmployeesByDepartment list to only include employees in the engineering department. The function should then create a response of EmployeeSkills merging the 2 input lists by department. You might use pandas library if needed.
+
+* get_employee_skills() = throws an error
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2023')]) = throws an error
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')], []) = throws an error
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', null)], []) = throws an error
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '1/1/0')], []) = throws an error
+* get_employee_skills([], []) = []
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2023')], []) = []
+* get_employee_skills([], [DepartmentSkills('Accounting', 'math')]) = []
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2023')], [DepartmentSkills('Accounting', 'math')]) = []
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2012'), EmployeesByDepartment('Jake', 'Engineering', '8/8/2023')], [DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Jake', 'coding')]
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2025'), EmployeesByDepartment('Jake', 'Engineering', '8/8/2021')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Jake', 'coding')]
