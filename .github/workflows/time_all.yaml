@@ -2,6 +2,15 @@ name: Run all time scripts
 
 on:
   workflow_dispatch:
+    inputs:
+      attempts:
+        description: "Number of attempts to run the test"
+        required: false
+        default: 1
+      parallel_runs:
+        description: "Number of parallel runs"
+        required: false
+        default: 1
 
 jobs:
   time_all:
@@ -10,17 +19,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Call 'time' job for each string
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
+      - name: Call 'time' job for each test file
         env:
-          TEST_STRINGS: '["./examples/test/sort_modules.mrsh", "./examples/test/data_mangling.mrsh"]'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
         run: |
-          for TEST_STRING in $TEST_STRINGS
-          do
-            echo "Calling 'time' job with 'test' input: $TEST_STRING"
+          for file in ./examples/test/*.mrsh; do
+            [ -e "$file" ] || continue
+            echo "Calling 'time' job with 'test' input: $file"
             curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "$TEST_STRING"}}'
+              -d '{"event_type": "time", "client_payload": {"test": "'"$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.ref_name }}"}'
           done
