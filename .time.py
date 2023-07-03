@@ -24,6 +24,7 @@ args = parser.parse_args()
 exitcodes = []
 times = []
 calls = []
+cost = []
 total_runs = 8
 for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
@@ -42,11 +43,15 @@ for i in range(total_runs):
         run_stats_file.close()
         try:
             ast = ast_renderer.get_ast(Document(run_stats))
-            calls.append(int(ast['children'].pop()[
+            results_child = ast['children'].pop()
+            calls.append(int(results_child[
                          'children'][2]['content'].split('Total calls: ').pop()))
+            cost.append(float(results_child[
+                'children'][6]['content'].split('Total cost: ').pop()))
         except Exception as e:
             print(f'Error: {e}')
             calls.append(0)
+            cost.append(0)
         with open('agg_stats.md', 'a') as f:
             f.write(f'''# Run {i + 1} / {total_runs}
 Exit code: {exitcode}
@@ -67,17 +72,23 @@ avgtime = totaltime / total_runs
 square_errors = [(t - avgtime) ** 2 for t in times]
 stddevtime = math.sqrt(sum(square_errors) / total_runs)
 # Call calculations
-print(f'Calls: {calls}')
 totalcalls = sum(calls)
 avgcalls = totalcalls / total_runs
 square_errors = [(c - avgcalls) ** 2 for c in calls]
 stddevcalls = math.sqrt(sum(square_errors) / total_runs)
+# Cost calculations
+totalcost = sum(cost)
+avgcost = totalcost / total_runs
+square_errors = [(c - avgcost) ** 2 for c in cost]
+stddevcost = math.sqrt(sum(square_errors) / total_runs)
 
 results = f'''
 # Test results
 {sum(successes)} / {total_runs} runs successful
 Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddevtime)}
 GPT calls {avgcalls} +/- {stddevcalls}
+Total cost {totalcost}
+Average cost {avgcost} +/- {stddevcost}
 '''
 print(results)
 res_file = open('results.md', 'w')

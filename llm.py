@@ -10,6 +10,19 @@ from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from parse import extract_function_name, extract_type_name, validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
 
+# OpenAI pricing model.
+# Format: (tokens, price). Price per 1024 tokens.
+PRICING_MODEL = {
+    'gpt-3.5-turbo': {
+        'in': [(4096, 0.0015), (16384, 0.002)],
+        'out': [(4096, 0.002), (16384, 0.004)]
+    },
+    'gpt-4': {
+        'in': [(8192, 0.03), (32768, 0.06)],
+        'out': [(8192, 0.06), (32768, 0.12)]
+    }
+}
+
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
 
@@ -161,7 +174,7 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
             'content': f'''{func_for_llm}'''
         }],
     }, n_results=n_results))
-    stats['first_stage']['total_calls'] += 2
+    gather_stats(stats, 'first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -239,7 +252,7 @@ async def fix_file(filename, lint_text, stats, retries=3):
 ```''',
         }],
     })
-    stats['second_stage']['total_calls'] += 1
+    gather_stats(stats, 'second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -416,7 +429,7 @@ async def test_and_fix_files(func, files, stats, retries=3):
 {test_results}''',
             }],
         }, 'gpt-4')
-        stats['third_stage']['total_calls'] += 1
+        gather_stats(stats, 'third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -480,7 +493,7 @@ class SKU:
             'content': f'''{type}'''
         }],
     })
-    stats['class_generation']['total_calls'] += 1
+    gather_stats(stats, 'class_generation', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -500,3 +513,31 @@ class SKU:
             return await gpt_type_to_python(type, stats, retries - 1)
         else:
             raise Exception('Failed to generate code', type)
+
+
+def gather_stats(stats: dict, stage: str, res: list):
+    stats[stage]['total_calls'] += len(res)
+    for r in res:
+        model = 'gpt-4' if r.model.startswith('gpt-4') else 'gpt-3.5-turbo'
+        input_tokens = r.usage.prompt_tokens
+        stats[stage][model]['input_tokens'] += input_tokens
+        pricing = PRICING_MODEL[model]
+        # Calculate input cost based on context length
+        if (input_tokens <= pricing['in'][0][0]):
+            stats[stage][model]['input_cost'] += input_tokens * \
+                pricing['in'][0][1] / 1024
+        elif (input_tokens <= pricing['in'][1][0]):
+            stats[stage][model]['input_cost'] += input_tokens * \
+                pricing['in'][1][1] / 1024
+        output_tokens = r.usage.completion_tokens
+        stats[stage][model]['output_tokens'] += output_tokens
+        # Calculate output cost based on context length
+        if (output_tokens <= pricing['out'][0][0]):
+            stats[stage][model]['output_cost'] += output_tokens * \
+                pricing['out'][0][1] / 1024
+        elif (output_tokens <= pricing['out'][1][0]):
+            stats[stage][model]['output_cost'] += output_tokens * \
+                pricing['out'][1][1] / 1024
+        # Calculate total cost
+        stats[stage][model]['total_cost'] += stats[stage][model]['input_cost'] + \
+            stats[stage][model]['output_cost']
