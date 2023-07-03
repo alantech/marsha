@@ -251,7 +251,7 @@ async def main():
                 break
             filenames = list()
             for idx, md in enumerate(mds):
-                print('Writing generated code to temporal files...')
+                print('Writing generated code to temporary files...')
                 filenames = filenames + \
                     write_files_from_markdown(md, subdir=f'{func_name}_{idx}')
             if args.debug:
