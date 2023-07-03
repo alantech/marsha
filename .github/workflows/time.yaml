@@ -47,7 +47,7 @@ jobs:
           if ${{ github.event.inputs.test != '' }}; then
             make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           fi
-          results=$(echo $(cat results.md) | tr '\n' ' ' | tr '# ' ' ')
+          results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
