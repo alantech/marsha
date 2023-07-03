@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.subprocess import Process
 import openai
 import os
 import shutil
@@ -109,6 +110,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
+Make sure to include all imports from external libraries used in `{marsha_filename}.py` are present in the `requirements.txt` file.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must match exactly the following markdown format and nothing else:
 
@@ -116,6 +118,12 @@ Your response must match exactly the following markdown format and nothing else:
 
 ```py
 <generated code>
+```
+
+# requirements.txt
+
+```txt
+<imports used in generated code>
 ```
 
 In your response, do not include any explanation, notes, or comments.
@@ -317,13 +325,31 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
 
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
+async def run_subprocess(stream: Process) -> (str):
+    stdout = ''
+    stderr = ''
+    try:
+        stdout, stderr = await asyncio.wait_for(stream.communicate(), 60)
+    except asyncio.exceptions.TimeoutError:
+        try:
+            stream.kill()
+        except OSError:
+            # Ignore 'no such process' error
+            pass
+        raise
+    return (stdout.decode('utf-8'), stderr.decode('utf-8'))
+
 
 async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith('_test.py')][0]
-    code_file = [file for file in files if not file.endswith('_test.py')][0]
+    code_file = [file for file in files if not file.endswith('_test.py') or not file.endswith('.txt')][0]
+    req_files = [file for file in files if file == 'requirements.txt']
+    if len(req_files) > 0:
+        # https://stackoverflow.com/questions/62861074/how-to-install-requirements-txt-file-from-a-python-module
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
     test_stream = await asyncio.create_subprocess_exec(
         python, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
