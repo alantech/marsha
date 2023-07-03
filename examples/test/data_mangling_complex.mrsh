@@ -11,7 +11,7 @@ Sue,	spreadsheets
 
 # func get_eng_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
 
-This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. It should exclude any data from the input lists with missing or invalid data and filter through EmployeesByDepartment list to only include employees in the engineering department. The function should then create a response of EmployeeSkills merging the 2 input lists by department. You might use pandas library if needed.
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. It should exclude any data from the input lists with missing or invalid data and filter through EmployeesByDepartment list to only include employees in the engineering department. The function should then create a response of EmployeeSkills merging the 2 input lists by department.
 
 * get_employee_skills() = throws an error
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting', '8/8/2023')]) = throws an error
