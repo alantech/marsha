@@ -1,9 +1,0 @@
-# func extract_connection_info(url): JSON object with connection properties
-
-It should extract from the database url all the connection properties in a JSON format.
-
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb" }
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass&sslMode=REQUIRED = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('') = {}
