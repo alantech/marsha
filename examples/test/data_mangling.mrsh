@@ -11,7 +11,7 @@ Sue,	spreadsheets
 
 # func get_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
 
-This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 lists by department. You might use pandas library if needed.
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 lists by department.
 
 * get_employee_skills() = throws an error
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')]) = throws an error
