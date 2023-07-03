@@ -24,6 +24,7 @@ args = parser.parse_args()
 exitcodes = []
 times = []
 calls = []
+cost = []
 total_runs = 8
 for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
@@ -44,9 +45,12 @@ for i in range(total_runs):
             ast = ast_renderer.get_ast(Document(run_stats))
             calls.append(int(ast['children'].pop()[
                          'children'][2]['content'].split('Total calls: ').pop()))
+            cost.append(int(ast['children'].pop()[
+                         'children'][2]['content'].split('Total cost: ').pop()))
         except Exception as e:
             print(f'Error: {e}')
             calls.append(0)
+            cost.append(0)
         with open('agg_stats.md', 'a') as f:
             f.write(f'''# Run {i + 1} / {total_runs}
 Exit code: {exitcode}
@@ -78,6 +82,7 @@ results = f'''
 {sum(successes)} / {total_runs} runs successful
 Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddevtime)}
 GPT calls {avgcalls} +/- {stddevcalls}
+Total cost {sum(cost)}
 '''
 print(results)
 res_file = open('results.md', 'w')
