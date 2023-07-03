@@ -519,7 +519,6 @@ def gather_stats(stats: dict, stage: str, res: list):
     stats[stage]['total_calls'] += len(res)
     for r in res:
         model = 'gpt-4' if r.model.startswith('gpt-4') else 'gpt-3.5-turbo'
-        print(f'Using model {model}')
         input_tokens = r.usage.prompt_tokens
         stats[stage][model]['input_tokens'] += input_tokens
         pricing = PRICING_MODEL[model]
