@@ -372,7 +372,7 @@ async def main():
             if args.stats:
                 stats_to_file()
             raise Exception(
-                f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}')
+                f'Failed to generate working code for {func_name}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
         t2 = time.time()
         stats['total_time'] = prettify_time_delta(t2 - t1)
         stats['attempts'] = args.attempts - attempts + 1
@@ -387,7 +387,8 @@ async def main():
             stats['class_generation']['gpt-4']['total_cost']
         if args.stats:
             stats_to_file()
-        print(f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
+        print(
+            f'{func_name} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
 
 
 asyncio.run(main())
