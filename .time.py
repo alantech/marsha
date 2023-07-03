@@ -72,18 +72,23 @@ avgtime = totaltime / total_runs
 square_errors = [(t - avgtime) ** 2 for t in times]
 stddevtime = math.sqrt(sum(square_errors) / total_runs)
 # Call calculations
-print(f'Calls: {calls}')
 totalcalls = sum(calls)
 avgcalls = totalcalls / total_runs
 square_errors = [(c - avgcalls) ** 2 for c in calls]
 stddevcalls = math.sqrt(sum(square_errors) / total_runs)
+# Cost calculations
+totalcost = sum(cost)
+avgcost = totalcost / total_runs
+square_errors = [(c - avgcost) ** 2 for c in cost]
+stddevcost = math.sqrt(sum(square_errors) / total_runs)
 
 results = f'''
 # Test results
 {sum(successes)} / {total_runs} runs successful
 Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddevtime)}
 GPT calls {avgcalls} +/- {stddevcalls}
-Total cost {sum(cost)}
+Total cost {totalcost}
+Average cost {avgcost} +/- {stddevcost}
 '''
 print(results)
 res_file = open('results.md', 'w')
