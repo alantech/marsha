@@ -115,7 +115,6 @@ stats = {
 
 def stats_to_file():
     f = open('stats.md', 'w')
-    print(stats)
     f.write(f'''# Stats
 {stats['class_generation']['total_time'] != 0 and f"""## Class generation
 Total time: {stats['class_generation']['total_time']}
