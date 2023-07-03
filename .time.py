@@ -43,10 +43,11 @@ for i in range(total_runs):
         run_stats_file.close()
         try:
             ast = ast_renderer.get_ast(Document(run_stats))
-            calls.append(int(ast['children'].pop()[
+            results_child = ast['children'].pop()
+            calls.append(int(results_child[
                          'children'][2]['content'].split('Total calls: ').pop()))
-            cost.append(int(ast['children'].pop()[
-                         'children'][2]['content'].split('Total cost: ').pop()))
+            cost.append(float(results_child[
+                'children'][6]['content'].split('Total cost: ').pop()))
         except Exception as e:
             print(f'Error: {e}')
             calls.append(0)
