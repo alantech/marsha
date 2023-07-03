@@ -73,22 +73,22 @@ square_errors = [(t - avgtime) ** 2 for t in times]
 stddevtime = math.sqrt(sum(square_errors) / total_runs)
 # Call calculations
 totalcalls = sum(calls)
-avgcalls = totalcalls / total_runs
+avgcalls = round(totalcalls / total_runs, 2)
 square_errors = [(c - avgcalls) ** 2 for c in calls]
-stddevcalls = math.sqrt(sum(square_errors) / total_runs)
+stddevcalls = round(math.sqrt(sum(square_errors) / total_runs), 2)
 # Cost calculations
-totalcost = sum(cost)
-avgcost = totalcost / total_runs
+totalcost = round(sum(cost), 2)
+avgcost = round(totalcost / total_runs, 2)
 square_errors = [(c - avgcost) ** 2 for c in cost]
-stddevcost = math.sqrt(sum(square_errors) / total_runs)
+stddevcost = round(math.sqrt(sum(square_errors) / total_runs), 2)
 
 results = f'''
 # Test results
-{sum(successes)} / {total_runs} runs successful
-Runtime of {prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddevtime)}
-GPT calls {avgcalls} +/- {stddevcalls}
-Total cost {totalcost}
-Average cost {avgcost} +/- {stddevcost}
+`{sum(successes)} / {total_runs} runs successful`
+**Avg Runtime**: `{prettify_time_delta(avgtime)} +/- {prettify_time_delta(stddevtime)}`
+**Avg GPT calls**: `{avgcalls} +/- {stddevcalls}`
+**Avg cost**: `{avgcost} +/- {stddevcost}`
+**Total cost**: `{totalcost}`
 '''
 print(results)
 res_file = open('results.md', 'w')
