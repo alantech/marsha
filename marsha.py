@@ -6,7 +6,7 @@ import time
 
 from llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content
+from utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path, get_file_fullpath
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -58,7 +58,7 @@ async def main():
     t1 = time.time()
     input_file = args.source
     # Name without extension
-    marsha_filename = get_marsha_filename(input_file)
+    marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
     functions, types = extract_functions_and_types(marsha_file_content)
     types_defined = None
@@ -158,10 +158,6 @@ async def main():
     print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
 
 
-def get_marsha_filename(filename: str):
-    return os.path.splitext(os.path.basename(filename))[0]
-
-
 async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
@@ -179,11 +175,6 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
             t2 - t1)
     return mds
 
-def get_file_fullpath(filename) -> str:
-    for root, dirs, files in os.walk('.'):
-        for file in files:
-            if file == filename:
-                return os.path.join(root, file)
 
 async def process_types(raw_types: list[str]) -> list[str]:
     types_defined = []
