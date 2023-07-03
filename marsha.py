@@ -35,22 +35,79 @@ stats = {
     'class_generation': {
         'total_time': 0,
         'total_calls': 0,
+        'gpt-3.5-turbo': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
+        'gpt-4': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
     },
     'first_stage': {
         'total_time': 0,
         'total_calls': 0,
+        'gpt-3.5-turbo': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
+        'gpt-4': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
     },
     'second_stage': {
         'total_time': 0,
         'total_calls': 0,
+        'gpt-3.5-turbo': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
+        'gpt-4': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
     },
     'third_stage': {
         'total_time': 0,
         'total_calls': 0,
+        'gpt-3.5-turbo': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
+        'gpt-4': {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+        },
     },
     'total_time': 0,
     'total_calls': 0,
     'attempts': 0,
+    'total_cost': 0,
 }
 
 
@@ -142,6 +199,11 @@ async def main():
             stats['second_stage']['total_calls'] + \
             stats['third_stage']['total_calls'] + \
             stats['class_generation']['total_calls']
+        stats['total_cost'] = stats['first_stage']['gpt-3.5-turbo']['total_cost'] + stats['first_stage']['gpt-4']['total_cost'] + \
+            stats['second_stage']['gpt-3.5-turbo']['total_cost'] + stats['second_stage']['gpt-4']['total_cost'] + \
+            stats['third_stage']['gpt-3.5-turbo']['total_cost'] + stats['third_stage']['gpt-4']['total_cost'] + \
+            stats['class_generation']['gpt-3.5-turbo']['total_cost'] + \
+            stats['class_generation']['gpt-4']['total_cost']
         if should_write_stats:
             stats_to_file(stats)
         raise Exception(
@@ -153,6 +215,11 @@ async def main():
         stats['second_stage']['total_calls'] + \
         stats['third_stage']['total_calls'] + \
         stats['class_generation']['total_calls']
+    stats['total_cost'] = stats['first_stage']['gpt-3.5-turbo']['total_cost'] + stats['first_stage']['gpt-4']['total_cost'] + \
+        stats['second_stage']['gpt-3.5-turbo']['total_cost'] + stats['second_stage']['gpt-4']['total_cost'] + \
+        stats['third_stage']['gpt-3.5-turbo']['total_cost'] + stats['third_stage']['gpt-4']['total_cost'] + \
+        stats['class_generation']['gpt-3.5-turbo']['total_cost'] + \
+        stats['class_generation']['gpt-4']['total_cost']
     if should_write_stats:
         stats_to_file(stats)
     print(f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}')
@@ -175,11 +242,13 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
             t2 - t1)
     return mds
 
+
 def get_file_fullpath(filename) -> str:
     for root, dirs, files in os.walk('.'):
         for file in files:
             if file == filename:
                 return os.path.join(root, file)
+
 
 async def process_types(raw_types: list[str]) -> list[str]:
     types_defined = []
@@ -278,6 +347,7 @@ Total calls: {stats['third_stage']['total_calls']}
 Total time: {stats['total_time']}
 Total calls: {stats['total_calls']}
 Attempts: {stats['attempts']}
+Total cost: {stats['total_cost']}
 
 '''
     write_file('stats.md', stats_md)

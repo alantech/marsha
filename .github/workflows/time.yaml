@@ -47,7 +47,7 @@ jobs:
           if ${{ github.event.inputs.test != '' }}; then
             make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           fi
-          results=$(echo $(cat results.md) | tr '\n' ' ')
+          results=$(echo $(cat results.md) | tr '\n' ' - ')
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
@@ -71,7 +71,7 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.inputs.test }} - Parallelism: ${{ github.event.inputs.parallel_runs }} - Branch: ${{ steps.extract_branch.outputs.branch }} - Results: ${{ needs.run.outputs.results }}'
+          description: '**Branch:** `${{ steps.extract_branch.outputs.branch }}` - **Test file:** `${{ github.event.inputs.test }}` - **Parallelism:** `${{ github.event.inputs.parallel_runs }}` - **Results:** `${{ needs.run.outputs.results }}`'
           include-details: false
       - name: Notify from payload
         uses: nobrayner/discord-webhook@v1
@@ -80,5 +80,5 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: 'Test file: ${{ github.event.client_payload.test }} - Parallelism: ${{ github.event.client_payload.parallel_runs }} - Branch: ${{ github.event.client_payload.ref }} - Results: ${{ needs.run.outputs.results }}'
+          description: '**Branch:** `${{ github.event.client_payload.ref }}` - **Test file:** `${{ github.event.client_payload.test }}` - **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` - **Results:** `${{ needs.run.outputs.results }}`'
           include-details: false
