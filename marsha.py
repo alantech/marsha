@@ -179,6 +179,11 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
             t2 - t1)
     return mds
 
+def get_file_fullpath(filename) -> str:
+    for root, dirs, files in os.walk('.'):
+        for file in files:
+            if file == filename:
+                return os.path.join(root, file)
 
 async def process_types(raw_types: list[str]) -> list[str]:
     types_defined = []
@@ -187,9 +192,9 @@ async def process_types(raw_types: list[str]) -> list[str]:
         # If type is defined from a file, read the file
         if is_defined_from_file(raw_type):
             print('Reading type from file...')
-            # todo: make this a fn
             filename = extract_type_filename(raw_type)
-            type_data = read_file(filename)
+            full_path = get_file_fullpath(filename)
+            type_data = read_file(full_path)
             raw_type = f'''# type {type_name}
 {type_data}
             '''
