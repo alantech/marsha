@@ -63,7 +63,7 @@ def prettify_time_delta(delta, max_depth=2):
         return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
 
 
-async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_results=1):
+async def retry_chat_completion(query, model='gpt-4', max_tries=3, n_results=1):
     t1 = time.time()
     query['model'] = model
     query['n'] = n_results
