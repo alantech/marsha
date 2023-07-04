@@ -351,20 +351,11 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         # https://stackoverflow.com/questions/62861074/how-to-install-requirements-txt-file-from-a-python-module
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
+    # Run the test suite
     test_stream = await asyncio.create_subprocess_exec(
         python, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout = ''
-    stderr = ''
-    try:
-        stdout, stderr = await asyncio.wait_for(test_stream.communicate(), 60)
-    except asyncio.exceptions.TimeoutError:
-        try:
-            test_stream.kill()
-        except OSError:
-            # Ignore 'no such process' error
-            pass
-        raise
-    test_results = f'''{stdout.decode('utf-8')}{stderr.decode('utf-8')}'''
+    stdout, stderr = await run_subprocess(test_stream)
+    test_results = f'''{stdout}{stderr}'''
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
