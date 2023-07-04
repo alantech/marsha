@@ -155,7 +155,6 @@ def validate_first_stage_markdown(md, marsha_filename):
         if ast['children'][2]['children'][0]['content'].strip() != f'{marsha_filename}_test.py':
             return False
     else:
-        print('here')
         if ast['children'][0]['type'] != 'Heading':
             return False
         if ast['children'][2]['type'] != 'Heading':
