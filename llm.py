@@ -325,7 +325,7 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
 
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
-async def run_subprocess(stream: Process) -> (str):
+async def run_subprocess(stream: Process) -> tuple[str, str]:
     stdout = ''
     stderr = ''
     try:
