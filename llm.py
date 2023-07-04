@@ -368,6 +368,9 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
+        if debug:
+            print('Test failed, trying to fix code')
+            print(test_results)
         test = read_file(test_file)
         code = read_file(code_file)
         res = await retry_chat_completion({
