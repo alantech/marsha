@@ -147,24 +147,18 @@ async def main():
             attempts = attempts + 1
             break
         # Writing generated code to temporal files in preparation for next stages
-        filenames = list()
+        file_groups = list()
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
-            filenames = filenames + \
-                write_files_from_markdown(
-                    md, subdir=f'{marsha_filename}_{idx}')
+            file_groups = file_groups + \
+                [write_files_from_markdown(
+                    md, subdir=f'{marsha_filename}_{idx}')]
         if args.debug:
-            for filename in filenames:
+            for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
-        # Create a new list of files having the i and i+1 files together
-        # This is because we want to run the linting and testing in parallel
-        # but we need to make sure that the linting and testing is done on
-        # the same files (func and test) together
-        files_grouped = [filenames[i:i + 2]
-                         for i in range(0, len(filenames), 2)]
         # Create tasks to run in parallel using asyncio
         tasks = []
-        for file_group in files_grouped:
+        for file_group in file_groups:
             tasks.append(asyncio.create_task(
                 review_and_fix(marsha_filename, file_group, functions, stats, debug), name=file_group[0]))
         task_names = [task.get_name() for task in tasks]
@@ -287,7 +281,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, files, stats)
+        await test_and_fix_files(marsha_filename, functions, files, stats, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)

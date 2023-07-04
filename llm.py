@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.subprocess import Process
 import openai
 import os
 import shutil
@@ -109,6 +110,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
+If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file. If there are no dependencies, do not include the file.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must match exactly the following markdown format and nothing else:
 
@@ -116,6 +118,12 @@ Your response must match exactly the following markdown format and nothing else:
 
 ```py
 <generated code>
+```
+
+# requirements.txt
+
+```txt
+<dependencies>
 ```
 
 In your response, do not include any explanation, notes, or comments.
@@ -162,6 +170,10 @@ In your response, do not include any explanation, notes, or comments.
             # # function_name.py
             # ```py
             # <insert code here>
+            # ```
+            # # requirements.txt
+            # ```text
+            # <dependency>
             # ```
             # # function_name_test.py
             # ```py
@@ -318,30 +330,60 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
-    if retries == 0:
-        raise Exception('Failed to fix code', marsha_filename)
-    # There should only be two files, the test file and the code file
-    test_file = [file for file in files if file.endswith('_test.py')][0]
-    code_file = [file for file in files if not file.endswith('_test.py')][0]
-
-    test_stream = await asyncio.create_subprocess_exec(
-        python, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+async def run_subprocess(stream: Process) -> tuple[str, str]:
     stdout = ''
     stderr = ''
     try:
-        stdout, stderr = await asyncio.wait_for(test_stream.communicate(), 60)
+        stdout, stderr = await asyncio.wait_for(stream.communicate(), 60)
     except asyncio.exceptions.TimeoutError:
         try:
-            test_stream.kill()
+            stream.kill()
         except OSError:
             # Ignore 'no such process' error
             pass
         raise
-    test_results = f'''{stdout.decode('utf-8')}{stderr.decode('utf-8')}'''
+    return (stdout.decode('utf-8'), stderr.decode('utf-8'))
+
+
+async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
+    if retries == 0:
+        raise Exception('Failed to fix code', marsha_filename)
+    # There should only be two files, the test file and the code file
+    test_file = [file for file in files if file.endswith(
+        f'{marsha_filename}_test.py')][0]
+    code_file = [file for file in files if file.endswith(
+        f'{marsha_filename}.py')][0]
+    req_files = [file for file in files if file.endswith('requirements.txt')]
+
+    # Install requirements if needed
+    venv_path = None
+    if len(req_files) > 0:
+        req_file = req_files[0]
+        req_file_abspath = os.path.abspath(req_file)
+        req_file_dir = os.path.dirname(req_file_abspath)
+        print('Creating virtual environment...')
+        venv_path = f'{req_file_dir}/venv'
+        create_venv_stream = await asyncio.create_subprocess_exec(
+            python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(create_venv_stream)
+        print('Installing requirements...')
+        pip_stream = await asyncio.create_subprocess_exec(
+            f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(pip_stream)
+
+    # Run the test suite
+    python_exe = f'{venv_path}/bin/python' if len(
+        req_files) > 0 and venv_path is not None else python
+    test_stream = await asyncio.create_subprocess_exec(
+        python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = await run_subprocess(test_stream)
+    test_results = f'''{stdout}{stderr}'''
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
+        if debug:
+            print('Test failed, trying to fix code')
+            print(test_results)
         test = read_file(test_file)
         code = read_file(code_file)
         res = await retry_chat_completion({
@@ -414,7 +456,7 @@ In your response, do not include any explanation, notes, or comments.
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1)
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
 
 
 def gather_stats(stats: dict, stage: str, res: list):
