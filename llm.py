@@ -360,7 +360,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Run the test suite
     test_stream = await asyncio.create_subprocess_exec(
-        python, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        './venv/bin/python', test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = await run_subprocess(test_stream)
     test_results = f'''{stdout}{stderr}'''
 
