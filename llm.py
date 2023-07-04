@@ -344,9 +344,11 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
-    test_file = [file for file in files if file.endswith('_test.py')][0]
-    code_file = [file for file in files if not file.endswith('_test.py') or not file.endswith('.txt')][0]
-    req_files = [file for file in files if file == 'requirements.txt']
+    test_file = [file for file in files if file.endswith(f'{marsha_filename}_test.py')][0]
+    code_file = [file for file in files if file.endswith(f'{marsha_filename}.py')][0]
+    req_files = [file for file in files if file.endswith('requirements.txt')]
+
+    # Install requirements if needed
     if len(req_files) > 0:
         # https://stackoverflow.com/questions/62861074/how-to-install-requirements-txt-file-from-a-python-module
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
