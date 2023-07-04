@@ -171,6 +171,10 @@ In your response, do not include any explanation, notes, or comments.
             # ```py
             # <insert code here>
             # ```
+            # # requirements.txt
+            # ```text
+            # <dependency>
+            # ```
             # # function_name_test.py
             # ```py
             # <insert code here>
