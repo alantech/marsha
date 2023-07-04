@@ -4,3 +4,4 @@ dist/
 venv/
 .env
 examples/**/*.py
+examples/**/requirements.txt
