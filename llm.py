@@ -110,7 +110,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file.
+If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file. If there are no dependencies, do not include the file.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must match exactly the following markdown format and nothing else:
 
@@ -123,7 +123,7 @@ Your response must match exactly the following markdown format and nothing else:
 # requirements.txt
 
 ```txt
-<dependency>
+<dependencies>
 ```
 
 In your response, do not include any explanation, notes, or comments.
@@ -352,17 +352,24 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     req_files = [file for file in files if file.endswith('requirements.txt')]
 
     # Install requirements if needed
+    venv_path = None
     if len(req_files) > 0:
         req_file = req_files[0]
+        req_file_abspath = os.path.abspath(req_file)
+        req_file_dir = os.path.dirname(req_file_abspath)
+        print('Creating virtual environment...')
+        venv_path = f'{req_file_dir}/venv'
         create_venv_stream = await asyncio.create_subprocess_exec(
-            python, '-m', 'venv', 'venv', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = await run_subprocess(create_venv_stream)
+        print('Installing requirements...')
         pip_stream = await asyncio.create_subprocess_exec(
-            './venv/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = await run_subprocess(pip_stream)
 
     # Run the test suite
-    python_exe = './venv/bin/python' if len(req_files) > 0 else python
+    python_exe = f'{venv_path}/bin/python' if len(
+        req_files) > 0 and venv_path is not None else python
     test_stream = await asyncio.create_subprocess_exec(
         python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = await run_subprocess(test_stream)
