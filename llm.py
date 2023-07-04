@@ -325,6 +325,7 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
 
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
+
 async def run_subprocess(stream: Process) -> tuple[str, str]:
     stdout = ''
     stderr = ''
@@ -344,8 +345,10 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
-    test_file = [file for file in files if file.endswith(f'{marsha_filename}_test.py')][0]
-    code_file = [file for file in files if file.endswith(f'{marsha_filename}.py')][0]
+    test_file = [file for file in files if file.endswith(
+        f'{marsha_filename}_test.py')][0]
+    code_file = [file for file in files if file.endswith(
+        f'{marsha_filename}.py')][0]
     req_files = [file for file in files if file.endswith('requirements.txt')]
 
     # Install requirements if needed
