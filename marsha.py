@@ -281,7 +281,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, files, stats)
+        await test_and_fix_files(marsha_filename, functions, files, stats, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)

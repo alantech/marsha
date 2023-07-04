@@ -340,7 +340,7 @@ async def run_subprocess(stream: Process) -> (str):
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
@@ -440,7 +440,7 @@ In your response, do not include any explanation, notes, or comments.
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1)
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
 
 
 def gather_stats(stats: dict, stage: str, res: list):
