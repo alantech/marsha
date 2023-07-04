@@ -149,7 +149,7 @@ async def main():
         # Writing generated code to temporal files in preparation for next stages
         filenames = list()
         for idx, md in enumerate(mds):
-            print('Writing generated code to temporal files...')
+            print('Writing generated code to temporary files...')
             filenames = filenames + \
                 write_files_from_markdown(
                     md, subdir=f'{marsha_filename}_{idx}')
