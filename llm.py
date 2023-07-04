@@ -110,7 +110,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-Make sure to include all imports from external libraries used in `{marsha_filename}.py` are present in the `requirements.txt` file.
+If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must match exactly the following markdown format and nothing else:
 
@@ -123,7 +123,7 @@ Your response must match exactly the following markdown format and nothing else:
 # requirements.txt
 
 ```txt
-<imports used in generated code>
+<dependency>
 ```
 
 In your response, do not include any explanation, notes, or comments.
