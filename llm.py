@@ -350,8 +350,13 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Install requirements if needed
     if len(req_files) > 0:
-        # https://stackoverflow.com/questions/62861074/how-to-install-requirements-txt-file-from-a-python-module
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        req_file = req_files[0]
+        create_venv_stream = await asyncio.create_subprocess_exec(
+            python, '-m', 'venv', 'venv', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(create_venv_stream)
+        pip_stream = await asyncio.create_subprocess_exec(
+            './venv/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(pip_stream)
 
     # Run the test suite
     test_stream = await asyncio.create_subprocess_exec(
