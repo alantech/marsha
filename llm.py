@@ -1,14 +1,28 @@
 import asyncio
+import openai
 import os
 import shutil
 import subprocess
 import sys
 import time
 
-import openai
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import extract_function_name, extract_type_name, validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
+from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
+from utils import read_file
+
+# OpenAI pricing model.
+# Format: (tokens, price). Price per 1024 tokens.
+PRICING_MODEL = {
+    'gpt-3.5-turbo': {
+        'in': [(4096, 0.0015), (16384, 0.002)],
+        'out': [(4096, 0.002), (16384, 0.004)]
+    },
+    'gpt-4': {
+        'in': [(8192, 0.03), (32768, 0.06)],
+        'out': [(8192, 0.06), (32768, 0.12)]
+    }
+}
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -17,43 +31,6 @@ t0 = time.time()
 base_path = '.'
 if hasattr(sys, '_MEIPASS'):
     base_path = sys._MEIPASS
-# Load examples used with ChatGPT
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci.mrsh'), 'r')
-fibonacci_mrsh = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci.py'), 'r')
-fibonacci_py = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/fibonacci/fibonacci_test.py'), 'r')
-fibonacci_test = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/before.py'), 'r')
-connection_lint_before = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/pylama.txt'), 'r')
-connection_lint_pylama = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/connection_lint/after.py'), 'r')
-connection_lint_after = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/func.mrsh'), 'r')
-func_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/before.py'), 'r')
-before_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/before_test.py'), 'r')
-before_test_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/test_results.txt'), 'r')
-test_results_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/after.py'), 'r')
-after_correction = f.read()
-f.close()
-f = open(os.path.join(base_path, 'examples/test_correction/after_test.py'), 'r')
-after_test_correction = f.read()
-f.close()
 
 # Determine what name the user's `python` executable is (`python` or `python3`)
 python = 'python' if shutil.which('python') is not None else 'python3'
@@ -113,31 +90,36 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, retries=3, debug=False):
-    defined_classes = list()
-    if types is not None and len(types.keys()) > 0:
-        # look if the func uses any of the types
-        for type in types.keys():
-            if type in func:
-                # if so, we update the prompt to include the python class definition and use it in the completion
-                defined_classes.append(types[type])
-
-    func_for_llm = format_func_for_llm(func, defined_classes)
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
+    func_for_llm = format_func_for_llm(
+        marsha_filename, functions, defined_types)
+    if debug:
+        print(f'''func_for_llm = 
+    ---- start ----
+{func_for_llm}
+    ---- end ----''')
 
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 function. The assignment is written in markdown format. The description should be included as a docstring. Add type hints if feasible. The filename should exactly match the function name followed by `.py`, eg [function name].py. Your response should match the conversation example cases provided, meaning a markdown with the filename as title and then the python code inside a python CodeFence.',
-        }, {
-            'role': 'user',
-            'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# fibonnaci.py
+            'content': f'''You are a senior software engineer assigned to write Python 3 functions. 
+The assignment is written in markdown format.
+The description of each function should be included as a docstring.
+Add type hints if feasible.
+The filename should exactly match the name `{marsha_filename}.py`.
+Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
+If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
 
 ```py
-{fibonacci_py}
-```'''
+<generated code>
+```
+
+In your response, do not include any explanation, notes, or comments.
+''',
         }, {
             'role': 'user',
             'content': f'''{func_for_llm}'''
@@ -145,23 +127,30 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
     }, n_results=n_results), retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a unit test suite for a Python 3 function. The assignment is written in markdown format, with a markdown title consisting of a pseudocode function signature (name, arguments, return type) followed by a description of the function and then a bullet-point list of example cases for the function. The unit tests should exactly match the example cases provided. The filename should exactly match the function name followed by `_test.py`, eg [function name]_test.py. Unknown imports might come from the file where the function is defined, or from the standard library.',
-        }, {
-            'role': 'user',
-            'content': f'''{format_func_for_llm(fibonacci_mrsh)}'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# fibonnaci_test.py
+            'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+The assignment is written in markdown format.
+The unit tests created should exactly match the example cases provided for each function.
+You have to create a TestCase per function provided.
+The filename should exactly match the name `{marsha_filename}_test.py`.
+Unknown imports might come from the file where the function is defined, or from the standard library.
+Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}_test.py
 
 ```py
-{fibonacci_test}
-```'''
+<generated code>
+```
+
+In your response, do not include any explanation, notes, or comments.
+''',
         }, {
             'role': 'user',
             'content': f'''{func_for_llm}'''
         }],
     }, n_results=n_results))
-    stats['first_stage']['total_calls'] += 2
+    gather_stats(stats, 'first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -178,7 +167,7 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
             # ```py
             # <insert code here>
             # ```
-            if validate_first_stage_markdown(doc, extract_function_name(func)):
+            if validate_first_stage_markdown(doc, marsha_filename):
                 mds.append(doc)
             else:
                 if debug:
@@ -191,39 +180,36 @@ async def gpt_func_to_python(func, n_results, stats: dict, types: dict = None, r
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(func, n_results, stats, types, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, defined_types, n_results, stats, retries - 1, debug)
         else:
-            raise Exception('Failed to generate code', func)
+            raise Exception('Failed to generate code', marsha_filename)
 
 
-async def fix_file(filename, lint_text, stats, retries=3):
-    f = open(filename, 'r')
-    code = f.read()
-    f.close()
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: dict, retries: int = 3, debug: bool = False):
+    code = read_file(filename)
     res = await retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': 'You are a senior software engineer working on a Python 3 function. You are using the pylama linting tool to find obvious errors and then fixing them. It uses pyflakes and pycodestyle under the hood to provide its recommendations, and all of the lint errors require fixing.',
-        }, {
-            'role': 'user',
-            'content': f'''# extract_connection_info.py
+            'content': f'''You are a senior software engineer working with Python 3.
+You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
+All of the lint errors require fixing.
+You should only fix the lint errors and not change anything else.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
 
 ```py
-{connection_lint_before}
+<fixed code>
 ```
 
-# pylama results
-
-```
-{connection_lint_pylama}
-```''',
-        }, {
-            'role': 'assistant',
-            'content': f'''# extract_connection_info.py
+# {marsha_filename}_test.py
 
 ```py
-{connection_lint_after}
-```'''
+<fixed code>
+```
+
+In your response, do not include any explanation, notes, or comments.
+''',
         }, {
             'role': 'user',
             'content': f'''# {filename}
@@ -239,22 +225,24 @@ async def fix_file(filename, lint_text, stats, retries=3):
 ```''',
         }],
     })
-    stats['second_stage']['total_calls'] += 1
+    gather_stats(stats, 'second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
+            if debug:
+                print(f'''Invalid doc = {doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
         if retries > 0:
-            return await fix_file(filename, lint_text, stats, retries - 1)
+            return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(files, stats, max_depth=4):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict, max_depth: int = 4, debug: bool = False):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -323,15 +311,16 @@ async def lint_and_fix_files(files, stats, max_depth=4):
                       for e in lints if e.filename == file]
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
-            jobs.append(fix_file(file, lint_text, stats))
+            jobs.append(fix_file(marsha_filename, file,
+                        lint_text, stats, debug=debug))
     await asyncio.gather(*jobs)
 
-    await lint_and_fix_files(files, stats, max_depth - 1)
+    await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
 
-async def test_and_fix_files(func, files, stats, retries=3):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4):
     if retries == 0:
-        raise Exception('Failed to fix code', func)
+        raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith('_test.py')][0]
     code_file = [file for file in files if not file.endswith('_test.py')][0]
@@ -353,51 +342,36 @@ async def test_and_fix_files(func, files, stats, retries=3):
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
-        f = open(test_file, 'r')
-        test = f.read()
-        f.close()
-        f = open(code_file, 'r')
-        code = f.read()
-        f.close()
+        test = read_file(test_file)
+        code = read_file(code_file)
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
-                'content': 'You are a senior software engineer helping a junior engineer fix some code that is failing. You are given the documentation of the function they were assigned to write, followed by the function they wrote, the unit tests they wrote, and the unit test results. There is little time before this feature must be included, so you are simply correcting their code for them using the original documentation as the guide and fixing the mistakes in the code and unit tests as necessary.',
+                'content': f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
+You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results. 
+Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
+Make sure to produce working code that passes the unit tests.
+Make sure to follow PEP8 style guidelines.
+Make sure to include all needed standard Python libraries imports.
+Your response must match exactly the following markdown format and nothing else:
+
+# {marsha_filename}.py
+
+```py
+<fixed code>
+```
+
+# {marsha_filename}_test.py
+
+```py
+<fixed code>
+```
+
+In your response, do not include any explanation, notes, or comments.
+''',
             }, {
                 'role': 'user',
-                'content': f'''{format_func_for_llm(func_correction)}
-
-# extract_connection_info.py
-
-```py
-{before_correction}
-```
-
-# extract_connection_info_test.py
-
-```py
-{before_test_correction}
-```
-
-# Test Results
-
-{test_results_correction}''',
-            }, {
-                'role': 'assistant',
-                'content': f'''# extract_connection_info.py
-
-```py
-{after_correction}
-```
-
-# extract_connection_info_test.py
-
-```py
-{after_test_correction}
-```''',
-            }, {
-                'role': 'user',
-                'content': f'''{format_func_for_llm(func)}
+                'content': f'''{format_func_for_llm(marsha_filename, functions)}
 
 # {code_file}
 
@@ -416,7 +390,7 @@ async def test_and_fix_files(func, files, stats, retries=3):
 {test_results}''',
             }],
         }, 'gpt-4')
-        stats['third_stage']['total_calls'] += 1
+        gather_stats(stats, 'third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -430,73 +404,42 @@ async def test_and_fix_files(func, files, stats, retries=3):
             # ```py
             # <insert code here>
             # ```
-            if not validate_first_stage_markdown(doc, extract_function_name(func)):
+            if not validate_first_stage_markdown(doc, marsha_filename):
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             write_files_from_markdown(doc, subdir=subdir)
         except Exception:
             if retries == 0:
-                raise Exception('Failed to fix code', func)
+                raise Exception('Failed to fix code', marsha_filename)
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(func, files, stats, retries - 1)
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1)
 
 
-async def gpt_type_to_python(type, stats, retries=2) -> str:
-    res = await retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': 'You are a senior software engineer assigned to write a Python 3 class. The assignment is written in markdown format, with a markdown title consisting of the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Just return the markdown as is in the example below, do not add any additional code or info. Make sure to add the __str__, __repr__, and __eq__ methods to the class.',
-        }, {
-            'role': 'user',
-            'content': '''# type SKU
-name,price,quantity
-"Widget",10.00,100
-"Gadget",20.00,50
-"Gizmo",30.00,25'''
-        }, {
-            'role': 'assistant',
-            'content': f'''# type SKU
-
-```py
-class SKU:
-    def __init__(self, name, price, quantity):
-        self.name = name
-        self.price = price
-        self.quantity = quantity
-
-    def __repr__(self):
-        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
-
-    def __str__(self):
-        return f'SKU(name={{self.name}}, price={{self.price}}, quantity={{self.quantity}})'
-
-    def __eq__(self, other):
-        return self.name == other.name and self.price == other.price and self.quantity == other.quantity
-```'''
-        }, {
-            'role': 'user',
-            'content': f'''{type}'''
-        }],
-    })
-    stats['class_generation']['total_calls'] += 1
-    # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
-    # try again (or fully error out, for now)
-    try:
-        # If it fails to parse, it will throw here
-        doc = res.choices[0].message.content
-        # Some validation that the generated file matches the expected format of:
-        # # type Person
-        #
-        # ```py
-        # <insert code here>
-        # ```
-        if not validate_type_markdown(doc, extract_type_name(type)):
-            raise Exception('Invalid output format')
-        return extract_class_definition(doc)
-    except Exception:
-        if retries > 0:
-            return await gpt_type_to_python(type, stats, retries - 1)
-        else:
-            raise Exception('Failed to generate code', type)
+def gather_stats(stats: dict, stage: str, res: list):
+    stats[stage]['total_calls'] += len(res)
+    for r in res:
+        model = 'gpt-4' if r.model.startswith('gpt-4') else 'gpt-3.5-turbo'
+        input_tokens = r.usage.prompt_tokens
+        stats[stage][model]['input_tokens'] += input_tokens
+        pricing = PRICING_MODEL[model]
+        # Calculate input cost based on context length
+        if (input_tokens <= pricing['in'][0][0]):
+            stats[stage][model]['input_cost'] += input_tokens * \
+                pricing['in'][0][1] / 1024
+        elif (input_tokens <= pricing['in'][1][0]):
+            stats[stage][model]['input_cost'] += input_tokens * \
+                pricing['in'][1][1] / 1024
+        output_tokens = r.usage.completion_tokens
+        stats[stage][model]['output_tokens'] += output_tokens
+        # Calculate output cost based on context length
+        if (output_tokens <= pricing['out'][0][0]):
+            stats[stage][model]['output_cost'] += output_tokens * \
+                pricing['out'][0][1] / 1024
+        elif (output_tokens <= pricing['out'][1][0]):
+            stats[stage][model]['output_cost'] += output_tokens * \
+                pricing['out'][1][1] / 1024
+        # Calculate total cost
+        stats[stage][model]['total_cost'] += stats[stage][model]['input_cost'] + \
+            stats[stage][model]['output_cost']

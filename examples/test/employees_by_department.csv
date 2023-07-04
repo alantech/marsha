@@ -1,5 +1,6 @@
-name, department
-Bob,	Accounting
-Jake, Engineering
-Lisa, Engineering
-Sue, HR
+id, name, department, start_date
+1, Bob,	Accounting, 8/8/2003
+1248, Jake, Engineering, 4/4/2013
+14345, Lisa, Engineering, 0/0/0
+98477, Michael, HR, 5/5/2023
+NaN, Sue, HR, 1/1/2020
