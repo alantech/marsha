@@ -189,7 +189,7 @@ def validate_second_stage_markdown(md, filename):
     return True
 
 
-def write_files_from_markdown(md, subdir=None):
+def write_files_from_markdown(md: str, subdir=None) -> list[str]:
     ast = ast_renderer.get_ast(Document(md))
     filenames = []
     filename = ''
@@ -202,6 +202,8 @@ def write_files_from_markdown(md, subdir=None):
             filenames.append(filename)
         elif section['type'] == 'CodeFence':
             filedata = section['children'][0]['content']
+            if filedata is None or filedata == '':
+                continue
             if subdir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
             write_file(filename, filedata)
