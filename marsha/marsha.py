@@ -20,6 +20,8 @@ parser = argparse.ArgumentParser(
 parser.add_argument('source')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
+parser.add_argument('-o', '--output-name', action='store_true',
+                    help='Name for the generated files')
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
 parser.add_argument('-a', '--attempts', type=int, default=1)
@@ -113,10 +115,14 @@ stats = {
 
 async def main():
     t1 = time.time()
-    input_file = args.source
-    # Name without extension
-    marsha_filename = get_filename_from_path(input_file)
-    marsha_file_content = read_file(input_file)
+    if args.output_name:
+        marsha_filename = args.output_name
+        marsha_file_content = args.source
+    else:
+        input_file = args.source
+        # Name without extension
+        marsha_filename = get_filename_from_path(input_file)
+        marsha_file_content = read_file(input_file)
     functions, types = extract_functions_and_types(marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
@@ -236,14 +242,6 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
         stats['first_stage']['total_time'] = prettify_time_delta(
             t2 - t1)
     return mds
-
-
-def get_file_fullpath(filename) -> str:
-    for root, dirs, files in os.walk('.'):
-        for file in files:
-            if file == filename:
-                return os.path.join(root, file)
-
 
 async def process_types(raw_types: list[str]) -> list[str]:
     types_defined = []
