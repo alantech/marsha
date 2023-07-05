@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
     name='marsha',
     version='0.0.1',
-    description='A example Python package',
+    description='Marsha is a higher-level programming language.',
     url='https://github.com/alantech/marsha',
     author='Alan Technologies Maintainers',
     author_email='hello@alantechnologies.com',
