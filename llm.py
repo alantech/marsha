@@ -81,12 +81,17 @@ async def retry_chat_completion(query, model='gpt-4', max_tries=3, n_results=1):
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
+            time.sleep(3 / max_tries)
+        except openai.error.RateLimitError as e:
+            max_tries = max_tries - 1
+            if max_tries == 0:
+                raise e
             time.sleep(2 ** (3 / max_tries))
         except Exception as e:
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
-            time.sleep(2 ** (3 / max_tries))
+            time.sleep(3 / max_tries)
         if max_tries == 0:
             raise Exception('Could not execute chat completion')
 
