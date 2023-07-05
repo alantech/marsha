@@ -346,7 +346,3 @@ Total cost: {stats['total_cost']}
 
 '''
     write_file('stats.md', stats_md)
-
-
-# Entry point
-asyncio.run(main())
