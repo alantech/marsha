@@ -3,7 +3,7 @@ import re
 
 from mistletoe import Document, ast_renderer
 
-from utils import write_file
+from .utils import write_file
 
 
 def to_markdown(node):
