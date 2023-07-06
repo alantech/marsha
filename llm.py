@@ -95,7 +95,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
     marsha_for_llm = format_marsha_for_llm(
         marsha_filename, functions, defined_types)
     if debug:
-        print(f'''func_for_llm = 
+        print(f'''marsha_for_llm =
     ---- start ----
 {marsha_for_llm}
     ---- end ----''')
