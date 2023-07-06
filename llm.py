@@ -113,18 +113,7 @@ Make sure to include all needed standard Python libraries imports.
 Generate `requirements.txt` file with all needed dependencies.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must not comment on what you changed.
-Your response must not add any additional comments.
-Your response must not add any additional clarifications.
-Your response must not add any additional notes.
-Your response must not add any additional information.
-Your response must not add any additional explanations.
-Your response must not add any additional details.
-Your response must not add any additional examples.
-Your response must not add any additional thoughts.
-Your response must not add any additional explanations.
-Your response must not add any additional details.
-Your response must not add any additional examples.
-Your response must not add any additional thoughts.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
 The first section header must be the filename `{marsha_filename}.py`.
 The content of the first section must be a python code block with the generated code.
@@ -162,14 +151,7 @@ Unknown imports might come from the file where the function is defined, or from 
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Your response must not comment on what you changed.
-Your response must not add any additional comments.
-Your response must not add any additional clarifications.
-Your response must not add any additional notes.
-Your response must not add any additional information.
-Your response must not add any additional explanations.
-Your response must not add any additional details.
-Your response must not add any additional examples.
-Your response must not add any additional thoughts.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
 The first section header must be the filename `{marsha_filename}_test.py`.
 The content of the first section must be a python code block with the generated code.
