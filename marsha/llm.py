@@ -278,10 +278,12 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E223',  # tab before operator
         'E224',  # tab after operator
         'E225',  # missing whitespace around operator
+        'E226',  # missing whitespace around arithmetic operator
         'E227',  # missing whitespace around bitwise or shift operator
         'E228',  # missing whitespace around modulo operator
         'E231',  # missing whitespace after `,` `;` `:`
         'E251',  # unexpected spaces around keyword / parameter equals
+        'E252',  # missing whitespace around parameter equals
         'E261',  # at least two spaces before inline comment
         'E262',  # inline comment should start with `# `
         'E265',  # block comment should start with `# `
