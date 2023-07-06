@@ -203,6 +203,8 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
         elif section['type'] == 'CodeFence':
             filedata = section['children'][0]['content']
             if filedata is None or filedata == '':
+                # If theres not data and we are not going to write the file, we should remove it from the filenames list
+                filenames.pop()
                 continue
             if subdir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
