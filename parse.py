@@ -70,7 +70,7 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_func_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
+def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
     break_line = '\n'
     res = [f'# Requirements for file `{marsha_filename}`']
     for func in functions:
@@ -203,6 +203,8 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
         elif section['type'] == 'CodeFence':
             filedata = section['children'][0]['content']
             if filedata is None or filedata == '':
+                # If theres not data and we are not going to write the file, we should remove it from the filenames list
+                filenames.pop()
                 continue
             if subdir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
@@ -229,24 +231,6 @@ def extract_type_name(type):
         raise Exception('Invalid Marsha type')
     header = ast['children'][0]['children'][0]['content']
     return header.split(' ')[1].strip()
-
-
-def validate_type_markdown(md, type_name):
-    ast = ast_renderer.get_ast(Document(md))
-    if len(ast['children']) != 2:
-        return False
-    if ast['children'][0]['type'] != 'Heading':
-        return False
-    if ast['children'][1]['type'] != 'CodeFence':
-        return False
-    if ast['children'][0]['children'][0]['content'].strip().lower() != f'type {type_name}'.lower():
-        return False
-    return True
-
-
-def extract_class_definition(md):
-    ast = ast_renderer.get_ast(Document(md))
-    return ast['children'][1]['children'][0]['content'].strip()
 
 
 def is_defined_from_file(md):
