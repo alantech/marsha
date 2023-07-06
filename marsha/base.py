@@ -118,7 +118,7 @@ async def main():
     # Name without extension
     marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
-    functions, types = extract_functions_and_types(marsha_file_content)
+    functions, types, void_funcs = extract_functions_and_types(marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
     if len(types) > 0:
@@ -137,7 +137,7 @@ async def main():
         # First stage: generate code for functions and classes
         try:
             mds = await generate_python_code(
-                marsha_filename, functions, types_defined, n_results, debug, stats)
+                marsha_filename, functions, types_defined, void_funcs, n_results, debug, stats)
         except Exception as e:
             continue
         # Early exit if quick and dirty

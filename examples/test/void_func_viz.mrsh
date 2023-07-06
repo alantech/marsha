@@ -1,0 +1,15 @@
+@@ -0,0 +1,14 @@
+# type EmployeesByDepartment employees_by_department.csv
+
+# type DepartmentSkills department_skills.csv
+
+# type EmployeeSkills
+name, skill
+Bob,	math
+Jake,	spreadsheets
+Lisa,	coding
+Sue,	spreadsheets
+
+# func visualize_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills)
+
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills to create and plot an EmployeeSkills by merging the 2 list by department and plotting it as a pie chart. Use the pandas and matplotlib library.
