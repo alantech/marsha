@@ -361,11 +361,12 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         req_file = req_files[0]
         req_file_abspath = os.path.abspath(req_file)
         req_file_dir = os.path.dirname(req_file_abspath)
-        print('Creating virtual environment...')
         venv_path = f'{req_file_dir}/venv'
-        create_venv_stream = await asyncio.create_subprocess_exec(
-            python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = await run_subprocess(create_venv_stream)
+        if not os.path.exists(venv_path):
+            print('Creating virtual environment...')
+            create_venv_stream = await asyncio.create_subprocess_exec(
+                python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = await run_subprocess(create_venv_stream)
         print('Installing requirements...')
         pip_stream = await asyncio.create_subprocess_exec(
             f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -395,12 +396,19 @@ Focus on just fixing the mistakes in the code and unit tests as necessary, tryin
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
+If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file. If there are no dependencies, do not include the file.
 Your response must match exactly the following markdown format and nothing else:
 
 # {marsha_filename}.py
 
 ```py
 <fixed code>
+```
+
+# requirements.txt
+
+```txt
+<dependency>
 ```
 
 # {marsha_filename}_test.py
@@ -442,6 +450,10 @@ In your response, do not include any explanation, notes, or comments.
             # ```py
             # <insert code here>
             # ```
+            # # requirements.txt
+            # ```txt
+            # <dependency>
+            # ```
             # # function_name_test.py
             # ```py
             # <insert code here>
@@ -449,7 +461,7 @@ In your response, do not include any explanation, notes, or comments.
             if not validate_first_stage_markdown(doc, marsha_filename):
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
-            write_files_from_markdown(doc, subdir=subdir)
+            files = write_files_from_markdown(doc, subdir=subdir)
         except Exception:
             if retries == 0:
                 raise Exception('Failed to fix code', marsha_filename)
