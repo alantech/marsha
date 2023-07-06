@@ -20,7 +20,7 @@ block_cipher = None
 
 
 a = Analysis(
-    ['marsha.py'],
+    ['__main__.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

@@ -3,7 +3,7 @@ import re
 
 from mistletoe import Document, ast_renderer
 
-from .utils import write_file
+from marsha.utils import write_file
 
 
 def to_markdown(node):
@@ -203,6 +203,8 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
         elif section['type'] == 'CodeFence':
             filedata = section['children'][0]['content']
             if filedata is None or filedata == '':
+                # Remove the filename from the list
+                filenames.pop()
                 continue
             if subdir is not None:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
