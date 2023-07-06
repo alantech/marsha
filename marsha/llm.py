@@ -263,12 +263,28 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     options.linters = ['pycodestyle', 'pyflakes']
     options.paths = [os.path.abspath(f'./{file}') for file in files]
 
+    # options.select = {
+    #     'E112',  # expected an indented block
+    #     'E113',  # unexpected indentation
+    #     'E901',  # SyntaxError or IndentationError
+    #     'E902',  # IOError
+    #     'E0602', # undefined variable
+    #     'E1122',  # unexpected keyword argument in function call
+    #     'W0401', # wildcard import; unable to detect undefined names
+    # }
+
     # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
     # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
     # end, so we have a significant number of warnings and "errors" from the linter we ignore
     options.ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
+        'E126', # continuation line over-indented for hanging indent
+        'E127', # continuation line over-indented for visual indent
+        'E128', # continuation line under-indented for visual indent
+        'E129', # visually indented line with same indent as next logical line
+        'E131', # continuation line unaligned for hanging indent
+        'E133', # closing bracket is missing indentation
         'E201',  # whitespace after `(`
         'E202',  # whitespace before `)`
         'E203',  # whitespace before `,` `;` `:`
@@ -282,6 +298,8 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E227',  # missing whitespace around bitwise or shift operator
         'E228',  # missing whitespace around modulo operator
         'E231',  # missing whitespace after `,` `;` `:`
+        'E241',  # multiple spaces after `,` `;` `:`
+        'E242',  # tab after `,` `;` `:`
         'E251',  # unexpected spaces around keyword / parameter equals
         'E252',  # missing whitespace around parameter equals
         'E261',  # at least two spaces before inline comment
