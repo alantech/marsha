@@ -139,7 +139,6 @@ Your response must strictly match the following markdown format:
 <dependencies>
 ```
 
-In your response, do not include any explanation, notes, or comments.
 ''',
         }, {
             'role': 'user',
@@ -173,7 +172,6 @@ Your response must strictly match the following markdown format:
 <generated code>
 ```
 
-In your response, do not include any explanation, notes, or comments.
 ''',
         }, {
             'role': 'user',
@@ -251,7 +249,6 @@ Your response must strictly match the following markdown format:
 <fixed code>
 ```
 
-In your response, do not include any explanation, notes, or comments.
 ''',
         }, {
             'role': 'user',
@@ -457,7 +454,6 @@ Your response must strictly match the following markdown format:
 <fixed code>
 ```
 
-In your response, do not include any explanation, notes, or comments.
 ''',
             }, {
                 'role': 'user',
