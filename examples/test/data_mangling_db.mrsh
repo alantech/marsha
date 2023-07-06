@@ -1,0 +1,44 @@
+# type EmployeesByDepartment
+name, department
+Bob, Accounting
+Jake, Engineering
+Lisa, Engineer
+Michael, HR
+Sue, HR
+
+# type DepartmentSkills
+department, skill
+Accounting, math
+Accounting, spreadsheets
+Engineering, coding
+Engineering, linux
+HR, spreadsheets
+HR, organization
+
+# type EmployeeSkills
+name, skill
+Bob, math
+Jake, spreadsheets
+Lisa, coding
+Sue, spreadsheets
+
+# func get_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
+
+This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 list by department. Use the pandas library.
+
+* get_employee_skills() = throws an error
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')]) = throws an error
+* get_employee_skills([], []) = []
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')], []) = []
+* get_employee_skills([], [DepartmentSkills('Accounting', 'math')]) = []
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
+* get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
+
+# func connect_to_db(postgres connection string): list of EmployeeSkills
+
+This function connects to a database using the connection string received. Then selects from tables `EmployeesByDepartment` and `DepartmentSkills`, pass those list to `get_employee_skills` and return a list of `EmployeeSkills`.
+
+* connect_to_db() = throws an error
+* connect_to_db('') = throws an error
+* connect_to_db('postgresql://user@localhost:5432/mydb2') = [EmployeeSkills('Joe', 'math')]
