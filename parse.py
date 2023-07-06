@@ -70,7 +70,7 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_func_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
+def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
     break_line = '\n'
     res = [f'# Requirements for file `{marsha_filename}`']
     for func in functions:

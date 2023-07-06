@@ -9,7 +9,7 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_func_for_llm, extract_class_definition, validate_type_markdown
+from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
 from utils import read_file
 
 # OpenAI pricing model.
@@ -92,12 +92,12 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
 
 
 async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
-    func_for_llm = format_func_for_llm(
+    marsha_for_llm = format_marsha_for_llm(
         marsha_filename, functions, defined_types)
     if debug:
         print(f'''func_for_llm = 
     ---- start ----
-{func_for_llm}
+{marsha_for_llm}
     ---- end ----''')
 
     reses = await asyncio.gather(retry_chat_completion({
@@ -130,7 +130,7 @@ In your response, do not include any explanation, notes, or comments.
 ''',
         }, {
             'role': 'user',
-            'content': f'''{func_for_llm}'''
+            'content': f'''{marsha_for_llm}'''
         }],
     }, n_results=n_results), retry_chat_completion({
         'messages': [{
@@ -155,7 +155,7 @@ In your response, do not include any explanation, notes, or comments.
 ''',
         }, {
             'role': 'user',
-            'content': f'''{func_for_llm}'''
+            'content': f'''{marsha_for_llm}'''
         }],
     }, n_results=n_results))
     gather_stats(stats, 'first_stage', reses)
@@ -413,7 +413,7 @@ In your response, do not include any explanation, notes, or comments.
 ''',
             }, {
                 'role': 'user',
-                'content': f'''{format_func_for_llm(marsha_filename, functions)}
+                'content': f'''{format_marsha_for_llm(marsha_filename, functions)}
 
 # {code_file}
 

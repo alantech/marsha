@@ -3,6 +3,7 @@ import asyncio
 import os
 import openai
 import time
+import traceback
 
 from llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
@@ -229,20 +230,14 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     except Exception as e:
         print('First stage failure')
         print(e)
-        print('Retrying')
+        traceback.print_tb(e.__traceback__)
+        print('Retrying...')
         raise e
     finally:
         t2 = time.time()
         stats['first_stage']['total_time'] = prettify_time_delta(
             t2 - t1)
     return mds
-
-
-def get_file_fullpath(filename) -> str:
-    for root, dirs, files in os.walk('.'):
-        for file in files:
-            if file == filename:
-                return os.path.join(root, file)
 
 
 async def process_types(raw_types: list[str]) -> list[str]:
