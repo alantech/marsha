@@ -9,7 +9,7 @@ on:
       test:
         description: "Marsha test to run"
         required: true
-        default: "./examples/test/sort_modules.mrsh"
+        default: "../examples/test/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
         required: false
@@ -41,6 +41,7 @@ jobs:
       - name: Run time script
         id: run
         run: |
+          cd marsha 
           if ${{ github.event.client_payload.test != '' }}; then
             make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
           fi
