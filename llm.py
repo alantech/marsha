@@ -365,11 +365,11 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         venv_path = f'{req_file_dir}/venv'
         create_venv_stream = await asyncio.create_subprocess_exec(
             python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = await run_subprocess(create_venv_stream)
+        await run_subprocess(create_venv_stream)
         print('Installing requirements...')
         pip_stream = await asyncio.create_subprocess_exec(
             f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = await run_subprocess(pip_stream)
+        await run_subprocess(pip_stream)
 
     # Run the test suite
     python_exe = f'{venv_path}/bin/python' if len(

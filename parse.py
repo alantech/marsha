@@ -231,24 +231,6 @@ def extract_type_name(type):
     return header.split(' ')[1].strip()
 
 
-def validate_type_markdown(md, type_name):
-    ast = ast_renderer.get_ast(Document(md))
-    if len(ast['children']) != 2:
-        return False
-    if ast['children'][0]['type'] != 'Heading':
-        return False
-    if ast['children'][1]['type'] != 'CodeFence':
-        return False
-    if ast['children'][0]['children'][0]['content'].strip().lower() != f'type {type_name}'.lower():
-        return False
-    return True
-
-
-def extract_class_definition(md):
-    ast = ast_renderer.get_ast(Document(md))
-    return ast['children'][1]['children'][0]['content'].strip()
-
-
 def is_defined_from_file(md):
     ast = ast_renderer.get_ast(Document(md))
     if len(ast['children']) != 1:

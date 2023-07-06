@@ -230,7 +230,8 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     except Exception as e:
         print('First stage failure')
         print(e)
-        traceback.print_tb(e.__traceback__)
+        if debug:
+            traceback.print_tb(e.__traceback__)
         print('Retrying...')
         raise e
     finally:
