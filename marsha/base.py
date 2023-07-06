@@ -150,13 +150,9 @@ async def main():
         file_groups = list()
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
-            print(f'marsha_filename {marsha_filename}')
-            print(f'writting md {md}')
-            print(f'file_groups {file_groups}')
             file_groups = file_groups + \
                 [write_files_from_markdown(
                     md, subdir=f'{marsha_filename}_{idx}')]
-            print(f'file_groups {file_groups}')
         if args.debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
