@@ -266,7 +266,6 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
     # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
     # end, so we have a significant number of warnings and "errors" from the linter we ignore
-    # https://www.flake8rules.com/
     options.ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
@@ -306,15 +305,16 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E703',  # statement ends with a semicolon
         'E722',  # do not use bare except, specify exception instead
         'E731',  # do not assign a lambda expression, use a def
-        'F401', # module imported but unused
-        'F404', # future import(s) name after other statements
-        'F811', # redefinition of unused name from line
-        'F841', # local variable assigned but never used
         'W191',  # indentation contains tabs
         'W291',  # trailing whitespace
         'W292',  # no newline at end of file
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
+        # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
+        'W0404', # module is reimported multiple times
+        'W0410', # future import(s) after other imports
+        'W0611', # unused import
+        'W0612', # unused variable
     }
 
     lints = check_paths(
