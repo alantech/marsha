@@ -110,7 +110,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file. If there are no dependencies, do not include the file.
+Generate `requirements.txt` file with all needed dependencies.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must not comment on what you changed.
 Your response must not add any additional comments.
@@ -125,7 +125,13 @@ Your response must not add any additional explanations.
 Your response must not add any additional details.
 Your response must not add any additional examples.
 Your response must not add any additional thoughts.
-Your response must strictly match the following markdown format:
+Your response must be a markdown file.
+The first section header must be the filename `{marsha_filename}.py`.
+The content of the first section must be a python code block with the generated code.
+The second section header must be the filename `requirements.txt`.
+The content of the second section must be a text code block with the generated code.
+The file should end with the above code block. Nothing else should be added to the file.
+An example of your response is shown below.
 
 # {marsha_filename}.py
 
@@ -136,7 +142,7 @@ Your response must strictly match the following markdown format:
 # requirements.txt
 
 ```txt
-<dependencies>
+<dependencies needed>
 ```
 
 ''',
@@ -164,7 +170,11 @@ Your response must not add any additional explanations.
 Your response must not add any additional details.
 Your response must not add any additional examples.
 Your response must not add any additional thoughts.
-Your response must strictly match the following markdown format:
+Your response must be a markdown file.
+The first section header must be the filename `{marsha_filename}_test.py`.
+The content of the first section must be a python code block with the generated code.
+The file should end with the above code block. Nothing else should be added to the file.
+An example of your response is shown below.
 
 # {marsha_filename}_test.py
 
@@ -424,7 +434,7 @@ Focus on just fixing the mistakes in the code and unit tests as necessary, tryin
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
-If you need to use external libraries, make sure to include the dependencies in a `requirements.txt` file. If there are no dependencies, do not include the file.
+Generate `requirements.txt` file with all needed dependencies.
 Your response must not comment on what you changed.
 Your response must not add any additional comments.
 Your response must not add any additional clarifications.
