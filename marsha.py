@@ -181,6 +181,8 @@ async def main():
             if not args.debug:
                 for name in task_names:
                     delete_dir_and_content(name)
+            else:
+                traceback.print_tb(e.__traceback__)
             print('Retrying...')
             continue
         # Done! Add one back to `attempts` to avoid accidentally erroring out on success
