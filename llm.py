@@ -130,8 +130,8 @@ The first section header must be the filename `{marsha_filename}.py`.
 The content of the first section must be a python code block with the generated code.
 The second section header must be the filename `requirements.txt`.
 The content of the second section must be a text code block with the generated code.
-The file should end with the above code block. Nothing else should be added to the file.
-An example of your response is shown below.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
 
 # {marsha_filename}.py
 
@@ -173,8 +173,8 @@ Your response must not add any additional thoughts.
 Your response must be a markdown file.
 The first section header must be the filename `{marsha_filename}_test.py`.
 The content of the first section must be a python code block with the generated code.
-The file should end with the above code block. Nothing else should be added to the file.
-An example of your response is shown below.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
 
 # {marsha_filename}_test.py
 
