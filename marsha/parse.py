@@ -92,7 +92,11 @@ def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_ty
                 name = header.split('(')[0].split('func')[1].strip()
                 args = [arg.strip()
                         for arg in header.split('(')[1].split(')')[0].split(',')]
-                ret = header.split('):')[1].strip()
+                end = header.split('):')
+                if len(end) == 1:
+                    ret = 'None'
+                else:
+                    ret = header.split('):')[1].strip()
                 continue
             if child['type'] == 'List':
                 list_started = True
@@ -216,15 +220,15 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[s
     res = ([], [], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.+\):'
-    void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.+\) '
+    void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.+\)'
     type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
     for section in sections:
-        if re.match(func_regex, section):
+        if re.match(void_func_regex, section) and not re.match(func_regex, section):
+            res[2].append(f'# {section.lstrip()}')
+        elif re.match(func_regex, section):
             res[0].append(f'# {section.lstrip()}')
         elif re.match(type_regex, section):
             res[1].append(f'# {section.lstrip()}')
-        elif re.match(void_func_regex, section):
-            res[2].append(f'# {section.lstrip()}')
     return res
 
 

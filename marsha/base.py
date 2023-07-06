@@ -223,12 +223,12 @@ async def main():
         f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
 
 
-async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
+async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
     mds = None
     try:
-        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, n_results, stats, debug=debug)
+        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
     except Exception as e:
         print('First stage failure')
         print(e)
