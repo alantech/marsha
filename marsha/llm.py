@@ -194,7 +194,7 @@ In your response, do not include any explanation, notes, or comments.
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, defined_types, n_results, stats, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, defined_types, void_funcs, n_results, stats, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', marsha_filename)
 
