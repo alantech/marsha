@@ -5,7 +5,7 @@ import math
 import os
 import time
 
-from llm import prettify_time_delta
+from marsha.llm import prettify_time_delta
 
 from mistletoe import Document, ast_renderer
 
@@ -25,7 +25,7 @@ exitcodes = []
 times = []
 calls = []
 cost = []
-total_runs = 30
+total_runs = 2
 for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
