@@ -9,7 +9,7 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.utils import read_file
 
 # OpenAI pricing model.
@@ -96,6 +96,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
         marsha_filename, functions + void_funcs, defined_types)
     marsha_for_test_llm = format_marsha_for_llm(
         marsha_filename, functions, defined_types)
+    function_names = list(map(lambda f: extract_func_name(f), functions))
     if debug:
         print(f'''marsha_for_llm =
     ---- start ----
@@ -109,7 +110,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
-The filename should exactly match the name `{marsha_filename}.py`.
+The filename should exactly match the name `{marsha_filename}.py` and contain the functions `{', '.join(function_names)}` defined within with that exact naming.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Generate `requirements.txt` file with all needed dependencies.
@@ -149,7 +150,7 @@ The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
 The filename should exactly match the name `{marsha_filename}_test.py`.
-Unknown imports might come from the file where the function is defined, or from the standard library.
+Imports must exactly match the standard library, or one of the functions `{', '.join(function_names)}` defined in the `{marsha_filename}.py` file.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Your response must not comment on what you changed.

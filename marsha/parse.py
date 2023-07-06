@@ -232,15 +232,21 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[s
     return res
 
 
-def extract_type_name(type):
+def extract_type_name(type) -> str:
     ast = ast_renderer.get_ast(Document(type))
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
     header = ast['children'][0]['children'][0]['content']
     return header.split(' ')[1].strip()
 
+def extract_func_name(type) -> str:
+    ast = ast_renderer.get_ast(Document(type))
+    if ast['children'][0]['type'] != 'Heading':
+        raise Exception('Invalid Marsha type')
+    header = ast['children'][0]['children'][0]['content']
+    return header.split('(')[0].split('func')[1].strip()
 
-def is_defined_from_file(md):
+def is_defined_from_file(md) -> bool:
     ast = ast_renderer.get_ast(Document(md))
     if len(ast['children']) != 1:
         return False
@@ -253,7 +259,7 @@ def is_defined_from_file(md):
     return True
 
 
-def extract_type_filename(md):
+def extract_type_filename(md) -> str:
     ast = ast_renderer.get_ast(Document(md))
     header = ast['children'][0]['children'][0]['content']
     return header.split(' ')[2]
