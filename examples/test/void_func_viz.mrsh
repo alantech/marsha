@@ -1,4 +1,3 @@
-@@ -0,0 +1,14 @@
 # type EmployeesByDepartment employees_by_department.csv
 
 # type DepartmentSkills department_skills.csv
