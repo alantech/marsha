@@ -7,7 +7,7 @@ setup(
     url='https://github.com/alantech/marsha',
     author='Alan Technologies Maintainers',
     author_email='hello@alantechnologies.com',
-    license='BSD 2-clause',
+    license='AGPL-3.0-only',
     packages=['marsha'],
     install_requires=[
         'autopep8',
@@ -22,9 +22,9 @@ setup(
         'pylama'
     ],
     classifiers=[
-        'Development Status :: 1 - Planning',
-        'Intended Audience :: Science/Research',
-        'License :: OSI Approved :: BSD License',
+        'Development Status :: 2 - Pre-Alpha',
+        'Intended Audience :: Developers'
+        'License :: OSI Approved :: GNU Affero General Public License v3',
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Python :: 3.10',
     ],
