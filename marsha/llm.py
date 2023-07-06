@@ -279,12 +279,12 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     options.ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
-        'E126', # continuation line over-indented for hanging indent
-        'E127', # continuation line over-indented for visual indent
-        'E128', # continuation line under-indented for visual indent
-        'E129', # visually indented line with same indent as next logical line
-        'E131', # continuation line unaligned for hanging indent
-        'E133', # closing bracket is missing indentation
+        'E126',  # continuation line over-indented for hanging indent
+        'E127',  # continuation line over-indented for visual indent
+        'E128',  # continuation line under-indented for visual indent
+        'E129',  # visually indented line with same indent as next logical line
+        'E131',  # continuation line unaligned for hanging indent
+        'E133',  # closing bracket is missing indentation
         'E201',  # whitespace after `(`
         'E202',  # whitespace before `)`
         'E203',  # whitespace before `,` `;` `:`
