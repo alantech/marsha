@@ -42,3 +42,10 @@ This function connects to a postgres database using the connection string receiv
 * connect_to_db() = throws an error for no argument
 * connect_to_db('') = throws an error for empty connection string
 * connect_to_db('postgresql://user@localhost:5432/mydb') = conn
+
+
+# func main(postgres connection string): list of EmployeeSkills
+
+This function will get the connection object calling `connect_to_db` and passing the connection string. It will then select tables EmployeesByDepartment and DepartmentSkills, call the `get_employee_skills` function and return the list of EmployeeSkills generated.
+
+* main('postgresql://user@localhost:5432/mydb') = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
