@@ -139,6 +139,7 @@ In your response, do not include any explanation, notes, or comments.
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
+You have to mock every external API call or database connection.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
 Make sure to follow PEP8 guidelines.
