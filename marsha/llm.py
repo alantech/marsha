@@ -263,12 +263,28 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     options.linters = ['pycodestyle', 'pyflakes']
     options.paths = [os.path.abspath(f'./{file}') for file in files]
 
+    # options.select = {
+    #     'E112',  # expected an indented block
+    #     'E113',  # unexpected indentation
+    #     'E901',  # SyntaxError or IndentationError
+    #     'E902',  # IOError
+    #     'E0602', # undefined variable
+    #     'E1122',  # unexpected keyword argument in function call
+    #     'W0401', # wildcard import; unable to detect undefined names
+    # }
+
     # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
     # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
     # end, so we have a significant number of warnings and "errors" from the linter we ignore
     options.ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
+        'E126',  # continuation line over-indented for hanging indent
+        'E127',  # continuation line over-indented for visual indent
+        'E128',  # continuation line under-indented for visual indent
+        'E129',  # visually indented line with same indent as next logical line
+        'E131',  # continuation line unaligned for hanging indent
+        'E133',  # closing bracket is missing indentation
         'E201',  # whitespace after `(`
         'E202',  # whitespace before `)`
         'E203',  # whitespace before `,` `;` `:`
@@ -278,10 +294,14 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E223',  # tab before operator
         'E224',  # tab after operator
         'E225',  # missing whitespace around operator
+        'E226',  # missing whitespace around arithmetic operator
         'E227',  # missing whitespace around bitwise or shift operator
         'E228',  # missing whitespace around modulo operator
         'E231',  # missing whitespace after `,` `;` `:`
+        'E241',  # multiple spaces after `,` `;` `:`
+        'E242',  # tab after `,` `;` `:`
         'E251',  # unexpected spaces around keyword / parameter equals
+        'E252',  # missing whitespace around parameter equals
         'E261',  # at least two spaces before inline comment
         'E262',  # inline comment should start with `# `
         'E265',  # block comment should start with `# `
@@ -303,12 +323,18 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E701',  # multiple statements on one line (colon)
         'E702',  # multiple statements on one line (semicolon)
         'E703',  # statement ends with a semicolon
+        'E722',  # do not use bare except, specify exception instead
         'E731',  # do not assign a lambda expression, use a def
         'W191',  # indentation contains tabs
         'W291',  # trailing whitespace
         'W292',  # no newline at end of file
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
+        # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
+        'W0404', # module is reimported multiple times
+        'W0410', # future import(s) after other imports
+        'W0611', # unused import
+        'W0612', # unused variable
     }
 
     lints = check_paths(
