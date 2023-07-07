@@ -2,6 +2,7 @@ __pycache__/
 build/
 dist/
 venv/
+marsha.egg-info/
 .env
 examples/**/*.py
 examples/**/requirements.txt

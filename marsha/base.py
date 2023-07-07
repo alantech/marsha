@@ -5,9 +5,9 @@ import openai
 import time
 import traceback
 
-from llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
-from parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path, get_file_fullpath
+from marsha.llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
+from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
+from marsha.utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path, get_file_fullpath
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -24,7 +24,7 @@ parser.add_argument('-d', '--debug', action='store_true',
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
 parser.add_argument('-a', '--attempts', type=int, default=1)
-parser.add_argument('-n', '--n-parallel-executions', type=int, default=1)
+parser.add_argument('-n', '--n-parallel-executions', type=int, default=3)
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 
@@ -344,7 +344,3 @@ Total cost: {stats['total_cost']}
 
 '''
     write_file('stats.md', stats_md)
-
-
-# Entry point
-asyncio.run(main())

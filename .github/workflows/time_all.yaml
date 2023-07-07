@@ -10,7 +10,7 @@ on:
       parallel_runs:
         description: "Number of parallel runs"
         required: false
-        default: 1
+        default: 3
 
 jobs:
   time_all:
@@ -27,8 +27,8 @@ jobs:
         run: |
           for file in ./examples/test/*.mrsh; do
             [ -e "$file" ] || continue
-            echo "Calling 'time' job with 'test' input: $file"
+            echo "Calling 'time' job with 'test' input: .$file"
             curl -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/json" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
-              -d '{"event_type": "time", "client_payload": {"test": "'"$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.ref_name }}"}'
+              -d '{"event_type": "time", "client_payload": {"test": "'".$file"'", "parallel_runs": ${{github.event.inputs.parallel_runs}}, "attempts": ${{github.event.inputs.attempts}}, "ref": "${{ github.ref_name }}"}'
           done
