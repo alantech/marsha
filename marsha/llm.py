@@ -184,7 +184,8 @@ In your response, do not include any explanation, notes, or comments.
                 mds.append(doc)
             else:
                 if debug:
-                    print(f'''Invalid doc = {doc}''')
+                    print(f'''[First stage] Invalid doc:
+{doc}''')
         if len(mds) == 0:
             raise Exception('Invalid output format')
         return mds
@@ -209,13 +210,7 @@ All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
 Your response must match exactly the following markdown format and nothing else:
 
-# {marsha_filename}.py
-
-```py
-<fixed code>
-```
-
-# {marsha_filename}_test.py
+# {filename}
 
 ```py
 <fixed code>
@@ -245,7 +240,8 @@ In your response, do not include any explanation, notes, or comments.
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
             if debug:
-                print(f'''Invalid doc = {doc}''')
+                print(f'''[Second stage] Invalid doc:
+{doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
@@ -368,7 +364,9 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
         except OSError:
             # Ignore 'no such process' error
             pass
-        raise
+        raise Exception('run_subprocess timeout...')
+    except Exception as e:
+        raise e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
@@ -384,6 +382,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Install requirements if needed
     venv_path = None
+    req_file = None
     if len(req_files) > 0:
         req_file = req_files[0]
         req_file_abspath = os.path.abspath(req_file)
@@ -391,21 +390,33 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
-            create_venv_stream = await asyncio.create_subprocess_exec(
-                python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(create_venv_stream)
+            try:
+                create_venv_stream = await asyncio.create_subprocess_exec(
+                    python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                await run_subprocess(create_venv_stream)
+            except Exception as e:
+                if debug:
+                    print('Failed to create virtual environment', e)
         print('Installing requirements...')
-        pip_stream = await asyncio.create_subprocess_exec(
-            f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await run_subprocess(pip_stream)
+        try:
+            pip_stream = await asyncio.create_subprocess_exec(
+                f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream)
+        except Exception as e:
+            if debug:
+                print('Failed to install requirements', e)
 
     # Run the test suite
     python_exe = f'{venv_path}/bin/python' if len(
         req_files) > 0 and venv_path is not None else python
-    test_stream = await asyncio.create_subprocess_exec(
-        python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = await run_subprocess(test_stream)
-    test_results = f'''{stdout}{stderr}'''
+    try:
+        test_stream = await asyncio.create_subprocess_exec(
+            python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(test_stream)
+        test_results = f'''{stdout}{stderr}'''
+    except Exception as e:
+        print('Failed to run test suite...', e)
+        test_results = None
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
@@ -414,6 +425,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
             print(test_results)
         test = read_file(test_file)
         code = read_file(code_file)
+        requirements = read_file(req_file) if req_file is not None else None
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
@@ -435,7 +447,7 @@ Your response must match exactly the following markdown format and nothing else:
 # requirements.txt
 
 ```txt
-<dependency>
+<dependencies>
 ```
 
 # {marsha_filename}_test.py
@@ -454,6 +466,12 @@ In your response, do not include any explanation, notes, or comments.
 
 ```py
 {code}
+```
+
+# requirements.txt
+
+```txt
+{requirements if requirements is not None else ''}
 ```
 
 # {test_file}
@@ -495,6 +513,8 @@ In your response, do not include any explanation, notes, or comments.
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+    elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
 
 
