@@ -17,7 +17,7 @@ on:
       parallel_runs:
         description: "Number of parallel runs"
         required: false
-        default: 1
+        default: 3
 
 jobs:
   run:
