@@ -486,6 +486,7 @@ In your response, do not include any explanation, notes, or comments.
     elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
 
+
 def gather_stats(stats: dict, stage: str, res: list):
     stats[stage]['total_calls'] += len(res)
     for r in res:
