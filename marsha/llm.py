@@ -9,8 +9,8 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
-from utils import read_file
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
+from marsha.utils import read_file
 
 # OpenAI pricing model.
 # Format: (tokens, price). Price per 1024 tokens.

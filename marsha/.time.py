@@ -5,7 +5,7 @@ import math
 import os
 import time
 
-from llm import prettify_time_delta
+from marsha.llm import prettify_time_delta
 
 from mistletoe import Document, ast_renderer
 
