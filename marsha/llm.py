@@ -341,7 +341,9 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
         except OSError:
             # Ignore 'no such process' error
             pass
-        raise
+        raise Exception('run_subprocess timeout...')
+    except Exception as e:
+        raise e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
@@ -364,13 +366,21 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
-            create_venv_stream = await asyncio.create_subprocess_exec(
-                python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(create_venv_stream)
+            try:
+                create_venv_stream = await asyncio.create_subprocess_exec(
+                    python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                await run_subprocess(create_venv_stream)
+            except Exception as e:
+                if debug:
+                    print('Failed to create virtual environment', e)
         print('Installing requirements...')
-        pip_stream = await asyncio.create_subprocess_exec(
-            f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await run_subprocess(pip_stream)
+        try:
+            pip_stream = await asyncio.create_subprocess_exec(
+                f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream)
+        except Exception as e:
+            if debug:
+                print('Failed to install requirements', e)
 
     # Run the test suite
     python_exe = f'{venv_path}/bin/python' if len(
