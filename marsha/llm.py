@@ -209,13 +209,7 @@ All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
 Your response must match exactly the following markdown format and nothing else:
 
-# {marsha_filename}.py
-
-```py
-<fixed code>
-```
-
-# {marsha_filename}_test.py
+# {filename}
 
 ```py
 <fixed code>
