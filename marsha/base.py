@@ -252,7 +252,14 @@ async def process_types(raw_types: list[str]) -> list[str]:
             print('Reading type from file...')
             filename = extract_type_filename(raw_type)
             full_path = get_file_fullpath(filename)
-            type_data = read_file(full_path)
+            try:
+                type_data = read_file(full_path)
+            except Exception as e:
+                err = f'Failed to read file: {full_path}'
+                if args.debug:
+                    print(err)
+                    print(e)
+                raise Exception(err)
             raw_type = f'''# type {type_name}
 {type_data}
             '''
