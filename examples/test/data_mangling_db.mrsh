@@ -35,10 +35,10 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
 
-# func connect_to_db(postgres connection string): list of EmployeeSkills
+# func get_lists(postgres connection string): tuple containing 2 lists, one for EmployeesByDepartment and another for DepartmentSkills
 
-This function connects to a database using the connection string received. Then selects from tables `EmployeesByDepartment` and `DepartmentSkills`, pass those list to `get_employee_skills` and return a list of `EmployeeSkills`.
+This function connects to the database using the connection string received. Then, it fetch data from the database from tables `EmployeesByDepartment` and `DepartmentSkills` and returns a tuple of 2 lists with the fetched data.
 
-* connect_to_db() = throws an error
-* connect_to_db('') = throws an error
-* connect_to_db('postgresql://user@localhost:5432/mydb2') = [EmployeeSkills('Joe', 'math')]
+* get_lists() = throws an error
+* get_lists('') = throws an error
+* get_lists('postgresql://user@localhost:5432/mydb') = ([EmployeesByDepartment('Joe', 'Accounting')], [DepartmentSkills('Accounting', 'math')],)
