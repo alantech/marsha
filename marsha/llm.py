@@ -183,7 +183,8 @@ In your response, do not include any explanation, notes, or comments.
                 mds.append(doc)
             else:
                 if debug:
-                    print(f'''Invalid doc = {doc}''')
+                    print(f'''[First stage] Invalid doc:
+{doc}''')
         if len(mds) == 0:
             raise Exception('Invalid output format')
         return mds
@@ -244,7 +245,8 @@ In your response, do not include any explanation, notes, or comments.
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
             if debug:
-                print(f'''Invalid doc = {doc}''')
+                print(f'''[Second stage] Invalid doc:
+{doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
