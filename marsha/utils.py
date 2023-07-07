@@ -38,7 +38,7 @@ def get_filename_from_path(path: str):
 
 
 def get_file_fullpath(filename) -> str:
-    for root, dirs, files in os.walk('.'):
+    for root, dirs, files in os.walk('..'):
         for file in files:
             if file == filename:
                 return os.path.join(root, file)
