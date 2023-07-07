@@ -359,6 +359,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
 
     # Install requirements if needed
     venv_path = None
+    req_file = None
     if len(req_files) > 0:
         req_file = req_files[0]
         req_file_abspath = os.path.abspath(req_file)
@@ -401,6 +402,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
             print(test_results)
         test = read_file(test_file)
         code = read_file(code_file)
+        requirements = read_file(req_file) if req_file is not None else None
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
@@ -422,7 +424,7 @@ Your response must match exactly the following markdown format and nothing else:
 # requirements.txt
 
 ```txt
-<dependency>
+<dependencies   >
 ```
 
 # {marsha_filename}_test.py
@@ -441,6 +443,12 @@ In your response, do not include any explanation, notes, or comments.
 
 ```py
 {code}
+```
+
+# requirements.txt
+
+```txt
+{requirements if requirements is not None else ''}
 ```
 
 # {test_file}
