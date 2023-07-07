@@ -361,7 +361,9 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
         except OSError:
             # Ignore 'no such process' error
             pass
-        raise
+        raise Exception('run_subprocess Timeout')
+    except Exception as e:
+        raise e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
