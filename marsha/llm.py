@@ -424,7 +424,7 @@ Your response must match exactly the following markdown format and nothing else:
 # requirements.txt
 
 ```txt
-<dependencies   >
+<dependencies>
 ```
 
 # {marsha_filename}_test.py
