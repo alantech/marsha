@@ -35,10 +35,10 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
 
-# func get_lists(postgres connection string): tuple containing 2 lists, one for EmployeesByDepartment and another for DepartmentSkills
+# func connect_to_db(postgres connection string): connection
 
-This function connects to the database using the connection string received. Then, it fetch data from the database from tables `EmployeesByDepartment` and `DepartmentSkills` and returns a tuple of 2 lists with the fetched data.
+This function connects to a postgres database using the connection string received and using the sqlalchemy orm. It should return a connection object.
 
-* get_lists() = throws an error
-* get_lists('') = throws an error
-* get_lists('postgresql://user@localhost:5432/mydb') = ([EmployeesByDepartment('Joe', 'Accounting')], [DepartmentSkills('Accounting', 'math')],)
+* connect_to_db() = throws an error for no argument
+* connect_to_db('') = throws an error for empty connection string
+* connect_to_db('postgresql://user@localhost:5432/mydb') = conn
