@@ -1,6 +1,6 @@
 ./dist/marsha: ./venv ./*.py ./marsha.spec
 	. ./venv/bin/activate; pip install -r requirements.txt
-	. ./venv/bin/activate; pyinstaller marsha.py --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ./examples:./examples
+	. ./venv/bin/activate; pyinstaller __main__.py --name marsha --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ../examples:./examples
 
 ./venv:
 	(command -v $(python) && $(python) -m venv venv) || (command -v python && python -m venv venv) || (command -v python3 && python3 -m venv venv)
@@ -19,4 +19,4 @@ format:
 
 .PHONY: time
 time: ./dist/marsha .time.py
-	. ./venv/bin/activate; ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)
+	. ./venv/bin/activate; pip install --upgrade ..; ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)

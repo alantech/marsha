@@ -9,8 +9,8 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
-from utils import read_file
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
+from marsha.utils import read_file
 
 # OpenAI pricing model.
 # Format: (tokens, price). Price per 1024 tokens.
@@ -195,7 +195,8 @@ The desired response must look like the following:
                 mds.append(doc)
             else:
                 if debug:
-                    print(f'''Invalid doc = {doc}''')
+                    print(f'''[First stage] Invalid doc:
+{doc}''')
         if len(mds) == 0:
             raise Exception('Invalid output format')
         return mds
@@ -228,13 +229,7 @@ The content of the second section must be a python code block with the generated
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
-# {marsha_filename}.py
-
-```py
-<fixed code>
-```
-
-# {marsha_filename}_test.py
+# {filename}
 
 ```py
 <fixed code>
@@ -263,7 +258,8 @@ The desired response must look like the following:
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
             if debug:
-                print(f'''Invalid doc = {doc}''')
+                print(f'''[Second stage] Invalid doc:
+{doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
@@ -282,12 +278,28 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     options.linters = ['pycodestyle', 'pyflakes']
     options.paths = [os.path.abspath(f'./{file}') for file in files]
 
+    # options.select = {
+    #     'E112',  # expected an indented block
+    #     'E113',  # unexpected indentation
+    #     'E901',  # SyntaxError or IndentationError
+    #     'E902',  # IOError
+    #     'E0602', # undefined variable
+    #     'E1122',  # unexpected keyword argument in function call
+    #     'W0401', # wildcard import; unable to detect undefined names
+    # }
+
     # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
     # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
     # end, so we have a significant number of warnings and "errors" from the linter we ignore
     options.ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
+        'E126',  # continuation line over-indented for hanging indent
+        'E127',  # continuation line over-indented for visual indent
+        'E128',  # continuation line under-indented for visual indent
+        'E129',  # visually indented line with same indent as next logical line
+        'E131',  # continuation line unaligned for hanging indent
+        'E133',  # closing bracket is missing indentation
         'E201',  # whitespace after `(`
         'E202',  # whitespace before `)`
         'E203',  # whitespace before `,` `;` `:`
@@ -297,10 +309,14 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E223',  # tab before operator
         'E224',  # tab after operator
         'E225',  # missing whitespace around operator
+        'E226',  # missing whitespace around arithmetic operator
         'E227',  # missing whitespace around bitwise or shift operator
         'E228',  # missing whitespace around modulo operator
         'E231',  # missing whitespace after `,` `;` `:`
+        'E241',  # multiple spaces after `,` `;` `:`
+        'E242',  # tab after `,` `;` `:`
         'E251',  # unexpected spaces around keyword / parameter equals
+        'E252',  # missing whitespace around parameter equals
         'E261',  # at least two spaces before inline comment
         'E262',  # inline comment should start with `# `
         'E265',  # block comment should start with `# `
@@ -322,12 +338,18 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'E701',  # multiple statements on one line (colon)
         'E702',  # multiple statements on one line (semicolon)
         'E703',  # statement ends with a semicolon
+        'E722',  # do not use bare except, specify exception instead
         'E731',  # do not assign a lambda expression, use a def
         'W191',  # indentation contains tabs
         'W291',  # trailing whitespace
         'W292',  # no newline at end of file
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
+        # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
+        'W0404', # module is reimported multiple times
+        'W0410', # future import(s) after other imports
+        'W0611', # unused import
+        'W0612', # unused variable
     }
 
     lints = check_paths(
@@ -360,7 +382,9 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
         except OSError:
             # Ignore 'no such process' error
             pass
-        raise
+        raise Exception('run_subprocess timeout...')
+    except Exception as e:
+        raise e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
@@ -384,21 +408,33 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
-            create_venv_stream = await asyncio.create_subprocess_exec(
-                python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(create_venv_stream)
+            try:
+                create_venv_stream = await asyncio.create_subprocess_exec(
+                    python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                await run_subprocess(create_venv_stream)
+            except Exception as e:
+                if debug:
+                    print('Failed to create virtual environment', e)
         print('Installing requirements...')
-        pip_stream = await asyncio.create_subprocess_exec(
-            f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await run_subprocess(pip_stream)
+        try:
+            pip_stream = await asyncio.create_subprocess_exec(
+                f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream)
+        except Exception as e:
+            if debug:
+                print('Failed to install requirements', e)
 
     # Run the test suite
     python_exe = f'{venv_path}/bin/python' if len(
         req_files) > 0 and venv_path is not None else python
-    test_stream = await asyncio.create_subprocess_exec(
-        python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = await run_subprocess(test_stream)
-    test_results = f'''{stdout}{stderr}'''
+    try:
+        test_stream = await asyncio.create_subprocess_exec(
+            python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(test_stream)
+        test_results = f'''{stdout}{stderr}'''
+    except Exception as e:
+        print('Failed to run test suite...', e)
+        test_results = None
 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if "FAILED" in test_results or "Traceback" in test_results:
@@ -460,6 +496,7 @@ The desired response must look like the following:
 ```
 
 # requirements.txt
+
 ```txt
 {requirements if requirements is not None else ''}
 ```
@@ -503,6 +540,8 @@ The desired response must look like the following:
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
+        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+    elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
 
 
