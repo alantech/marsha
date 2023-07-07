@@ -183,7 +183,8 @@ In your response, do not include any explanation, notes, or comments.
                 mds.append(doc)
             else:
                 if debug:
-                    print(f'''Invalid doc = {doc}''')
+                    print(f'''[First stage] Invalid doc:
+{doc}''')
         if len(mds) == 0:
             raise Exception('Invalid output format')
         return mds
@@ -208,13 +209,7 @@ All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
 Your response must match exactly the following markdown format and nothing else:
 
-# {marsha_filename}.py
-
-```py
-<fixed code>
-```
-
-# {marsha_filename}_test.py
+# {filename}
 
 ```py
 <fixed code>
@@ -244,7 +239,8 @@ In your response, do not include any explanation, notes, or comments.
         doc = res.choices[0].message.content
         if not validate_second_stage_markdown(doc, filename):
             if debug:
-                print(f'''Invalid doc = {doc}''')
+                print(f'''[Second stage] Invalid doc:
+{doc}''')
             raise Exception('Invalid output format')
         write_files_from_markdown(doc)
     except Exception:
