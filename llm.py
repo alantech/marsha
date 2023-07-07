@@ -328,6 +328,7 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'W292',  # no newline at end of file
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
+        'W0611',  # unused import
     }
 
     lints = check_paths(
