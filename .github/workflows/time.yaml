@@ -18,6 +18,10 @@ on:
         description: "Number of parallel runs"
         required: false
         default: 3
+      debug:
+        description: "Debug flag"
+        required: false
+        default: false
 
 jobs:
   run:
@@ -43,10 +47,10 @@ jobs:
         run: |
           cd marsha
           if ${{ github.event.client_payload.test != '' }}; then
-            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+            make attempts=${{github.event.client_payload.attempts}} debug=${{github.event.client_payload.debug}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
           fi
           if ${{ github.event.inputs.test != '' }}; then
-            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+            make attempts=${{github.event.inputs.attempts}} debug=${{github.event.inputs.debug}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT

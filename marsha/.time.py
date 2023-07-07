@@ -19,6 +19,7 @@ parser.add_argument('source')
 parser.add_argument('attempts', type=int, default=3)
 parser.add_argument('n_parallel_executions', type=int, default=1)
 parser.add_argument('stats', type=bool, default=False)
+parser.add_argument('debug', type=bool, default=False)
 args = parser.parse_args()
 
 exitcodes = []
@@ -30,9 +31,9 @@ for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
     print(
-        f'Running ./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
+        f'Running ./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} -d {args.debug} {args.stats and "-s"}')
     exitcode = os.system(
-        f'./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
+        f'./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} -d {args.debug} {args.stats and "-s"}')
     t_2 = time.time()
     testtime = t_2 - t_1
     exitcodes.append(exitcode)
