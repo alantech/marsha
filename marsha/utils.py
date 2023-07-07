@@ -35,10 +35,3 @@ def delete_dir_and_content(filename: str):
 
 def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
-
-
-def get_file_fullpath(filename) -> str:
-    for root, dirs, files in os.walk('..'):
-        for file in files:
-            if file == filename:
-                return os.path.join(root, file)
