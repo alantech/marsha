@@ -222,10 +222,8 @@ You should only fix the lint errors and not change anything else.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
-The first section header must be the filename `{marsha_filename}.py`.
+The first section header must be the filename `{filename}`.
 The content of the first section must be a python code block with the generated code.
-The second section header must be the filename `{marsha_filename}_test.py`.
-The content of the second section must be a python code block with the generated code.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
