@@ -7,7 +7,7 @@ import traceback
 
 from marsha.llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from marsha.utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path, get_file_fullpath
+from marsha.utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -116,13 +116,14 @@ async def main():
     t1 = time.time()
     input_file = args.source
     # Name without extension
+    marsha_file_dirname = os.path.dirname(input_file)
     marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
     functions, types, void_funcs = extract_functions_and_types(marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
     if len(types) > 0:
-        types_defined = await process_types(types)
+        types_defined = await process_types(types, marsha_file_dirname)
     print(f'Compiling functions for {marsha_filename}...')
     quick_and_dirty = args.quick_and_dirty
     debug = args.debug
@@ -243,7 +244,7 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     return mds
 
 
-async def process_types(raw_types: list[str]) -> list[str]:
+async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     types_defined = []
     for raw_type in raw_types:
         type_name = extract_type_name(raw_type)
@@ -251,8 +252,15 @@ async def process_types(raw_types: list[str]) -> list[str]:
         if is_defined_from_file(raw_type):
             print('Reading type from file...')
             filename = extract_type_filename(raw_type)
-            full_path = get_file_fullpath(filename)
-            type_data = read_file(full_path)
+            full_path = f'{dirname}/{filename}'
+            try:
+                type_data = read_file(full_path)
+            except Exception as e:
+                err = f'Failed to read file: {full_path}'
+                if args.debug:
+                    print(err)
+                    print(e)
+                raise Exception(err)
             raw_type = f'''# type {type_name}
 {type_data}
             '''
