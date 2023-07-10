@@ -1,15 +1,45 @@
-# Marsha AI Lang
+&nbsp;
 
-Marsha is a higher-level programming language. Samples of it should look a lot like the requirements given to a software engineer in English. The syntax is compiled by an LLM into software that meets the requirements described, but implication details can vary greatly. As such the software generated is not meant to be deterministic, but the more details and examples provided the more likely the output will be deterministic. Marsha is written in Python and its initial target language is Python. The compiler is meant to be compatible with different LLM types.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="logo.png">
+    <img height="250" />
+  </picture>
+</p>
 
-The Marsha syntax should be:
-- minimal, "obvious", but also discourage lax or incomplete information that could lead to unpredictable behavior
+[![Discord Follow](https://dcbadge.vercel.app/api/server/p5BTaWAdjm?style=flat)](https://discord.gg/p5BTaWAdjm)
+[![GitHub Repo Stars](https://img.shields.io/github/stars/alantech/marsha?style=social)](https://github.com/alantech/marsha)
+
+Marsha is a functional, higher-level, English-based programming language that gets compiled into tested Python software by an LLM. This repository contains an LLM-based compiler that implicitly defines the Marsha syntax.
+
+## Usage
+
+The Marsha compiler can be invoked via a CLI or `pip` module that can also be invoked in Jupyter notebooks.
+
+<> TODO Demo
+
+<> TODO some instructions
+
+## Syntax
+
+The Marsha syntax is meant to be:
+- minimal and "obvious", but also discourage lax or incomplete information that could lead to unpredictable behavior
 - be mechanically parseable for syntax highlighting and quick feedback on correctness issues to the user
 - make it easy to define examples to reduce the probability of generating faulty code and allow generating tests that the application code can be tested against
 
-For now, only function and data structure definitions have been defined which allow for data mangling scripts to be created. The syntax is subject to change as Marsha is currently in an alpha state. What other elements to create will depend on the initial target audience and use case.
+The Marsha syntax looks a lot like markdown and is a mixture of English and mathematical notation. It has its own file format `.mrsh` and is used to define function(s) by providing an input, output (if not void), and the requirements described. The syntax is subject to change as Marsha is currently in an alpha state. If you have a legitimate use case for Marsha, please let us know.
 
-There are multiple things in the roadmap including:
-- syntax for UIComponents, Endpoint/Entrypoint, and Data Storage primitives or blocks
+<> Subsections for different blocks
+
+## Compiler
+
+Marsha is compiled by an LLM into tested software that meets the requirements described, but implication details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/test/). In general, the more detailed the description and the more examples are provided the more likely the output will work.
+
+## Roadmap
+
+- support for endpoints, visualizations and data storage
+- syntax highlighting
+- support for Llama CP, currently 
 - being able to bootstrap the Marsha compiler with a Marsha program
 - more target languages other than Python
