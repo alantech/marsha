@@ -26,10 +26,10 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 
 This function read a file and return its content.
 
-# write_file(path to file, content)
+# func write_file(path to file, content)
 
 This writes a file with the received content.
 
-# process_data(path to file with EmployeesByDepartment, path to file with DepartmentSkills)
+# func process_data(path to file with EmployeesByDepartment, path to file with DepartmentSkills)
 
 This function read the 2 files received using `read_file`. Then it created the respective lists and call `get_employee_skills`. The result is written in an output file using the `write_file` function.
