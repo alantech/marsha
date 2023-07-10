@@ -30,7 +30,7 @@ The Marsha syntax is meant to be:
 
 The Marsha syntax looks a lot like markdown and is a mixture of English and mathematical notation. It has its own file format `.mrsh` and is used to define function(s) by providing an input, output (if not void), and the requirements described. The syntax is subject to change as Marsha is currently in an alpha state. If you have a legitimate use case for Marsha, please let us know.
 
-<> Subsections for different blocks
+<> TODO subsections for different blocks
 
 ## Compiler
 
