@@ -13,6 +13,10 @@ from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import MarshaStats
 from marsha.utils import read_file
+from marsha.llamashim import acreate
+
+# Flag if using Llama.cpp or OpenAI
+use_llama = True if os.getenv('LLAMACPP_MODEL') else False
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -58,7 +62,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
     query['n'] = n_results
     while True:
         try:
-            out = await openai.ChatCompletion.acreate(**query)
+            out = await acreate(**query) if use_llama else await openai.ChatCompletion.acreate(**query)
             t2 = time.time()
             print(
                 f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')

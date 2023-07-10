@@ -12,9 +12,10 @@ from marsha.parse import extract_functions_and_types, extract_type_name, write_f
 from marsha.stats import MarshaStats
 from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
 
-# Set up OpenAI
-openai.organization = os.getenv('OPENAI_ORG')
-openai.api_key = os.getenv('OPENAI_SECRET_KEY')
+# Set up OpenAI if not using Llama.cpp
+if not os.getenv('LLAMACPP_MODEL'):
+    openai.organization = os.getenv('OPENAI_ORG')
+    openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
 # Parse the input arguments
 parser = argparse.ArgumentParser(

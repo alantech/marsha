@@ -7,3 +7,5 @@ marsha.egg-info/
 examples/**/*.py
 examples/**/requirements.txt
 *.ipynb*
+*.swp
+marsha/bin/
