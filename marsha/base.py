@@ -119,7 +119,7 @@ async def main():
     marsha_file_dirname = os.path.dirname(input_file)
     marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
-    functions, types = extract_functions_and_types(marsha_file_content)
+    functions, types, void_funcs = extract_functions_and_types(marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
     if len(types) > 0:
@@ -138,7 +138,7 @@ async def main():
         # First stage: generate code for functions and classes
         try:
             mds = await generate_python_code(
-                marsha_filename, functions, types_defined, n_results, debug, stats)
+                marsha_filename, functions, types_defined, void_funcs, n_results, debug, stats)
         except Exception as e:
             continue
         # Early exit if quick and dirty
@@ -224,12 +224,12 @@ async def main():
         f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
 
 
-async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
+async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
     mds = None
     try:
-        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, n_results, stats, debug=debug)
+        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
     except Exception as e:
         print('First stage failure')
         print(e)

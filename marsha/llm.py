@@ -91,13 +91,15 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
-    marsha_for_llm = format_marsha_for_llm(
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
+    marsha_for_code_llm = format_marsha_for_llm(
+        marsha_filename, functions + void_funcs, defined_types)
+    marsha_for_test_llm = format_marsha_for_llm(
         marsha_filename, functions, defined_types)
     if debug:
         print(f'''marsha_for_llm =
     ---- start ----
-{marsha_for_llm}
+{marsha_for_code_llm}
     ---- end ----''')
 
     reses = await asyncio.gather(retry_chat_completion({
@@ -137,7 +139,7 @@ The desired response must look like the following:
 ''',
         }, {
             'role': 'user',
-            'content': f'''{marsha_for_llm}'''
+            'content': f'''{marsha_for_code_llm}'''
         }],
     }, n_results=n_results), retry_chat_completion({
         'messages': [{
@@ -167,7 +169,7 @@ The desired response must look like the following:
 ''',
         }, {
             'role': 'user',
-            'content': f'''{marsha_for_llm}'''
+            'content': f'''{marsha_for_test_llm}'''
         }],
     }, n_results=n_results))
     gather_stats(stats, 'first_stage', reses)
@@ -205,7 +207,7 @@ The desired response must look like the following:
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, defined_types, n_results, stats, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, defined_types, void_funcs, n_results, stats, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', marsha_filename)
 
