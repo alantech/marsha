@@ -39,11 +39,13 @@ COPY --from=build /llama.cpp llama.cpp
 RUN mkdir -p /llama.cpp/models/7B
 COPY --from=build /open_llama_7b/ggml-model-f16.bin /llama.cpp/models/7B/ggml-model.bin
 
-## TODO: Tiny web server to expose REST access to llama.cpp
+## Copy simple web server script
+WORKDIR /llama.cpp
+COPY server.py server.py
 
 ## Ports
 EXPOSE 8765
 
 WORKDIR /llama.cpp
 
-ENTRYPOINT ./main -p "The following is an example of a 'Hello, World' application in Python 3:"
+ENTRYPOINT python3 server.py
