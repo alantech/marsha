@@ -125,9 +125,9 @@ def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_ty
 
 {desc}
 
-### Examples of expected behavior
+{f"""### Examples of expected behavior
 
-{reqs}
+{reqs}""" if len(reqs) > 0 else ''}
 '''
         res.append(fn_def)
     if defined_types is not None:
