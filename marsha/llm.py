@@ -143,6 +143,7 @@ The unit tests created should exactly match the example cases provided for each 
 You have to create a TestCase per function provided.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
+If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Your response must match exactly the following markdown format and nothing else:
@@ -431,7 +432,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
             'messages': [{
                 'role': 'system',
                 'content': f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
-You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results. 
+You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
