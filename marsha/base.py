@@ -162,7 +162,7 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions, stats, debug), name=file_group[0]))
+                review_and_fix(marsha_filename, file_group, functions + void_funcs, stats, debug), name=file_group[0]))
         task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
