@@ -346,10 +346,10 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
         # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
-        'W0404', # module is reimported multiple times
-        'W0410', # future import(s) after other imports
-        'W0611', # unused import
-        'W0612', # unused variable
+        'W0404',  # module is reimported multiple times
+        'W0410',  # future import(s) after other imports
+        'W0611',  # unused import
+        'W0612',  # unused variable
     }
 
     lints = check_paths(
@@ -388,7 +388,7 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
@@ -487,7 +487,7 @@ The desired response must look like the following:
 ''',
             }, {
                 'role': 'user',
-                'content': f'''{format_marsha_for_llm(marsha_filename, functions)}
+                'content': f'''{format_marsha_for_llm(marsha_filename, functions + void_funcs, defined_types)}
 
 # {code_file}
 
@@ -540,9 +540,9 @@ The desired response must look like the following:
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_funcs, files, stats, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_funcs, files, stats, retries - 1, debug)
 
 
 def gather_stats(stats: dict, stage: str, res: list):

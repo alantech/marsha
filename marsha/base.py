@@ -119,7 +119,8 @@ async def main():
     marsha_file_dirname = os.path.dirname(input_file)
     marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
-    functions, types, void_funcs = extract_functions_and_types(marsha_file_content)
+    functions, types, void_funcs = extract_functions_and_types(
+        marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
     if len(types) > 0:
@@ -162,7 +163,7 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions + void_funcs, stats, debug), name=file_group[0]))
+                review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, stats, debug), name=file_group[0]))
         task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
@@ -268,7 +269,7 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     return types_defined
 
 
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], stats: dict, debug: bool = False):
+async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_funcs: list[str], stats: dict, debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
@@ -287,7 +288,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, files, stats, debug=debug)
+        await test_and_fix_files(marsha_filename, functions, defined_types, void_funcs, files, stats, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)
