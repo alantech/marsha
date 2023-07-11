@@ -35,17 +35,17 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math')]) = [EmployeeSkills('Joe', 'math')]
 * get_employee_skills([EmployeesByDepartment('Joe', 'Accounting'), EmployeesByDepartment('Jake', 'Engineering')], [DepartmentSkills('Accounting', 'math'), DepartmentSkills('Engineering', 'coding')]) = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
 
-# func connect_to_db(postgres connection string): connection
+# func connect_to_db(postgres connection string): connection object
 
-This function connects to a postgres database using the connection string received and using the sqlalchemy orm. It should return a connection object.
+This function connects to a postgres database using the connection string received and using the sql alchemy ORM. It should return a connection object.
 
 * connect_to_db() = throws an error for no argument
 * connect_to_db('') = throws an error for empty connection string
-* connect_to_db('postgresql://user@localhost:5432/mydb') = conn
+* connect_to_db('postgresql://user:pass@localhost:5432/mydb') = conn
 
 
-# func main(postgres connection string): list of EmployeeSkills
+# func get_data(postgres connection string): list of EmployeeSkills
 
-This function will get the connection object calling `connect_to_db` and passing the connection string. It will then select tables EmployeesByDepartment and DepartmentSkills, call the `get_employee_skills` function and return the list of EmployeeSkills generated.
+This function will get the connection object from `connect_to_db` with the postgres connection string. It will select from tables `EmployeesByDepartment` and `DepartmentSkills`, call the `get_employee_skills` function and return the list of `EmployeeSkills` generated.
 
-* main('postgresql://user@localhost:5432/mydb') = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
+* get_data('postgresql://user:pass@localhost:5432/mydb') = [EmployeeSkills('Joe', 'math'), EmployeeSkills('Jake', 'coding')]
