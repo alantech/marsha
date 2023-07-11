@@ -4,7 +4,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="logo_dark.png">
     <source media="(prefers-color-scheme: light)" srcset="logo.png">
-    <img height="250" />
+    <img height="150" />
   </picture>
 </p>
 
