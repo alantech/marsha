@@ -17,7 +17,7 @@ Marsha is a functional, higher-level, English-based programming language that ge
 
 The Marsha compiler can be used to compile the syntax using a `pip` module via a terminal or Jupyter Notebook:
 
-```sh
+```bash
 pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
