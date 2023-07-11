@@ -204,6 +204,7 @@ async def main():
             stats['class_generation']['gpt-4']['total_cost']
         if should_write_stats:
             stats_to_file(stats)
+        print(f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
         raise Exception(
             f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
     t2 = time.time()
