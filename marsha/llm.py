@@ -457,6 +457,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
 You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Do not write new unit tests, just fix the existing ones.
+{f"Do not make any reference to the functions {', '.join(void_function_names)} in `{marsha_filename}_test.py`." if len(void_function_names) > 0 else ""}
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
