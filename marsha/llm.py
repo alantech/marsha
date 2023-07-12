@@ -532,6 +532,9 @@ The desired response must look like the following:
             # <insert code here>
             # ```
             if not validate_first_stage_markdown(doc, marsha_filename):
+                if debug:
+                    print(f'''[Third stage] Invalid doc for {marsha_filename}:
+{doc}''')
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             files = write_files_from_markdown(doc, subdir=subdir)
