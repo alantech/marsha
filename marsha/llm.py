@@ -9,7 +9,7 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name, extract_type_name
 from marsha.utils import read_file
 
 # OpenAI pricing model.
@@ -112,7 +112,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
@@ -151,6 +151,7 @@ You have to create a TestCase per function provided.
 You have to mock every external API call or database connection.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
+If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Your response must not comment on what you changed.
@@ -347,10 +348,10 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
         # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
-        'W0404', # module is reimported multiple times
-        'W0410', # future import(s) after other imports
-        'W0611', # unused import
-        'W0612', # unused variable
+        'W0404',  # module is reimported multiple times
+        'W0410',  # future import(s) after other imports
+        'W0611',  # unused import
+        'W0612',  # unused variable
     }
 
     lints = check_paths(
@@ -372,11 +373,11 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
 
-async def run_subprocess(stream: Process) -> tuple[str, str]:
+async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, str]:
     stdout = ''
     stderr = ''
     try:
-        stdout, stderr = await asyncio.wait_for(stream.communicate(), 60)
+        stdout, stderr = await asyncio.wait_for(stream.communicate(), timeout)
     except asyncio.exceptions.TimeoutError:
         try:
             stream.kill()
@@ -389,7 +390,8 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
+    break_line = '\n'
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
@@ -398,15 +400,14 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     code_file = [file for file in files if file.endswith(
         f'{marsha_filename}.py')][0]
     req_files = [file for file in files if file.endswith('requirements.txt')]
-
+    # Define virtual environment path
+    code_file_abspath = os.path.abspath(code_file)
+    code_file_dir = os.path.dirname(code_file_abspath)
+    venv_path = f'{code_file_dir}/venv'
     # Install requirements if needed
-    venv_path = None
     req_file = None
     if len(req_files) > 0:
         req_file = req_files[0]
-        req_file_abspath = os.path.abspath(req_file)
-        req_file_dir = os.path.dirname(req_file_abspath)
-        venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
             try:
@@ -419,15 +420,17 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         print('Installing requirements...')
         try:
             pip_stream = await asyncio.create_subprocess_exec(
-                f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(pip_stream)
+                f'{venv_path}/bin/pip', 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream, 120)
         except Exception as e:
             if debug:
                 print('Failed to install requirements', e)
 
     # Run the test suite
-    python_exe = f'{venv_path}/bin/python' if len(
-        req_files) > 0 and venv_path is not None else python
+    if not os.path.exists(venv_path):
+        python_exe = python
+    else:
+        python_exe = f'{venv_path}/bin/python'
     try:
         test_stream = await asyncio.create_subprocess_exec(
             python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -445,16 +448,20 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         test = read_file(test_file)
         code = read_file(code_file)
         requirements = read_file(req_file) if req_file is not None else None
+        void_function_names = list(
+            map(lambda f: extract_func_name(f), void_functions))
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
                 'content': f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
-You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results. 
+You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
+Do not write new unit tests, just fix the existing ones.
+{f"Do not make any reference to the functions {', '.join(void_function_names)} in `{marsha_filename}_test.py`." if len(void_function_names) > 0 else ""}
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
@@ -488,7 +495,11 @@ The desired response must look like the following:
 ''',
             }, {
                 'role': 'user',
-                'content': f'''{format_marsha_for_llm(marsha_filename, functions)}
+                'content': f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
+
+{f"""## Do not test the following functions:
+
+{break_line.join(map(lambda f: f"- {f}", void_function_names))}""" if len(void_function_names) > 0 else ""}
 
 # {code_file}
 
@@ -544,9 +555,9 @@ The desired response must look like the following:
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
-        return await test_and_fix_files(marsha_filename, functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
 
 
 def gather_stats(stats: dict, stage: str, res: list):
