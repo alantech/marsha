@@ -148,7 +148,6 @@ The desired response must look like the following:
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
-You have to mock every external API call or database connection.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
 Make sure to follow PEP8 guidelines.
@@ -390,7 +389,6 @@ async def run_subprocess(stream: Process) -> tuple[str, str]:
 
 
 async def test_and_fix_files(marsha_filename: str, functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
-    print(f'working with files {files}')
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
     # There should only be two files, the test file and the code file
@@ -401,12 +399,13 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     req_files = [file for file in files if file.endswith('requirements.txt')]
 
     # Install requirements if needed
-    test_file_abspath = os.path.abspath(test_file)
-    test_file_dir = os.path.dirname(test_file_abspath)
-    venv_path = f'{test_file_dir}/venv'
+    venv_path = None
     req_file = None
     if len(req_files) > 0:
         req_file = req_files[0]
+        req_file_abspath = os.path.abspath(req_file)
+        req_file_dir = os.path.dirname(req_file_abspath)
+        venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
             try:
@@ -424,15 +423,10 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         except Exception as e:
             if debug:
                 print('Failed to install requirements', e)
-    else:
-        print(f'No req files for some reason: {req_files}')
+
     # Run the test suite
-    if not os.path.exists(venv_path):
-        print('No virtual environment found, using system python')
-        python_exe = python
-    else:
-        print('Virtual environment found, using venv python')
-        python_exe = f'{venv_path}/bin/python'
+    python_exe = f'{venv_path}/bin/python' if len(
+        req_files) > 0 and venv_path is not None else python
     try:
         test_stream = await asyncio.create_subprocess_exec(
             python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -537,9 +531,6 @@ The desired response must look like the following:
             # <insert code here>
             # ```
             if not validate_first_stage_markdown(doc, marsha_filename):
-                if debug:
-                    print(f'''[Third stage] Invalid doc for {marsha_filename}:
-{doc}''')
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             files = write_files_from_markdown(doc, subdir=subdir)
