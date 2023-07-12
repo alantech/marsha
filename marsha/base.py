@@ -172,9 +172,14 @@ async def main():
                 else:
                     print('Writing generated code to files...')
                     filename = name
-                    test_filename = filename.replace('.py', '_test.py')
                     copy_file(filename, f'{marsha_filename}.py')
+                    test_filename = filename.replace('.py', '_test.py')
                     copy_file(test_filename, f'{marsha_filename}_test.py')
+                    directory = os.path.dirname(filename)
+                    requirements_filename = os.path.join(
+                        directory, 'requirements.txt')
+                    if os.path.exists(requirements_filename):
+                        copy_file(requirements_filename, 'requirements.txt')
                     delete_dir_and_content(filename)
         except Exception as e:
             print('Failed to generate working code.')
