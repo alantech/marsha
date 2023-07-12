@@ -1,9 +1,11 @@
-# func extract_connection_info(url): JSON object with connection properties
+# func extract_connection_info(database url): JSON object with connection properties
 
-It should extract from the database url all the connection properties in a JSON format.
+the function extracts all the connection properties in a JSON format from the database url provided. The function should also make sure that the db url follows the sql alchemy definition of database url. The function should support all database schemes supported by sql alchemy.
 
 * extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb" }
-* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "ssl": "require" } }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
-* extract_connection_info('jdbc:mysql://0.0.0.0:3306/mydb?user=user&password=pass&sslMode=REQUIRED = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl": "require" } }
+* extract_connection_info('postgresql://user:pass@0.0.0.0:5432/mydb?sslmode=require') = { "protocol": "postgresql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 5432, "database": "mydb", "extra": { "sslmode": "require" } }
+* extract_connection_info('mysql://user:pass0.0.0.0:3306/mydb?') = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb" }
+* extract_connection_info('mysql://0.0.0.0:3306/mydb?ssl_check_hostname=false) = { "protocol": "mysql", "dbUser": "user", "dbPassword": "pass", "host": "0.0.0.0", "port": 3306, "database": "mydb", "extra": { "ssl_check_hostname": false } }
+* extract_connection_info('jdbc:oracle://user:pass0.0.0.0:1521/mydb?') = throws an error due to invalid db url
 * extract_connection_info('') = {}
+* extract_connection_info() = throws an error
