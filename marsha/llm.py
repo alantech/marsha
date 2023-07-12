@@ -112,7 +112,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{marsha_filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
@@ -454,7 +454,7 @@ Focus on just fixing the mistakes in the code and unit tests as necessary, tryin
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
