@@ -1,12 +1,4 @@
-&nbsp;
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="logo-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="logo.png">
-    <img height="150" />
-  </picture>
-</p>
+# Marsha
 
 [![Discord Follow](https://dcbadge.vercel.app/api/server/p5BTaWAdjm?style=flat)](https://discord.gg/p5BTaWAdjm)
 [![GitHub Repo Stars](https://img.shields.io/github/stars/alantech/marsha?style=social)](https://github.com/alantech/marsha)
