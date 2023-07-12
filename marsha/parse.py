@@ -125,9 +125,9 @@ def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_ty
 
 {desc}
 
-{f"""### Examples of expected behavior
+### Examples of expected behavior
 
-{reqs}""" if len(reqs) > 0 else ''}
+{reqs}
 '''
         res.append(fn_def)
     if defined_types is not None:
@@ -257,11 +257,3 @@ def extract_type_filename(md):
     ast = ast_renderer.get_ast(Document(md))
     header = ast['children'][0]['children'][0]['content']
     return header.split(' ')[2]
-
-
-def extract_func_name(type) -> str:
-    ast = ast_renderer.get_ast(Document(type))
-    if ast['children'][0]['type'] != 'Heading':
-        raise Exception('Invalid Marsha function')
-    header = ast['children'][0]['children'][0]['content']
-    return header.split('(')[0].split('func')[1].strip()
