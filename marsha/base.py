@@ -119,7 +119,8 @@ async def main():
     marsha_file_dirname = os.path.dirname(input_file)
     marsha_filename = get_filename_from_path(input_file)
     marsha_file_content = read_file(input_file)
-    functions, types, void_funcs = extract_functions_and_types(marsha_file_content)
+    functions, types, void_funcs = extract_functions_and_types(
+        marsha_file_content)
     types_defined = None
     # Pre-process types in case we need to open a file to get the type definition
     if len(types) > 0:

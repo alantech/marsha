@@ -347,10 +347,10 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
         'W293',  # blank line contains whitespace
         'W391',  # blank line at end of file
         # https://github.com/AtomLinter/linter-pylama/blob/master/bin/pylama/lint/pylama_pyflakes.py
-        'W0404', # module is reimported multiple times
-        'W0410', # future import(s) after other imports
-        'W0611', # unused import
-        'W0612', # unused variable
+        'W0404',  # module is reimported multiple times
+        'W0410',  # future import(s) after other imports
+        'W0611',  # unused import
+        'W0612',  # unused variable
     }
 
     lints = check_paths(
@@ -447,7 +447,8 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
         test = read_file(test_file)
         code = read_file(code_file)
         requirements = read_file(req_file) if req_file is not None else None
-        void_function_names = list(map(lambda f: extract_func_name(f), void_functions))
+        void_function_names = list(
+            map(lambda f: extract_func_name(f), void_functions))
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
