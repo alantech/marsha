@@ -372,11 +372,11 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict
     await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
 
 
-async def run_subprocess(stream: Process) -> tuple[str, str]:
+async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, str]:
     stdout = ''
     stderr = ''
     try:
-        stdout, stderr = await asyncio.wait_for(stream.communicate(), 60)
+        stdout, stderr = await asyncio.wait_for(stream.communicate(), timeout)
     except asyncio.exceptions.TimeoutError:
         try:
             stream.kill()
