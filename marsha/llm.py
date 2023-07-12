@@ -398,15 +398,14 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
     code_file = [file for file in files if file.endswith(
         f'{marsha_filename}.py')][0]
     req_files = [file for file in files if file.endswith('requirements.txt')]
-
+    # Define virtual environment path
+    code_file_abspath = os.path.abspath(code_file)
+    code_file_dir = os.path.dirname(code_file_abspath)
+    venv_path = f'{code_file_dir}/venv'
     # Install requirements if needed
-    venv_path = None
     req_file = None
     if len(req_files) > 0:
         req_file = req_files[0]
-        req_file_abspath = os.path.abspath(req_file)
-        req_file_dir = os.path.dirname(req_file_abspath)
-        venv_path = f'{req_file_dir}/venv'
         if not os.path.exists(venv_path):
             print('Creating virtual environment...')
             try:
@@ -426,8 +425,12 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
                 print('Failed to install requirements', e)
 
     # Run the test suite
-    python_exe = f'{venv_path}/bin/python' if len(
-        req_files) > 0 and venv_path is not None else python
+    if not os.path.exists(venv_path):
+        print('No virtual environment found, using system python')
+        python_exe = python
+    else:
+        print('Using virtual environment python')
+        python_exe = f'{venv_path}/bin/python'
     try:
         test_stream = await asyncio.create_subprocess_exec(
             python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
