@@ -418,8 +418,8 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], files: 
         print('Installing requirements...')
         try:
             pip_stream = await asyncio.create_subprocess_exec(
-                f'{venv_path}/bin/pip', 'install', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(pip_stream)
+                f'{venv_path}/bin/pip', 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream, 120)
         except Exception as e:
             if debug:
                 print('Failed to install requirements', e)
