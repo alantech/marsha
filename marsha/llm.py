@@ -449,37 +449,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
         test = read_file(test_file)
         code = read_file(code_file)
         requirements = read_file(req_file) if req_file is not None else None
-        void_function_names = list(map(lambda f: f'`{extract_func_name(f)}`', void_functions))
-        content = f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
-
-{f"""## Do not test the following functions:
-
-{break_line.join(map(lambda f: f"- {f}", void_function_names))}""" if len(void_function_names) > 0 else ""}
-
-# {code_file}
-
-```py
-{code}
-```
-
-# requirements.txt
-
-```txt
-{requirements if requirements is not None else ''}
-```
-
-# {test_file}
-
-```py
-{test}
-```
-
-# Test Results
-
-{test_results}'''
-
-        print(f'content: {content}')
-
+        void_function_names = list(map(lambda f: extract_func_name(f), void_functions))
         res = await retry_chat_completion({
             'messages': [{
                 'role': 'system',
@@ -487,7 +457,6 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
 You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Do not write new unit tests, just fix the existing ones.
-{f"The generated code in `{marsha_filename}.py` must keep the functions {', '.join(void_function_names)} ." if len(void_function_names) > 0 else ""}
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
@@ -525,7 +494,33 @@ The desired response must look like the following:
 ''',
             }, {
                 'role': 'user',
-                'content': content,
+                'content': f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
+
+{f"""## Do not test the following functions:
+
+{break_line.join(map(lambda f: f"- {f}", void_function_names))}""" if len(void_function_names) > 0 else ""}
+
+# {code_file}
+
+```py
+{code}
+```
+
+# requirements.txt
+
+```txt
+{requirements if requirements is not None else ''}
+```
+
+# {test_file}
+
+```py
+{test}
+```
+
+# Test Results
+
+{test_results}''',
             }],
         }, 'gpt-4')
         gather_stats(stats, 'third_stage', [res])
