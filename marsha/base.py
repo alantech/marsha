@@ -162,7 +162,7 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions, stats, debug), name=file_group[0]))
+                review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, stats, debug), name=file_group[0]))
         task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
@@ -273,7 +273,7 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     return types_defined
 
 
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], stats: dict, debug: bool = False):
+async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], stats: dict, debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
@@ -292,7 +292,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, files, stats, debug=debug)
+        await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)
