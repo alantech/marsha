@@ -427,10 +427,8 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
 
     # Run the test suite
     if not os.path.exists(venv_path):
-        print('No virtual environment found, using system python')
         python_exe = python
     else:
-        print('Using virtual environment python')
         python_exe = f'{venv_path}/bin/python'
     try:
         test_stream = await asyncio.create_subprocess_exec(
