@@ -257,3 +257,11 @@ def extract_type_filename(md):
     ast = ast_renderer.get_ast(Document(md))
     header = ast['children'][0]['children'][0]['content']
     return header.split(' ')[2]
+
+
+def extract_func_name(type) -> str:
+    ast = ast_renderer.get_ast(Document(type))
+    if ast['children'][0]['type'] != 'Heading':
+        raise Exception('Invalid Marsha function')
+    header = ast['children'][0]['children'][0]['content']
+    return header.split('(')[0].split('func')[1].strip()
