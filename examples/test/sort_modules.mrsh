@@ -9,4 +9,4 @@ In the case that the dependencies defined are *not* a DAG, it should raise an er
 * sort_modules([{"name": "a", "dependencies": []}, {"name": "b", "dependencies": ["c"]}, {"name": "c", "dependencies": ["a"]}) = ["a", "c", "b"]
 * sort_modules([{"name": "first_root", "dependencies": []}, {"name": "mid_node", "dependencies": ["first_root", "second_root"]}, {"name": "leaf", "dependencies": ["mid_node", "second_root"]}, {"name": "second_root", "dependencies": []}]) = ["first_root", "second_root", "mid_node", "leaf"]
 * sort_modules([{"name": "a", "dependencies": ["a"]}]) raises an error with the message: "Cycle detected: a -> a"
-* sort_modules([{"name": "a", "dependencies": ["b"]}, {"name": "b", "dependencies": ["c"]}, {"name":: "c", "dependencies": ["a"]}]) raises an error with the message: "Cycle detected: a -> b -> c -> a"
+* sort_modules([{"name": "a", "dependencies": ["b"]}, {"name": "b", "dependencies": ["c"]}, {"name": "c", "dependencies": ["a"]}]) raises an error with the message: "Cycle detected: a -> b -> c -> a"
