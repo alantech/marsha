@@ -40,23 +40,24 @@ def add_helper(filename: str):
     f = open(filename, 'a')
     f.write("""
 if __name__ == '__main__':
-    import inspect
     import argparse
+    import inspect
+    import json
     lookup = globals()
     func_names = [r.__name__ for r in lookup.values() if callable(r)]
     default_func = func_names[-1]
     parser = argparse.ArgumentParser(description='Marsha-generated CLI options')
-    parser.add_argument('--func', action='store', required=False, choices=func_names, default=default_func)
-    parser.add_argument('--stdin', action='store_true', required=False)
-    parser.add_argument('--infile', action='store', required=False, default=None)
-    parser.add_argument('--outfile', action='store', required=False, default=None)
-    parser.add_argument('--serve', action='store', required=False, type=int)
+    parser.add_argument('-c', '--func', action='store', required=False, choices=func_names, default=default_func)
+    parser.add_argument('-j', '--as-json', action='store_true', required=False)
+    parser.add_argument('-i', '--stdin', action='store_true', required=False)
+    parser.add_argument('-f', '--infile', action='store', required=False, default=None)
+    parser.add_argument('-o', '--outfile', action='store', required=False, default=None)
+    parser.add_argument('-s', '--serve', action='store', required=False, type=int)
     parser.add_argument('params', nargs='*')
     args = parser.parse_args()
     func = lookup[args.func]
     if args.serve is not None:
         from http.server import BaseHTTPRequestHandler, HTTPServer
-        import json
         class MarshaServer(BaseHTTPRequestHandler):
             def do_POST(self):
                 func_name = self.path.split('/')[1]
@@ -69,23 +70,32 @@ if __name__ == '__main__':
                 content_len = int(self.headers.get('Content-Length'))
                 post_body = self.rfile.read(content_len)
                 post_payload = None
-                try:
-                    post_payload = json.loads(post_body)
-                except:
-                    self.send_response(400)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(bytes('{"error": "Invalid JSON provided"}', 'utf-8'))
-                    return
+                is_json = self.headers.get_content_type() == 'application/json'
+                if is_json:
+                    try:
+                        post_payload = json.loads(post_body)
+                    except:
+                        self.send_response(400)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(bytes('{"error": "Invalid JSON provided"}', 'utf-8'))
+                        return
+                else:
+                    post_payload = post_body.decode('utf-8')
                 out = None
                 if type(post_payload) is list:
                     out = func(*post_payload)
                 else:
                     out = func(post_payload)
                 self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(bytes(json.dumps(out), 'utf-8'))
+                if is_json:
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(bytes(json.dumps(out), 'utf-8'))
+                else:
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(bytes(out, 'utf-8'))
         server = HTTPServer(('', args.serve), MarshaServer)
         print(f'Listening on port {args.serve}')
         try:
@@ -97,22 +107,36 @@ if __name__ == '__main__':
         print("Server stopped.")
     else:
         out = None
+        parsed_param = None
         if args.stdin:
             import sys
             param = sys.stdin.read()
-            out = func(param)
+            if args.as_json:
+                parsed_param = json.loads(param)
+            else:
+                parsed_param = param
         elif args.infile is not None:
             file = open(args.infile, 'r')
             param = file.read()
             file.close()
-            out = func(param)
+            if args.as_json:
+                parsed_param = json.loads(param)
+            else:
+                parsed_param = param
         else:
-            out = func(*args.params)
+            if args.as_json:
+                parsed_param = [json.loads(param) for param in args.params]
+            else:
+                parsed_param = args.params
+        if type(parsed_param) is list:
+            out = func(*parsed_param)
+        else:
+            out = func(parsed_param)
         if args.outfile is not None:
             file = open(args.outfile, 'w')
-            file.write(out)
+            file.write(json.dumps(out) if args.as_json else out)
             file.close()
         else:
-            print(out)
+            print(json.dumps(out) if args.as_json else out)
 """)
     f.close()
