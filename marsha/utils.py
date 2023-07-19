@@ -47,13 +47,21 @@ if __name__ == '__main__':
     func_names = [r.__name__ for r in lookup.values() if callable(r)]
     default_func = func_names[-1]
     parser = argparse.ArgumentParser(description='Marsha-generated CLI options')
-    parser.add_argument('-c', '--func', action='store', required=False, choices=func_names, default=default_func)
-    parser.add_argument('-j', '--as-json', action='store_true', required=False)
-    parser.add_argument('-i', '--stdin', action='store_true', required=False)
-    parser.add_argument('-f', '--infile', action='store', required=False, default=None)
-    parser.add_argument('-o', '--outfile', action='store', required=False, default=None)
-    parser.add_argument('-s', '--serve', action='store', required=False, type=int)
-    parser.add_argument('params', nargs='*')
+    parser.add_argument('-c', '--func', action='store', required=False, choices=func_names, default=default_func,
+            help='Specifies the function to call. Defaults to the last defined function')
+    parser.add_argument('-j', '--force-json', action='store_true', required=False,
+            help='Forces arguments, files, or stdin to be parsed as JSON')
+    parser.add_argument('-t', '--force-text', action='store_true', required=False,
+            help='Forces arguments, files, or stdin to be parsed as raw text')
+    parser.add_argument('-i', '--stdin', action='store_true', required=False,
+            help='Ignores CLI parameters in favor of stdin (as a single parameter)')
+    parser.add_argument('-f', '--infile', action='store', required=False, default=None,
+            help='Ignores CLI parameters in favor of reading the specified file (as a single parameter)')
+    parser.add_argument('-o', '--outfile', action='store', required=False, default=None,
+            help='Saves the result to a file instead of stdout')
+    parser.add_argument('-s', '--serve', action='store', required=False, type=int,
+            help='Spins up a simple REST web server on the specified port. When used all other options are ignored')
+    parser.add_argument('params', nargs='*', help='Arguments to be provided to the function being run. Optimistically converted to simple python types by default, and left as strings if not possible')
     args = parser.parse_args()
     func = lookup[args.func]
     if args.serve is not None:
@@ -108,35 +116,63 @@ if __name__ == '__main__':
     else:
         out = None
         parsed_param = None
+        as_json = False
         if args.stdin:
             import sys
             param = sys.stdin.read()
-            if args.as_json:
+            if args.force_json:
                 parsed_param = json.loads(param)
-            else:
+                as_json = True
+            elif args.force_text:
                 parsed_param = param
+                as_json = False
+            else:
+                try:
+                    parsed_param = json.loads(param)
+                    as_json = True
+                except:
+                    parsed_param = param
+                    as_json = False
         elif args.infile is not None:
             file = open(args.infile, 'r')
             param = file.read()
             file.close()
-            if args.as_json:
+            if args.force_json:
                 parsed_param = json.loads(param)
-            else:
+                as_json = True
+            elif args.force_text:
                 parsed_param = param
-        else:
-            if args.as_json:
-                parsed_param = [json.loads(param) for param in args.params]
+                as_json = False
             else:
+                try:
+                    parsed_param = json.loads(param)
+                    as_json = True
+                except:
+                    parsed_param = param
+                    as_json = False
+        else:
+            if args.force_json:
+                parsed_param = [json.loads(param) for param in args.params]
+                as_json = True
+            elif args.force_text:
                 parsed_param = args.params
+                as_json = False
+            else:
+                try:
+                    parsed_param = [json.loads(param) for param in args.params]
+                    as_json = True
+                except:
+                    parsed_param = args.params
+                    as_json = False
         if type(parsed_param) is list:
             out = func(*parsed_param)
         else:
             out = func(parsed_param)
         if args.outfile is not None:
             file = open(args.outfile, 'w')
-            file.write(json.dumps(out) if args.as_json else out)
+            file.write(json.dumps(out) if as_json else out)
             file.close()
         else:
-            print(json.dumps(out) if args.as_json else out)
+            print(json.dumps(out) if as_json else out)
 """)
     f.close()
