@@ -1,0 +1,20 @@
+# func roman_to_int(string of roman numerals): integer
+
+Parse a string as roman numerals and determine the integer it represents.
+
+In Roman Numerals, I = 1, V = 5, X = 10, L = 50, C = 100, D = 500, and M = 1000.
+
+Sequences of the same digit next to each other become additions. Eg II = 2, III = 3, XX = 20, etc.
+
+If a lower value symbol comes before a higher value symbol, it is subtracted from the higher value symbol. Eg IV = 4, IX = 9, etc.
+
+If a lower value symbol comes after a higher value symbol, it is added to the higher value symbol. Eg, VII = 7, DC = 600, etc.
+
+There are multiple representations of the same numeric value possible, eg IIII = IV, VII = IIIX. Most prefer to use the shortest representation, though.
+
+* roman_to_int('III') = 3
+* roman_to_int('IV') = 4
+* roman_to_int('IIII') = 4
+* roman_to_int('MMXXIII') = 2023
+* roman_to_int('MDCXXXII') = 1632
+* roman_to_int('twenty twenty three') = NaN
