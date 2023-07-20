@@ -11,7 +11,7 @@ To calculate MMR multiply the total number of paying customers by the average re
 * get_mrr('', 'not a date') = throws an error
 * get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023') = 0.03
 * get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2021') = 0.35
-* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023') = 0.1
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jun 2023') = 0.1
 
 
 # func get_mrr_growth_rate(stripe API key, start period, end period): MRR Growth rate (%)
