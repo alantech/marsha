@@ -1,16 +1,30 @@
-# func get_revenue_growth(string of stripe API key, int of period in months): float
+# func get_mrr(stripe API key, period): MRR
 
-Connect to stripe.
+Use stripe API.
 
-Define period based on requested period.
+Calculate net monthly recurring revenue (MRR) for the period.
 
-Retrieve necessary data from stripe.
+To calculate MMR multiply the total number of paying customers by the average revenue per user per month.
 
-Calculate the revenue growth for the requested period.
+* get_mrr() = throws an error
+* get_mrr('') = throws an error
+* get_mrr('', 'not a date') = throws an error
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023') = 0.03
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2021') = 0.35
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023') = 0.1
 
-* get_revenue() = throws an error
-* get_revenue('') = throws an error
-* get_revenue('', 0) = throws an error
-* get_revenue('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 3) = 0.03
-* get_revenue('pk_test_Et4ZBItXSZT1EzmOd8yCxonL', 6) = 0.1
-* get_revenue('pk_test_Ft4ZBItXSZT1EzmOd8yCxonL', 12) = 0.35
+
+# func get_mrr_growth_rate(stripe API key, start period, end period): MRR Growth rate (%)
+
+Use stripe API.
+
+Calculate monthly recurring revenue (MRR) for each period using `get_mrr`.
+
+Calculate MMR growth rate using the formula `MRR Growth Rate (%) = MRR Month B – MRR Month A / MRR Month A × 100`
+
+* get_revenue_growth() = throws an error
+* get_revenue_growth('') = throws an error
+* get_revenue_growth('', 'not a date', 'not a date') = throws an error
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023', 'Mar 2023') = '3%'
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2021', 'Jan 2022') = '35%'
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023', 'Jun 2023') = '10%'
