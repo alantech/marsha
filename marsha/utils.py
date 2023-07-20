@@ -158,12 +158,15 @@ if __name__ == '__main__':
                 parsed_param = args.params
                 as_json = False
             else:
-                try:
-                    parsed_param = [json.loads(param) for param in args.params]
-                    as_json = True
-                except:
-                    parsed_param = args.params
-                    as_json = False
+                parsed_param = []
+                as_json = False
+                for param in args.params:
+                    try:
+                        parsed = json.loads(param)
+                        parsed_param.append(parsed)
+                        as_json = True
+                    except:
+                        parsed_param.append(param)
         if type(parsed_param) is list:
             out = func(*parsed_param)
         else:

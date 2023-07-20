@@ -1,0 +1,11 @@
+# func top_n_words(filename, integer n): list of n tuples of words and counts, ordered from greatest to least
+
+This function should read the text file from the specified filename, and then determine the top 'n' most common words, making sure to convert all words to lower case and ignoring all numbers, punctuation, etc.
+
+It then generates a list of tuples. The first element of each tuple is the word as a string, the second element is the integer count of frequency of said word. This list should be ordered from greatest to least count.
+
+* top_n_words('/etc/hosts', 1) == [('localhost', 2)]
+* top_n_words('./top_n_words.mrsh', 2) == [('of', 6), ('to', 5)]
+* top_n_words('./top_n_words.mrsh, 0) == []
+* top_n_words('./top_n_words.mrsh, -1) raises an exception
+* top_n_words('./nonexistent/file', 5) raises an exception
