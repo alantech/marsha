@@ -75,6 +75,7 @@ if __name__ == '__main__':
                     self.end_headers()
                     self.wfile.write(bytes('{"error": "' + self.path + ' does not exist"}', 'utf-8'))
                     return
+                func = lookup[func_name]
                 content_len = int(self.headers.get('Content-Length'))
                 post_body = self.rfile.read(content_len)
                 post_payload = None
