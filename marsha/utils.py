@@ -76,7 +76,7 @@ if __name__ == '__main__':
                     self.wfile.write(bytes('{"error": "' + self.path + ' does not exist"}', 'utf-8'))
                     return
                 func = lookup[func_name]
-                content_len = int(self.headers.get('Content-Length'))
+                content_len = int(self.headers.get('Content-Length', 0))
                 post_body = self.rfile.read(content_len)
                 post_payload = None
                 is_json = self.headers.get_content_type() == 'application/json'
@@ -92,11 +92,23 @@ if __name__ == '__main__':
                 else:
                     post_payload = post_body.decode('utf-8')
                 out = None
-                if type(post_payload) is list:
-                    out = func(*post_payload)
-                else:
-                    out = func(post_payload)
-                self.send_response(200)
+                try:
+                    if type(post_payload) is list:
+                        out = func(*post_payload)
+                    else:
+                        out = func(post_payload)
+                    self.send_response(200)
+                except Exception as e:
+                    self.send_response(400)
+                    if is_json:
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(bytes('{"error": "' + str(e) + '"}', 'utf-8'))
+                    else:
+                        self.send_header('Content-Type', 'text/plain')
+                        self.end_headers()
+                        self.wfile.write(bytes(str(e), 'utf-8'))
+                    return
                 if is_json:
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
@@ -159,12 +171,15 @@ if __name__ == '__main__':
                 parsed_param = args.params
                 as_json = False
             else:
-                try:
-                    parsed_param = [json.loads(param) for param in args.params]
-                    as_json = True
-                except:
-                    parsed_param = args.params
-                    as_json = False
+                parsed_param = []
+                as_json = False
+                for param in args.params:
+                    try:
+                        parsed = json.loads(param)
+                        parsed_param.append(parsed)
+                        as_json = True
+                    except:
+                        parsed_param.append(param)
         if type(parsed_param) is list:
             out = func(*parsed_param)
         else:

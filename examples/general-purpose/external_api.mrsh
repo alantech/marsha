@@ -1,0 +1,30 @@
+# func get_mrr(stripe API key, period): MRR
+
+Use stripe API.
+
+Calculate net monthly recurring revenue (MRR) for the period.
+
+To calculate MMR multiply the total number of paying customers by the average revenue per user per month.
+
+* get_mrr() = throws an error
+* get_mrr('') = throws an error
+* get_mrr('', 'not a date') = throws an error
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023') = 0.03
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2021') = 0.35
+* get_mrr('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jun 2023') = 0.1
+
+
+# func get_mrr_growth_rate(stripe API key, start period, end period): MRR Growth rate (%)
+
+Use stripe API.
+
+Calculate monthly recurring revenue (MRR) for each period using `get_mrr`.
+
+Calculate MMR growth rate using the formula `MRR Growth Rate (%) = MRR Month B – MRR Month A / MRR Month A × 100`
+
+* get_revenue_growth() = throws an error
+* get_revenue_growth('') = throws an error
+* get_revenue_growth('', 'not a date', 'not a date') = throws an error
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023', 'Mar 2023') = '3%'
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2021', 'Jan 2022') = '35%'
+* get_revenue_growth('pk_test_Dt4ZBItXSZT1EzmOd8yCxonL', 'Jan 2023', 'Jun 2023') = '10%'
