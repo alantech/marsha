@@ -1,0 +1,37 @@
+# type task
+name, status
+cooking, pending
+dishes, completed
+cleaning, pending
+
+# func save_task(task name): task dict
+
+This function receive a task name and create a `task` object with the `pending` status. It saves the value in a global dictionary.
+
+# func update_task(task name): task dict
+
+This function receive a task name and set the status `completed` for the `task`with the received name. It updates the value in a global dictionary.
+
+# func get(dictionary with name property): task dict
+
+This function calls the `get_tasks` function and take the task with the requested task name.
+
+* get({'name': 'cooking'}) = task('cooking', 'pending')
+* get({'name': 'dishes'}) = task('dishes', 'completed')
+* get() = throws an error
+
+# func add(dictionary with name property): task dict
+
+This function calls the `save_task` function and take the task with the requested task name.
+
+* add({'name': 'cooking'}) = task('cooking', 'pending')
+* add({'name': 'dishes'}) = task('dishes', 'pending')
+* add() = throws an error
+
+# func complete(dictionary with name property): task dict
+
+This function calls the `update_task` function and take the task with the requested task name.
+
+* add({'name': 'cooking'}) = task('cooking', 'completed')
+* add({'name': 'dishes'}) = task('dishes', 'completed')
+* add() = throws an error
