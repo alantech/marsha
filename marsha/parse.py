@@ -219,8 +219,8 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[str]]:
     res = ([], [], [])
     sections = file.split('#')
-    func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.+\):'
-    void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.+\)'
+    func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
+    void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
     type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
     for section in sections:
         if re.match(void_func_regex, section) and not re.match(func_regex, section):
