@@ -3,7 +3,7 @@
 [![Discord Follow](https://dcbadge.vercel.app/api/server/p5BTaWAdjm?style=flat)](https://discord.gg/p5BTaWAdjm)
 [![GitHub Repo Stars](https://img.shields.io/github/stars/alantech/marsha?style=social)](https://github.com/alantech/marsha)
 
-<center><b>Describe Logic ⴲ Provide Examples ⴲ Run Reliably</b></center>
+<div style="text-align: center"><b>Describe Logic ⴲ Provide Examples ⴲ Run Reliably</b></div>
 
 ```md
 # func duckduckgo(search text): top three link names and URLs separated by newline
