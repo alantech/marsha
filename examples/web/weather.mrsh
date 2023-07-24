@@ -1,0 +1,17 @@
+# func weather(string of location to perform the weather report): newline delimited string report of current temperature, precipitation, and wind
+
+This function uses the Norwegian Meteorological Institute API (https://api.met.no) to get relevant weather information for the specified location and returns a newline-delimited string of the weather, including temperature, precipitation, and wind. The units are whichever is customary for the location in question.
+
+api.met.no requires a user agent be specified on queries or it will reject them.
+
+This API only accepts latitude (lat) and longitude (lon) parameters, so the public.opendatasoft.com API must be used in conjunction. For example, a query for "Austin, TX" looks like: https://public.opendatasoft.com/api/records/1.0/search/?dataset=geonames-all-cities-with-a-population-500&q=Austin%2C%20TX&facet=timezone&facet=country
+
+WHen done, the output should look like the following:
+
+Weather Report for Seattle, WA
+
+63F Wind SSE 2MPH Precipitation 0"
+
+* weather('San Jose, CA') = 'Weather Report for San Jose, CA\n\n77F Wind N 1MPH Precipitation 0"'
+* weather('Beograd, Srbija') = 'Weather Report for Beograd, Srbija\n\n20C Wind SE 3km/h Precipitation 0ml'
+* weather('teh MOON') raises an exception
