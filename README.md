@@ -121,7 +121,7 @@ options:
 * `-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
 * `-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
 * `-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
-* `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marhsa itself.
+* `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
 
 ## Using compiled Marsha code
