@@ -117,12 +117,12 @@ options:
   -s, --stats           Save stats and write them to a file
 ```
 
-`-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
-`-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
-`-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
-`-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
-`-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marhsa itself.
-`--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
+* `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
+* `-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
+* `-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
+* `-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
+* `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marhsa itself.
+* `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
 
 ## Using compiled Marsha code
 
@@ -152,11 +152,11 @@ options:
                         Spins up a simple REST web server on the specified port. When used all other options are ignored
 ```
 
-`-c` Lets you choose which function within the generated code you wish to invoke. By default it selects the *last* function defined, as that is usually a "main-like" function.
-`params` are all non-option arguments provided, in order, to the function you are invoking.
-`-j` and `-t` let you choose if the param(s) provided will be parsed as JSON or kept as plain text. By default it will opportunistically parse the arguments but if it fails will keep it as text
-`-i`, `-f`, and `-o` let you choose how input and output is managed. By default inputs are the `params` arguments and the output is to `stdout`, but you can use `-i` to then ignore all `params` and treat `stdin` as the singular input param for your function. Similarly `-f` will do the same, but for the file you specify, and `-o` will write the result to a file you specify instead of to `stdout`.
-`-s` Is a flag to instead run a simple REST server. Using this flag causes it to ignore all other flags. The various function names become `/func_name` endpoints that you can POST to and get a response body back. If you set the `Content-Type` header to `application/json` the input and output will be JSON, if not it will be plain text. If your function takes mutliple arguments, it *must* be called in JSON mode with the arguments each being an element of a top-level array.
+* `-c` Lets you choose which function within the generated code you wish to invoke. By default it selects the *last* function defined, as that is usually a "main-like" function.
+* `params` are all non-option arguments provided, in order, to the function you are invoking.
+* `-j` and `-t` let you choose if the param(s) provided will be parsed as JSON or kept as plain text. By default it will opportunistically parse the arguments but if it fails will keep it as text
+* `-i`, `-f`, and `-o` let you choose how input and output is managed. By default inputs are the `params` arguments and the output is to `stdout`, but you can use `-i` to then ignore all `params` and treat `stdin` as the singular input param for your function. Similarly `-f` will do the same, but for the file you specify, and `-o` will write the result to a file you specify instead of to `stdout`.
+* `-s` Is a flag to instead run a simple REST server. Using this flag causes it to ignore all other flags. The various function names become `/func_name` endpoints that you can POST to and get a response body back. If you set the `Content-Type` header to `application/json` the input and output will be JSON, if not it will be plain text. If your function takes mutliple arguments, it *must* be called in JSON mode with the arguments each being an element of a top-level array.
 
 ## Roadmap
 
