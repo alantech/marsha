@@ -94,7 +94,69 @@ The Marsha syntax is meant to be:
 
 ## Compiler
 
-Marsha is compiled by an LLM into tested software that meets the requirements described, but implication details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/test/). In general, the more detailed the description and the more examples are provided the more likely the output will work.
+Marsha is compiled by an LLM into tested software that meets the requirements described, but implication details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/test/). In general, the more detailed the description and the more examples are provided the more likely the output will work. There are a few flags on how to use Marsha
+
+```sh
+$ marsha --help
+usage: marsha [-h] [-d] [-q] [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper] [-s] source
+
+Marsha AI Compiler
+
+positional arguments:
+  source
+
+options:
+  -h, --help            show this help message and exit
+  -d, --debug           Turn on debug logging
+  -q, --quick-and-dirty
+                        Code generation with no correction stages run
+  -a ATTEMPTS, --attempts ATTEMPTS
+  -n N_PARALLEL_EXECUTIONS, --n-parallel-executions N_PARALLEL_EXECUTIONS
+  --exclude-main-helper
+                        Skips addition of helper code for running as a script
+  -s, --stats           Save stats and write them to a file
+```
+
+`-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
+`-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
+`-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
+`-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
+`-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marhsa itself.
+`--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
+
+## Using compiled Marsha code
+
+By default, Marsha appends logic to the generated Python code to make usage simpler, allowing you to invoke it from the CLI and potentially start a REST server.
+
+```sh
+$ python -m duckduckgo --help
+usage: duckduckgo.py [-h] [-c {BeautifulSoup,duckduckgo}] [-j] [-t] [-i] [-f INFILE] [-o OUTFILE] [-s SERVE] [params ...]
+
+Marsha-generated CLI options
+
+positional arguments:
+  params                Arguments to be provided to the function being run. Optimistically converted to simple python types by default, and left as strings if not possible
+
+options:
+  -h, --help            show this help message and exit
+  -c {BeautifulSoup,duckduckgo}, --func {BeautifulSoup,duckduckgo}
+                        Specifies the function to call. Defaults to the last defined function
+  -j, --force-json      Forces arguments, files, or stdin to be parsed as JSON
+  -t, --force-text      Forces arguments, files, or stdin to be parsed as raw text
+  -i, --stdin           Ignores CLI parameters in favor of stdin (as a single parameter)
+  -f INFILE, --infile INFILE
+                        Ignores CLI parameters in favor of reading the specified file (as a single parameter)
+  -o OUTFILE, --outfile OUTFILE
+                        Saves the result to a file instead of stdout
+  -s SERVE, --serve SERVE
+                        Spins up a simple REST web server on the specified port. When used all other options are ignored
+```
+
+`-c` Lets you choose which function within the generated code you wish to invoke. By default it selects the *last* function defined, as that is usually a "main-like" function.
+`params` are all non-option arguments provided, in order, to the function you are invoking.
+`-j` and `-t` let you choose if the param(s) provided will be parsed as JSON or kept as plain text. By default it will opportunistically parse the arguments but if it fails will keep it as text
+`-i`, `-f`, and `-o` let you choose how input and output is managed. By default inputs are the `params` arguments and the output is to `stdout`, but you can use `-i` to then ignore all `params` and treat `stdin` as the singular input param for your function. Similarly `-f` will do the same, but for the file you specify, and `-o` will write the result to a file you specify instead of to `stdout`.
+`-s` Is a flag to instead run a simple REST server. Using this flag causes it to ignore all other flags. The various function names become `/func_name` endpoints that you can POST to and get a response body back. If you set the `Content-Type` header to `application/json` the input and output will be JSON, if not it will be plain text. If your function takes mutliple arguments, it *must* be called in JSON mode with the arguments each being an element of a top-level array.
 
 ## Roadmap
 
