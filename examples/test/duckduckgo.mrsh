@@ -1,0 +1,10 @@
+# func duckduckgo(search text): top three link names and URLs separated by newline
+
+This function executes a search using duckduckgo.com and returns the top three links (excluding ads) in the following format:
+
+First link name: https://first.link/path
+Second link name: https://www.secondlink.com/path
+Third link name: https://thirdlink.org/path
+
+* duckduckgo('search engine') = '21 Great Search Engines You Can Use Instead Of Google: https://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=&cad=rja&uact=8&ved=2ahUKEwivx6SS1qeAAxU5lWoFHbuqA4sQFnoECBEQAQ&url=https%3A%2F%2Fwww.searchenginejournal.com%2Falternative-search-engines%2F271409%2F&usg=AOvVaw1MhHGUxrHf8AkmiU64AotH&opi=89978449\nThe Top 11 Search Engines, Ranked by Popularity: https://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=&cad=rja&uact=8&ved=2ahUKEwivx6SS1qeAAxU5lWoFHbuqA4sQFnoECA8QAQ&url=https%3A%2F%2Fblog.hubspot.com%2Fmarketing%2Ftop-search-engines&usg=AOvVaw30ykZ9Ftz51L4pQTaMsmpQ&opi=89978449\nSearch engine - Wikipedia: https://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=&cad=rja&uact=8&ved=2ahUKEwivx6SS1qeAAxU5lWoFHbuqA4sQFnoECCsQAQ&url=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSearch_engine&usg=AOvVaw2JG-HuD9odcoxnHHkUd3sl&opi=89978449'
+* duckduckgo(3) raises an exception
