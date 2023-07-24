@@ -151,8 +151,16 @@ Marsha is compiled by an LLM into tested software that meets the requirements de
 ## Roadmap
 
 - Improve average accuracy for our test bed above 90%
-- Support for endpoints, visualizations, and data storage
-- Syntax highlighting
+- Support for visualizations and data storage (geek mode: handle side-effect logic better in general)
+- Syntax highlighting (vim, vscode, etc)
 - Support for different types of LLM
-- Being able to bootstrap the Marsha compiler with a Marsha program
+- Bootstrap the Marsha compiler with a Marsha program
 - More target languages other than Python
+- A module system
+- Edits to Marsha mutating existing Python code instead of regenerating
+- "Decompiler" from source code into Marsha syntax
+- "Debugger" meta mode to take existing Marsha definition and an example of an unexpected failure and recommend what to update with the Marsha definition.
+- Optmization "levels" (spend more time on more iterations with the LLM improving performance, security, etc)
+- Marsha GUI mode: visual editor baked into the compiler (eventually with the decompiler/debugger/etc features), and able to generate a GUI wrapper for generated code, enabling end-to-end non-terminal usage
+- Better support for a mixed environment (Marsha functions can be used by Python, but how to get Marsha to use hand-written Python functions)
+- Better "web scraping" behavior (LLM likes to assume the internet still looks like it did in November 2021, but HTML structure has often changed for the largest websites; automatically correcting that assumption would be nice)
