@@ -1,0 +1,9 @@
+# func cnn(string of section to take headlines from): list of headlines
+
+This function scrapes the cnn.com website for headlines. The section it takes the headlines from is passed to it, with 'home' referring to the homepage at cnn.com and should be special cased, while 'us' refers to cnn.com/us, 'politics' refers to cnn.com/politics, and so on for every top-level category CNN has.
+
+Headlines on cnn.com have the class 'container__headline', no other class name correctly identifies them as the website has changed.
+
+* cnn('home') = ["Florida's new standards for teaching Black history spark outrage", "His books sold over 300 million copies and were translated into 63 languages. Now, a museum is acknowledging his racism", "Player quits match in tears as tennis world slams opponent’s ‘absolutely disgusting’ actions"]
+* cnn('us') = ['18-year-old Miami woman arrested after allegedly trying to hire a hitman to go after her 3-year-old son', 'Investigation into Gilgo Beach serial killings suspect expands to Nevada and South Carolina', 'Rescue crews continue search for 2 children swept away by Pennsylvania floodwater that killed their mother']
+* cnn('world') = ["Police raids follow shocking video of sexual assault in India’s Manipur state amid ethnic violence", 'Ukrainian air defenses in Odesa outgunned as Russia targets global grain supply', 'Anger boils over as Kenya’s cost of living protests shake the nation']
