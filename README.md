@@ -49,7 +49,7 @@ The declaration is a Markdown heading section prefixed with `func`, then followe
 # func get_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
 ```
 
-The next section is the description of the function. Here you explain what the function should do. Being more explicit here will reduce variability in the generated output and improve reliability in behavior, but it's up to you just how explicit you will be and how much you leave to the LLM to figure out. This is similar to declarative languages like SQL and HTML where there are defaults for things you do not specify. Eg,
+The next section is the description of the function. Here you explain what the function should do. Being more explicit here will reduce variability in the generated output and improve reliability in behavior, but it's up to you just how explicit you will be and how much you leave to the LLM to figure out. This is similar to declarative languages like SQL and HTML where there are defaults for things you do not specify, like the sort order of `select` statements or the default styling of a `<div>`. Eg,
 
 ```md
 This function receives a list of EmployeesByDepartment and a list of DepartmentSkills. The function should be able to create a response of EmployeeSkills merging the 2 list by department. Use the pandas library.
