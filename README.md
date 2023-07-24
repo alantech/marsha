@@ -43,7 +43,7 @@ It is also possible for Marsha to infer the data type from CSV file
 
 Functions are the bread and butter of Marsha and can easily define transformations between different data types. There are three sections to a Marsha function: the declaration, the description, and the examples.
 
-The declaration is a Markdown section prefixed with `func`, then followed by a name, parenthesis containing the input type(s), and finally a colon followed by the output type. The name must be a single word, but the types don't need to be classic software types, or even the explicit data types defined above. They can themselves be simple descriptions of what the type is meant to be. Eg,
+The declaration is a Markdown heading section prefixed with `func`, then followed by a name, parenthesis containing the input type(s), and finally a colon followed by the output type. The name must be a single word, but the types don't need to be classic software types, or even the explicit data types defined above. They can themselves be simple descriptions of what the type is meant to be. Eg,
 
 ```md
 # func get_employee_skills(list of EmployeesByDepartment, list of DepartmentSkills): list of EmployeeSkills
