@@ -1,0 +1,8 @@
+<!--- 
+  The code generated could be used as follows with `psql`:
+  python -m query-builder | xargs psql postgres://sqlpaluser:sqlpass@localhost:5432/sqlpal -c
+--->
+
+# func get_most_populated_cities(): postgres sql query generated
+
+This function generates a postgresql query to retrieve all columns for the TOP 5 cities from the 'city' table with the highest 'population'
