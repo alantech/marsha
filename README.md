@@ -94,7 +94,7 @@ The Marsha syntax is meant to be:
 
 ## Compiler
 
-Marsha is compiled by an LLM into tested software that meets the requirements described, but implication details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/). In general, the more detailed the description and the more examples are provided the more likely the output will work. There are a few flags on how to use Marsha
+Marsha is compiled by an LLM into tested software that meets the requirements described, but implementation details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/). In general, the more detailed the description and the more examples are provided the more likely the output will work. There are also a few flags on how to use Marsha:
 
 ```sh
 $ marsha --help
