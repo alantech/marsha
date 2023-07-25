@@ -1,0 +1,25 @@
+<!-- This function could be use as a boilerplate to start extracting info from a document -->
+<!-- Make sure to have installed tesseract and probably poppler before executing the generated .py -->
+
+# func extract_info(pdf file path): extracted info as dict
+
+This function will receive a pdf file path and will use tesseract OCR to extract structured data from the file.
+
+The pdf document has a tabular format, meaning the labels we will look for are headers and the content is in the same column in the next row or rows.
+
+We want to extract the following content from a table format where columns can be distinguished by spaces:
+
+`invoice_no` looking for the "INVOICE NO." header. The information will be in the next row. 
+`customer_id` looking for the "CUSTOMER ID" header. The information will be in the next row.
+
+We want to extract the following content from a table format where columns can be distinguished by space between headers:
+
+`bill_to` looking for the "BILL TO" header. The information will be in the next 5 rows.
+`ship_to` looking for the "SHIP TO" header. The information will be in the next 5 rows.
+
+We want to extract the following label:
+
+`total` looking for "TOTAL" (all uppercase). The information will be to the right, not in the next row.
+
+
+* extract_info('./pathA') = { 'bill_to': '', 'ship_to': '', 'invoice_no': '', 'customer_id': '123', 'total': '345' }
