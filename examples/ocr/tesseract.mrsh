@@ -1,9 +1,9 @@
 <!-- This function could be use as a boilerplate to start extracting info from a document -->
-<!-- Make sure to have installed tesseract and probably poppler brefore executing the generated .py -->
+<!-- Make sure to have installed tesseract and probably poppler before executing the generated .py -->
 
 # func extract_info(pdf file path): extracted info as dict
 
-This function will receive a pdf file path, will use tesseract OCR to extract structured data from the file.
+This function will receive a pdf file path and will use tesseract OCR to extract structured data from the file.
 
 The pdf document has a tabular format, meaning the labels we will look for are headers and the content is in the same column in the next row or rows.
 
