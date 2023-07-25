@@ -4,16 +4,14 @@ import shutil
 
 
 def read_file(filename: str, mode: str = 'r'):
-    f = open(filename, mode)
-    content = f.read()
-    f.close()
+    with open(filename, mode) as f:
+        content = f.read()
     return content
 
 
 def write_file(filename: str, content: str, mode: str = 'w'):
-    f = open(filename, mode)
-    f.write(content)
-    f.close()
+    with open(filename, mode) as f:
+        f.write(content)
 
 
 def autoformat_files(files: list[str]):
@@ -37,8 +35,8 @@ def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
 
 def add_helper(filename: str):
-    f = open(filename, 'a')
-    f.write("""
+    with open(filename, 'a') as f:
+        f.write("""
 if __name__ == '__main__':
     import argparse
     import inspect
@@ -191,4 +189,3 @@ if __name__ == '__main__':
         else:
             print(json.dumps(out) if as_json else out)
 """)
-    f.close()
