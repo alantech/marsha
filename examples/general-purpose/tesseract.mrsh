@@ -1,8 +1,0 @@
-# func extract_info(pdf file path): extracted info as dict
-
-This function will receive a pdf file path, will use tesseract OCR to extract structured data from the file.
-
-The data that need to be extracted will be `bill_from` looking "Bill from:", `bill_to` looking "Bill to:", `document` looking "DOCUMENT", `issue_date` looking "ISSUE DATE" and `total_paid` looking "TOTAL PAID"
-
-* extract_info('./pathA') = { 'bill_from': '', bill_to: '', 'document': '', 'issue_date': '', 'total_paid': 123 }
-
