@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import os
 import openai
+import tempfile
 import time
 import traceback
 
@@ -153,11 +154,15 @@ async def main():
             break
         # Writing generated code to temporal files in preparation for next stages
         file_groups = list()
+        tmpdirs = []
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
+            tmpdir = tempfile.TemporaryDirectory(
+                suffix=f'{marsha_filename}_{idx}')
+            tmpdirs.append(tmpdir)
             file_groups = file_groups + \
                 [write_files_from_markdown(
-                    md, subdir=f'{marsha_filename}_{idx}')]
+                    md, subdir=tmpdir.name)]
         if args.debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
@@ -166,33 +171,26 @@ async def main():
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
                 review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, stats, debug), name=file_group[0]))
-        task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
-            for name in task_names:
-                if name != done_task_name:
-                    delete_dir_and_content(name)
-                else:
-                    print('Writing generated code to files...')
-                    filename = name
-                    copy_file(filename, f'{marsha_filename}.py')
-                    if not args.exclude_main_helper:
-                        add_helper(f'{marsha_filename}.py')
-                    test_filename = filename.replace('.py', '_test.py')
-                    copy_file(test_filename, f'{marsha_filename}_test.py')
-                    directory = os.path.dirname(filename)
-                    requirements_filename = os.path.join(
-                        directory, 'requirements.txt')
-                    if os.path.exists(requirements_filename):
-                        copy_file(requirements_filename, 'requirements.txt')
-                    delete_dir_and_content(filename)
+            print('Writing generated code to files...')
+            filename = done_task_name
+            copy_file(filename, f'{marsha_filename}.py')
+            if not args.exclude_main_helper:
+                add_helper(f'{marsha_filename}.py')
+            test_filename = filename.replace('.py', '_test.py')
+            copy_file(test_filename, f'{marsha_filename}_test.py')
+            directory = os.path.dirname(filename)
+            requirements_filename = os.path.join(
+                directory, 'requirements.txt')
+            if os.path.exists(requirements_filename):
+                copy_file(requirements_filename, 'requirements.txt')
+            cleanup_tmp_dirs(tmpdirs)
         except Exception as e:
             print('Failed to generate working code.')
             print(e)
-            if not args.debug:
-                for name in task_names:
-                    delete_dir_and_content(name)
-            else:
+            cleanup_tmp_dirs(tmpdirs)
+            if args.debug:
                 traceback.print_tb(e.__traceback__)
             print('Retrying...')
             continue
@@ -362,3 +360,11 @@ Total cost: {stats['total_cost']}
 
 '''
     write_file('stats.md', stats_md)
+
+
+def cleanup_tmp_dirs(tmpdirs: list):
+    for tmpdir in tmpdirs:
+        try:
+            tmpdir.cleanup()
+        except:
+            pass
