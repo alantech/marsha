@@ -78,7 +78,7 @@ jobs:
           python -m venv venv
           source venv/Scripts/activate
           python -m pip install --upgrade .
-          python -m marsha .\examples\general-purpose\sort_modules.mrsh
+          python -m marsha ./examples/general-purpose/sort_modules.mrsh
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
