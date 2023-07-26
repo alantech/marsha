@@ -20,8 +20,41 @@ on:
         default: 3
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
+  # run:
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     results: ${{ steps.run.outputs.results }}
+  #   steps:
+  #     - uses: actions/checkout@v3
+  #       with:
+  #         ref: ${{ github.event.client_payload.ref }}
+  #     - name: Set up Python 3.10
+  #       uses: actions/setup-python@v4
+  #       with:
+  #         python-version: "3.10"
+  #     - name: Display Python version
+  #       run: python -c "import sys; print(sys.version)"
+  #     - name: Output Inputs
+  #       run: echo "${{ toJSON(github.event.inputs) }}"
+  #     - name: Output Payload
+  #       run: echo "${{ toJSON(github.event.client_payload) }}"
+  #     - name: Run time script
+  #       id: run
+  #       run: |
+  #         cd marsha
+  #         if ${{ github.event.client_payload.test != '' }}; then
+  #           make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+  #         fi
+  #         if ${{ github.event.inputs.test != '' }}; then
+  #           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+  #         fi
+  #         results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
+  #         echo "results=$results" >> $GITHUB_OUTPUT
+  #       env:
+  #         OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+
+  run-windows:
+    runs-on: windows-latest
     outputs:
       results: ${{ steps.run.outputs.results }}
     steps:
@@ -52,6 +85,7 @@ jobs:
           echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
+
 
   notify:
     name: Discord Notification

@@ -25,7 +25,7 @@ exitcodes = []
 times = []
 calls = []
 cost = []
-total_runs = 30
+total_runs = 1
 for i in range(total_runs):
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
