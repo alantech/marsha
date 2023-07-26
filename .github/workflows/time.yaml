@@ -73,6 +73,7 @@ jobs:
         run: echo "${{ toJSON(github.event.client_payload) }}"
       - name: Run time script
         id: run
+        shell: cmd
         run: |
           cd marsha
           if ${{ github.event.client_payload.test != '' }}; then
