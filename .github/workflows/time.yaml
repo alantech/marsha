@@ -9,7 +9,7 @@ on:
       test:
         description: "Marsha test to run"
         required: true
-        default: "../examples/general-purpose/sort_modules.mrsh"
+        default: "../examples/test/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
         required: false
