@@ -87,33 +87,33 @@ jobs:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
 
-  notify:
-    name: Discord Notification
-    runs-on: ubuntu-latest
-    needs: # make sure the notification is sent AFTER the jobs you want included have completed
-      - run
-    if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
+  # notify:
+  #   name: Discord Notification
+  #   runs-on: ubuntu-latest
+  #   needs: # make sure the notification is sent AFTER the jobs you want included have completed
+  #     - run
+  #   if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
 
-    steps:
-      - name: Extract branch name
-        shell: bash
-        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
-        id: extract_branch
-      - name: Notify from input
-        uses: nobrayner/discord-webhook@v1
-        if: ${{ github.event.inputs.test != '' }}
-        with:
-          github-token: ${{ secrets.github_token }}
-          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          title: '${{ github.workflow }}: {{STATUS}}'
-          description: '**Branch:** `${{ steps.extract_branch.outputs.branch }}` **Test file:** `${{ github.event.inputs.test }}` **Parallelism:** `${{ github.event.inputs.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
-          include-details: false
-      - name: Notify from payload
-        uses: nobrayner/discord-webhook@v1
-        if: ${{ github.event.client_payload.test != '' }}
-        with:
-          github-token: ${{ secrets.github_token }}
-          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          title: '${{ github.workflow }}: {{STATUS}}'
-          description: '**Branch:** `${{ github.event.client_payload.ref }}` **Test file:** `${{ github.event.client_payload.test }}` **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
-          include-details: false
+  #   steps:
+  #     - name: Extract branch name
+  #       shell: bash
+  #       run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+  #       id: extract_branch
+  #     - name: Notify from input
+  #       uses: nobrayner/discord-webhook@v1
+  #       if: ${{ github.event.inputs.test != '' }}
+  #       with:
+  #         github-token: ${{ secrets.github_token }}
+  #         discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+  #         title: '${{ github.workflow }}: {{STATUS}}'
+  #         description: '**Branch:** `${{ steps.extract_branch.outputs.branch }}` **Test file:** `${{ github.event.inputs.test }}` **Parallelism:** `${{ github.event.inputs.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
+  #         include-details: false
+  #     - name: Notify from payload
+  #       uses: nobrayner/discord-webhook@v1
+  #       if: ${{ github.event.client_payload.test != '' }}
+  #       with:
+  #         github-token: ${{ secrets.github_token }}
+  #         discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+  #         title: '${{ github.workflow }}: {{STATUS}}'
+  #         description: '**Branch:** `${{ github.event.client_payload.ref }}` **Test file:** `${{ github.event.client_payload.test }}` **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
+  #         include-details: false
