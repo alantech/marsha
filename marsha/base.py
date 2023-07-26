@@ -154,12 +154,12 @@ async def main():
             break
         # Writing generated code to temporary files in preparation for next stages
         file_groups = list()
-        tmpdirs = []
+        tmp_directories = []
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
             tmpdir = tempfile.TemporaryDirectory(
                 suffix=f'{marsha_filename}_{idx}')
-            tmpdirs.append(tmpdir)
+            tmp_directories.append(tmpdir)
             file_groups = file_groups + \
                 [write_files_from_markdown(
                     md, subdir=tmpdir.name)]
@@ -185,11 +185,11 @@ async def main():
                 directory, 'requirements.txt')
             if os.path.exists(requirements_filename):
                 copy_file(requirements_filename, 'requirements.txt')
-            cleanup_tmp_dirs(tmpdirs)
+            cleanup_tmp_dirs(tmp_directories)
         except Exception as e:
             print('Failed to generate working code.')
             print(e)
-            cleanup_tmp_dirs(tmpdirs)
+            cleanup_tmp_dirs(tmp_directories)
             if args.debug:
                 traceback.print_tb(e.__traceback__)
             print('Retrying...')
