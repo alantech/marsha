@@ -4,6 +4,19 @@ name: Run time script
 on:
   pull_request:
     branches: [main]
+    inputs:
+      test:
+        description: "Marsha test to run"
+        required: true
+        default: "../examples/test/sort_modules.mrsh"
+      attempts:
+        description: "Number of attempts to run the test"
+        required: false
+        default: 1
+      parallel_runs:
+        description: "Number of parallel runs"
+        required: false
+        default: 3
   repository_dispatch:
     types: [time]
   workflow_dispatch:
