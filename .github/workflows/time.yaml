@@ -9,7 +9,7 @@ on:
       test:
         description: "Marsha test to run"
         required: true
-        default: "../examples/test/sort_modules.mrsh"
+        default: "../examples/general-purpose/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
         required: false
@@ -77,10 +77,10 @@ jobs:
         run: |
           cd marsha
           if ${{ github.event.client_payload.test != '' }}; then
-            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time-win
           fi
           if ${{ github.event.inputs.test != '' }}; then
-            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time-win
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
