@@ -4,6 +4,9 @@ name: Run time script
 on:
   pull_request:
     branches: [main]
+  repository_dispatch:
+    types: [time]
+  workflow_call:
     inputs:
       test:
         description: "Marsha test to run"
@@ -17,8 +20,6 @@ on:
         description: "Number of parallel runs"
         required: false
         default: 3
-  repository_dispatch:
-    types: [time]
   workflow_dispatch:
     inputs:
       test:
