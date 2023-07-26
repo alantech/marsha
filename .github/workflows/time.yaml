@@ -2,6 +2,8 @@ name: Run time script
 
 # Trigger workflow manually
 on:
+  pull_request:
+    branches: [main]
   repository_dispatch:
     types: [time]
   workflow_dispatch:
