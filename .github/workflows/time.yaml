@@ -9,7 +9,7 @@ on:
       test:
         description: "Marsha test to run"
         required: true
-        default: "../examples/general-purpose/sort_modules.mrsh"
+        default: "../examples/test/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
         required: false
@@ -20,41 +20,10 @@ on:
         default: 3
 
 jobs:
-  # run:
-  #   runs-on: ubuntu-latest
-  #   outputs:
-  #     results: ${{ steps.run.outputs.results }}
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #       with:
-  #         ref: ${{ github.event.client_payload.ref }}
-  #     - name: Set up Python 3.10
-  #       uses: actions/setup-python@v4
-  #       with:
-  #         python-version: "3.10"
-  #     - name: Display Python version
-  #       run: python -c "import sys; print(sys.version)"
-  #     - name: Output Inputs
-  #       run: echo "${{ toJSON(github.event.inputs) }}"
-  #     - name: Output Payload
-  #       run: echo "${{ toJSON(github.event.client_payload) }}"
-  #     - name: Run time script
-  #       id: run
-  #       run: |
-  #         cd marsha
-  #         if ${{ github.event.client_payload.test != '' }}; then
-  #           make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
-  #         fi
-  #         if ${{ github.event.inputs.test != '' }}; then
-  #           make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
-  #         fi
-  #         results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
-  #         echo "results=$results" >> $GITHUB_OUTPUT
-  #       env:
-  #         OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
-
-  run-windows:
-    runs-on: windows-latest
+  run:
+    runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.run.outputs.results }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -67,46 +36,50 @@ jobs:
         run: python -c "import sys; print(sys.version)"
       - name: Output Inputs
         run: echo "${{ toJSON(github.event.inputs) }}"
+      - name: Output Payload
+        run: echo "${{ toJSON(github.event.client_payload) }}"
       - name: Run time script
         id: run
-        shell: bash
         run: |
-          python -m venv venv
-          source venv/Scripts/activate
-          python -m pip install --upgrade .
-          echo "python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}"
-          python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}
+          cd marsha
+          if ${{ github.event.client_payload.test != '' }}; then
+            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+          fi
+          if ${{ github.event.inputs.test != '' }}; then
+            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+          fi
+          results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
+          echo "results=$results" >> $GITHUB_OUTPUT
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
+  notify:
+    name: Discord Notification
+    runs-on: ubuntu-latest
+    needs: # make sure the notification is sent AFTER the jobs you want included have completed
+      - run
+    if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
 
-  # notify:
-  #   name: Discord Notification
-  #   runs-on: ubuntu-latest
-  #   needs: # make sure the notification is sent AFTER the jobs you want included have completed
-  #     - run
-  #   if: ${{ always() }} # You always want to be notified: success, failure, or cancelled
-
-  #   steps:
-  #     - name: Extract branch name
-  #       shell: bash
-  #       run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
-  #       id: extract_branch
-  #     - name: Notify from input
-  #       uses: nobrayner/discord-webhook@v1
-  #       if: ${{ github.event.inputs.test != '' }}
-  #       with:
-  #         github-token: ${{ secrets.github_token }}
-  #         discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
-  #         title: '${{ github.workflow }}: {{STATUS}}'
-  #         description: '**Branch:** `${{ steps.extract_branch.outputs.branch }}` **Test file:** `${{ github.event.inputs.test }}` **Parallelism:** `${{ github.event.inputs.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
-  #         include-details: false
-  #     - name: Notify from payload
-  #       uses: nobrayner/discord-webhook@v1
-  #       if: ${{ github.event.client_payload.test != '' }}
-  #       with:
-  #         github-token: ${{ secrets.github_token }}
-  #         discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
-  #         title: '${{ github.workflow }}: {{STATUS}}'
-  #         description: '**Branch:** `${{ github.event.client_payload.ref }}` **Test file:** `${{ github.event.client_payload.test }}` **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
-  #         include-details: false
+    steps:
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+        id: extract_branch
+      - name: Notify from input
+        uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.inputs.test != '' }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: '**Branch:** `${{ steps.extract_branch.outputs.branch }}` **Test file:** `${{ github.event.inputs.test }}` **Parallelism:** `${{ github.event.inputs.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
+          include-details: false
+      - name: Notify from payload
+        uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.client_payload.test != '' }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: '**Branch:** `${{ github.event.client_payload.ref }}` **Test file:** `${{ github.event.client_payload.test }}` **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
+          include-details: false
