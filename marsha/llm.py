@@ -2,6 +2,7 @@ import asyncio
 from asyncio.subprocess import Process
 import openai
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -418,8 +419,11 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
                     print('Failed to create virtual environment', e)
         print('Installing requirements...')
         try:
+            # define pip executable based on os
+            pip_exe = f'{venv_path}/Scripts/pip.exe' if platform.system(
+            ) == 'Windows' else f'{venv_path}/bin/pip'
             pip_stream = await asyncio.create_subprocess_exec(
-                f'{venv_path}/bin/pip', 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                pip_exe, 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             await run_subprocess(pip_stream, 120)
         except Exception as e:
             if debug:
@@ -429,7 +433,9 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
     if not os.path.exists(venv_path):
         python_exe = python
     else:
-        python_exe = f'{venv_path}/bin/python'
+        # define python executable based on os
+        python_exe = f'{venv_path}/Scripts/python.exe' if platform.system(
+        ) == 'Windows' else f'{venv_path}/bin/python'
     try:
         test_stream = await asyncio.create_subprocess_exec(
             python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
