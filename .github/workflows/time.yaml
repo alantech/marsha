@@ -74,7 +74,8 @@ jobs:
           python -m venv venv
           source venv/Scripts/activate
           python -m pip install --upgrade .
-          python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.client_payload.attempts}} ${{github.event.client_payload.test}}
+          echo "python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}"
+          python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
