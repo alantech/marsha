@@ -152,7 +152,7 @@ async def main():
                 write_files_from_markdown(md)
             attempts = attempts + 1
             break
-        # Writing generated code to temporal files in preparation for next stages
+        # Writing generated code to temporary files in preparation for next stages
         file_groups = list()
         tmpdirs = []
         for idx, md in enumerate(mds):
