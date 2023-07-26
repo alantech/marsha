@@ -1,0 +1,45 @@
+name: Run on Windows
+
+# Trigger workflow manually
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Marsha test to run"
+        required: true
+        default: "./examples/general-purpose/sort_modules.mrsh"
+      attempts:
+        description: "Number of attempts to run the test"
+        required: false
+        default: 1
+      parallel_runs:
+        description: "Number of parallel runs"
+        required: false
+        default: 3
+
+jobs:
+  run-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.client_payload.ref }}
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - name: Display Python version
+        run: python -c "import sys; print(sys.version)"
+      - name: Output Inputs
+        run: echo "${{ toJSON(github.event.inputs) }}"
+      - name: Run time script
+        id: run
+        shell: bash
+        run: |
+          python -m venv venv
+          source venv/Scripts/activate
+          python -m pip install --upgrade .
+          echo "python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}"
+          python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}
+        env:
+          OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
