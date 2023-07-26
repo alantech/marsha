@@ -148,6 +148,7 @@ The desired response must look like the following:
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
+You have to mock every external API call or database connection.
 The filename should exactly match the name `{marsha_filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
 If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
@@ -542,6 +543,9 @@ The desired response must look like the following:
             # <insert code here>
             # ```
             if not validate_first_stage_markdown(doc, marsha_filename):
+                if debug:
+                    print(f'''[Third stage] Invalid doc for {marsha_filename}:
+{doc}''')
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             files = write_files_from_markdown(doc, subdir=subdir)
