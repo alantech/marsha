@@ -6,20 +6,6 @@ on:
     branches: [main]
   repository_dispatch:
     types: [time]
-  workflow_call:
-    inputs:
-      test:
-        description: "Marsha test to run"
-        required: true
-        default: "../examples/test/sort_modules.mrsh"
-      attempts:
-        description: "Number of attempts to run the test"
-        required: false
-        default: 1
-      parallel_runs:
-        description: "Number of parallel runs"
-        required: false
-        default: 3
   workflow_dispatch:
     inputs:
       test:
@@ -51,7 +37,7 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
       - name: Output Inputs
-        run: echo "${{ toJSON(github.event.inputs) }}"
+        run: echo "${{ toJSON(inputs) }}"
       - name: Output Payload
         run: echo "${{ toJSON(github.event.client_payload) }}"
       - name: Run time script
@@ -63,6 +49,9 @@ jobs:
           fi
           if ${{ github.event.inputs.test != '' }}; then
             make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+          fi
+          if ${{ inputs.test != '' }}; then
+            make attempts=${{inputs.attempts}} test=${{inputs.test}} stats=True n_parallel_executions=${{inputs.parallel_runs}} time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
