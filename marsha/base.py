@@ -185,15 +185,15 @@ async def main():
                 directory, 'requirements.txt')
             if os.path.exists(requirements_filename):
                 copy_file(requirements_filename, 'requirements.txt')
-            cleanup_tmp_dirs(tmp_directories)
         except Exception as e:
             print('Failed to generate working code.')
             print(e)
-            cleanup_tmp_dirs(tmp_directories)
             if args.debug:
                 traceback.print_tb(e.__traceback__)
             print('Retrying...')
             continue
+        finally:
+            cleanup_tmp_directories(tmp_directories)
         # Done! Add one back to `attempts` to avoid accidentally erroring out on success
         attempts = attempts + 1
         break
@@ -362,9 +362,9 @@ Total cost: {stats['total_cost']}
     write_file('stats.md', stats_md)
 
 
-def cleanup_tmp_dirs(tmpdirs: list):
-    for tmpdir in tmpdirs:
+def cleanup_tmp_directories(tmp_directories: list):
+    for tmp_directory in tmp_directories:
         try:
-            tmpdir.cleanup()
+            tmp_directory.cleanup()
         except:
             pass
