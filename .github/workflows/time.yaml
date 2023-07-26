@@ -55,8 +55,6 @@ jobs:
 
   run-windows:
     runs-on: windows-latest
-    outputs:
-      results: ${{ steps.run.outputs.results }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -69,18 +67,14 @@ jobs:
         run: python -c "import sys; print(sys.version)"
       - name: Output Inputs
         run: echo "${{ toJSON(github.event.inputs) }}"
-      - name: Output Payload
-        run: echo "${{ toJSON(github.event.client_payload) }}"
       - name: Run time script
         id: run
         shell: bash
         run: |
           python -m venv venv
           source venv/Scripts/activate
-          ls venv
-          ls venv/Scripts
           python -m pip install --upgrade .
-          python -m marsha -d ./examples/general-purpose/sort_modules.mrsh
+          python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.client_payload.attempts}} ${{github.event.client_payload.test}}
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
 
