@@ -77,6 +77,8 @@ jobs:
         run: |
           python -m venv venv
           source venv/Scripts/activate
+          ls venv
+          ls venv/Scripts
           python -m pip install --upgrade .
           python -m marsha ./examples/general-purpose/sort_modules.mrsh
         env:
