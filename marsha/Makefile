@@ -18,8 +18,8 @@ format:
 	. ./venv/bin/activate; autopep8 -i *.py
 
 .PHONY: time
-time: .\\dist\\marsha .time.py
-	. .\\venv\\bin\\activate; pip install --upgrade ..; .\\.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)
+time: ./dist/marsha .time.py
+	. .\venv\bin\activate; pip install --upgrade ..; .\.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)
 
 .PHONY: timewin
 time: .\\dist\\marsha .time.py
