@@ -2,6 +2,8 @@ name: Run time script
 
 # Trigger workflow manually
 on:
+  pull_request:
+    branches: [main]
   repository_dispatch:
     types: [time]
   workflow_dispatch:
@@ -9,7 +11,7 @@ on:
       test:
         description: "Marsha test to run"
         required: true
-        default: "../examples/test/sort_modules.mrsh"
+        default: "../examples/general-purpose/sort_modules.mrsh"
       attempts:
         description: "Number of attempts to run the test"
         required: false
@@ -44,9 +46,10 @@ jobs:
           cd marsha
           if ${{ github.event.client_payload.test != '' }}; then
             make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
-          fi
-          if ${{ github.event.inputs.test != '' }}; then
+          elif ${{ github.event.inputs.test != '' }}; then
             make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+          else
+            make attempts=1 test=../examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
@@ -83,3 +86,13 @@ jobs:
           title: '${{ github.workflow }}: {{STATUS}}'
           description: '**Branch:** `${{ github.event.client_payload.ref }}` **Test file:** `${{ github.event.client_payload.test }}` **Parallelism:** `${{ github.event.client_payload.parallel_runs }}` **Results:** ${{ needs.run.outputs.results }}'
           include-details: false
+      - name: Notify from PR
+        uses: nobrayner/discord-webhook@v1
+        if: ${{ github.event.client_payload.test == '' && github.event.client_payload.test == '' }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: '${{ github.workflow }}: {{STATUS}}'
+          description: '**Branch:** `${{ github.ref_name }}` **Test file:** `../examples/general-purpose/sort_modules.mrsh` **Parallelism:** `3` **Results:** ${{ needs.run.outputs.results }}'
+          include-details: false
+
