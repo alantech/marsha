@@ -21,9 +21,14 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           pip install -r requirements.txt
-          LINT_RESULTS=`autopep8 -d *.py`
-          if [ "$LINT_RESULTS" != '' ]; then
-            echo $LINT_RESULTS
+          PEP8_LINT_RESULTS=`autopep8 -d *.py`
+          if [ "$PEP8_LINT_RESULTS" != '' ]; then
+            echo $PEP8_LINT_RESULTS
+            exit 1
+          fi
+          FLAKE8_LINT_RESULTS=`flake8 *.py`
+          if [ "$FLAKE8_LINT_RESULTS" != '' ]; then
+            echo $FLAKE8_LINT_RESULTS
             exit 1
           fi
             

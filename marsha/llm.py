@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+import http
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
