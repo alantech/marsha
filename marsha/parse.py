@@ -235,6 +235,8 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[s
             type_str = f'# {section.lstrip()}'
             validate_marsha_type(type_str)
             res[1].append(type_str)
+    if len(res[0]) == 0 and len(res[2]) == 0 and len(res[1]) == 0:
+        raise Exception('No functions or types found in file')
     return res
 
 
