@@ -25,14 +25,13 @@ def copy_file(src: str, dest: str):
     shutil.copyfile(src, dest)
 
 
-def delete_dir_and_content(filename: str):
-    dir = os.path.dirname(filename)
-    if os.path.isdir(dir):
-        shutil.rmtree(dir)
+def copy_tree(src: str, dest: str):
+    shutil.copytree(src, dest)
 
 
 def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
+
 
 def add_helper(filename: str):
     with open(filename, 'a') as f:
