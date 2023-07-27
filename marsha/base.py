@@ -2,12 +2,13 @@ import argparse
 import asyncio
 import os
 import openai
+import tempfile
 import time
 import traceback
 
 from marsha.llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from marsha.utils import read_file, write_file, autoformat_files, copy_file, delete_dir_and_content, get_filename_from_path, add_helper
+from marsha.utils import read_file, write_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -151,13 +152,17 @@ async def main():
                 write_files_from_markdown(md)
             attempts = attempts + 1
             break
-        # Writing generated code to temporal files in preparation for next stages
+        # Writing generated code to temporary files in preparation for next stages
         file_groups = list()
+        tmp_directories = []
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
+            tmpdir = tempfile.TemporaryDirectory(
+                suffix=f'_-_{marsha_filename}_{idx}')
+            tmp_directories.append(tmpdir)
             file_groups = file_groups + \
                 [write_files_from_markdown(
-                    md, subdir=f'{marsha_filename}_{idx}')]
+                    md, subdir=tmpdir.name)]
         if args.debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
@@ -166,36 +171,33 @@ async def main():
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
                 review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, stats, debug), name=file_group[0]))
-        task_names = [task.get_name() for task in tasks]
         try:
             done_task_name = await run_parallel_tasks(tasks)
-            for name in task_names:
-                if name != done_task_name:
-                    delete_dir_and_content(name)
-                else:
-                    print('Writing generated code to files...')
-                    filename = name
-                    copy_file(filename, f'{marsha_filename}.py')
-                    if not args.exclude_main_helper:
-                        add_helper(f'{marsha_filename}.py')
-                    test_filename = filename.replace('.py', '_test.py')
-                    copy_file(test_filename, f'{marsha_filename}_test.py')
-                    directory = os.path.dirname(filename)
-                    requirements_filename = os.path.join(
-                        directory, 'requirements.txt')
-                    if os.path.exists(requirements_filename):
-                        copy_file(requirements_filename, 'requirements.txt')
-                    delete_dir_and_content(filename)
+            print('Writing generated code to files...')
+            filename = done_task_name
+            copy_file(filename, f'{marsha_filename}.py')
+            if not args.exclude_main_helper:
+                add_helper(f'{marsha_filename}.py')
+            test_filename = filename.replace('.py', '_test.py')
+            copy_file(test_filename, f'{marsha_filename}_test.py')
+            directory = os.path.dirname(filename)
+            requirements_filename = os.path.join(
+                directory, 'requirements.txt')
+            if os.path.exists(requirements_filename):
+                copy_file(requirements_filename, 'requirements.txt')
         except Exception as e:
             print('Failed to generate working code.')
             print(e)
-            if not args.debug:
-                for name in task_names:
-                    delete_dir_and_content(name)
-            else:
+            if args.debug:
                 traceback.print_tb(e.__traceback__)
+                # Copy the temporary directories to a new directory for debugging
+                for tmpdir in tmp_directories:
+                    tmpdir_suffix = tmpdir.name.split('_-_')[-1]
+                    copy_tree(tmpdir.name, f'{tmpdir_suffix}_failed')
             print('Retrying...')
             continue
+        finally:
+            cleanup_tmp_directories(tmp_directories)
         # Done! Add one back to `attempts` to avoid accidentally erroring out on success
         attempts = attempts + 1
         break
@@ -362,3 +364,11 @@ Total cost: {stats['total_cost']}
 
 '''
     write_file('stats.md', stats_md)
+
+
+def cleanup_tmp_directories(tmp_directories: list):
+    for tmp_directory in tmp_directories:
+        try:
+            tmp_directory.cleanup()
+        except:
+            pass
