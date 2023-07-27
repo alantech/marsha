@@ -8,7 +8,7 @@ import traceback
 
 from marsha.llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from marsha.utils import read_file, write_file, autoformat_files, copy_file, get_filename_from_path, add_helper
+from marsha.utils import read_file, write_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -158,7 +158,7 @@ async def main():
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
             tmpdir = tempfile.TemporaryDirectory(
-                suffix=f'{marsha_filename}_{idx}')
+                suffix=f'_-_{marsha_filename}_{idx}')
             tmp_directories.append(tmpdir)
             file_groups = file_groups + \
                 [write_files_from_markdown(
@@ -190,6 +190,10 @@ async def main():
             print(e)
             if args.debug:
                 traceback.print_tb(e.__traceback__)
+                # Copy the temporary directories to a new directory for debugging
+                for tmpdir in tmp_directories:
+                    tmpdir_suffix = tmpdir.name.split('_-_')[-1]
+                    copy_tree(tmpdir.name, f'{tmpdir_suffix}_failed')
             print('Retrying...')
             continue
         finally:

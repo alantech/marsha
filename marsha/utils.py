@@ -25,6 +25,10 @@ def copy_file(src: str, dest: str):
     shutil.copyfile(src, dest)
 
 
+def copy_tree(src: str, dest: str):
+    shutil.copytree(src, dest)
+
+
 def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
 
