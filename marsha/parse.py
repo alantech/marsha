@@ -5,10 +5,6 @@ from mistletoe import Document, ast_renderer
 
 from marsha.utils import write_file
 
-FUNC_REGEX = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
-VOID_FUNC_REGEX = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
-TYPE_REGEX = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
-
 
 def to_markdown(node):
     # Technically I should iterate on the `children` lists every time because they could have more
@@ -223,17 +219,19 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[str]]:
     res = ([], [], [])
     sections = file.split('#')
-
+    func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
+    void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
+    type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
     for section in sections:
-        if re.match(VOID_FUNC_REGEX, section) and not re.match(FUNC_REGEX, section):
+        if re.match(void_func_regex, section) and not re.match(func_regex, section):
             void_func_str = f'# {section.lstrip()}'
             validate_marsha_fn(void_func_str, True)
             res[2].append(void_func_str)
-        elif re.match(FUNC_REGEX, section):
+        elif re.match(func_regex, section):
             func_str = f'# {section.lstrip()}'
             validate_marsha_fn(func_str)
             res[0].append(func_str)
-        elif re.match(TYPE_REGEX, section):
+        elif re.match(type_regex, section):
             type_str = f'# {section.lstrip()}'
             validate_marsha_type(type_str)
             res[1].append(type_str)
