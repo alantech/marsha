@@ -281,40 +281,43 @@ def validate_marsha_fn(fn: str, void: bool = False):
         return_type = fn_heading.split('):')[1].strip()
         if not return_type or return_type is None or return_type == '':
             raise Exception(
-                f'Invalid Marsha function: Missing return type for {fn_heading}.')
+                f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
     # Check description
     if ast['children'][1]['type'] != 'Paragraph':
         raise Exception(
-            f'Invalid Marsha function: Invalid description for {fn_heading}.')
-    fn_desc = ast['children'][1]['children'][0]['content']
-    if len(fn_desc) <= 140:  # smaller than a tweet
+            f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
+    # Extract content from all children and nested children
+    fn_desc = ''
+    for child in ast['children'][1]['children']:
+        fn_desc += to_markdown(child)
+    if len(fn_desc) <= 140:  # should not be smaller than a tweet
         raise Exception(
-            f'Invalid Marsha function: Description for {fn_heading} is too short.')
-    # Check usage examples
-    if ast['children'][2]['type'] != 'List':
-        raise Exception(
-            f'Invalid Marsha function: Invalid usage examples for {fn_heading}.')
-    if len(ast['children'][2]['children']) <= 2:  # We need at least a couple of examples
-        raise Exception(
-            f'Invalid Marsha function: Not enough usage examples for {fn_heading}.')
+            f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
+    # Check usage examples if not void
+    if not void:
+        if ast['children'][2]['type'] != 'List':
+            raise Exception(
+                f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
+        if len(ast['children'][2]['children']) <= 2:  # We need at least a couple of examples
+            raise Exception(
+                f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
 
 
 def validate_marsha_type(type: str):
     ast = ast_renderer.get_ast(Document(type))
 
-    if len(ast['children'] == 1):
+    if len(ast['children']) == 1:
         type_heading = ast['children'][0]['children'][0]['content']
         if len(type_heading.split(' ')) != 3:
             raise Exception(
-                f'Invalid Marsha type: Invalid type definition for {type_heading}.')
+                f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
     else:
         type_heading = ast['children'][0]['children'][0]['content']
         if ast['children'][1]['type'] != 'Paragraph':
             raise Exception(
-                f'Invalid Marsha type: Invalid type definition for {type_heading}.')
-
-        type_def = filter(lambda x: x['type'] ==
-                          'RawText', ast['children'][1]['children'])
-        if len(list(type_def)) <= 2:
+                f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
+        type_def_samples = filter(lambda x: x['type'] ==
+                                  'RawText', ast['children'][1]['children'])
+        if len(list(type_def_samples)) <= 2:  # We need at least the headers and one sample
             raise Exception(
-                f'Invalid Marsha type: Not enough examples for {type_heading}.')
+                f'Invalid Marsha type: Not enough examples for `{type_heading}`.')
