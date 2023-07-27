@@ -10,7 +10,7 @@ import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name, extract_type_name
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.utils import read_file
 
 # OpenAI pricing model.
@@ -106,7 +106,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write Python 3 functions. 
+            'content': f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
