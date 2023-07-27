@@ -318,6 +318,6 @@ def validate_marsha_type(type: str):
                 f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
         type_def_samples = filter(lambda x: x['type'] ==
                                   'RawText', ast['children'][1]['children'])
-        if len(list(type_def_samples)) <= 2:  # We need at least the headers and one sample
+        if len(list(type_def_samples)) <= 2:  # We need at least the headers and a couple of examples
             raise Exception(
                 f'Invalid Marsha type: Not enough examples for `{type_heading}`.')
