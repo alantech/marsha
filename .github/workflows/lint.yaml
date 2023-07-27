@@ -22,7 +22,7 @@ jobs:
           source venv/bin/activate
           pip install -r requirements.txt
           LINT_RESULTS=`autopep8 -d *.py`
-          if [ $LINT_RESULTS != '' ]; then
+          if [ "$LINT_RESULTS" != '' ]; then
             echo $LINT_RESULTS
             exit 1
           fi
