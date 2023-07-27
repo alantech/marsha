@@ -300,7 +300,7 @@ def validate_marsha_fn(fn: str, void: bool = False):
         if ast['children'][2]['type'] != 'List':
             raise Exception(
                 f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
-        if len(ast['children'][2]['children']) <= 2:  # We need at least a couple of examples
+        if len(ast['children'][2]['children']) < 2:  # We need at least a couple of examples
             raise Exception(
                 f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
 
