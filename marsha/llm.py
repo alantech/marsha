@@ -80,6 +80,56 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
+async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
+    marsha_for_code_llm = format_marsha_for_llm(
+        marsha_filename, functions + void_funcs, defined_types)
+    res = await retry_chat_completion({
+        'messages': [{
+            'role': 'system',
+            'content': '''You are a senior software engineer reviewing an assignment to write a Python 3 function.
+The assignment is written in markdown format.
+It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
+You are assessing if this document has enough context such that a junior software engineer with a couple of years of experience should be able to write the desired function and a test suite to verify it.
+The description must be precise enough to determine what to do.
+The examples must be complete enough to likely catch all edge cases.
+If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
+Your answer is consumed by project management software, so only respond with Y for yes or N for no.
+''',
+        }, {
+            'role': 'user',
+            'content': f'''{marsha_for_code_llm}'''
+        }],
+        'max_tokens': 1,
+    }, n_results=n_results)
+    if any([True if choice.message.content == 'N' else False for choice in res.choices]):
+        return False
+    return True
+
+
+async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats, retries: int = 3, debug: bool = False):
+    marsha_for_code_llm = format_marsha_for_llm(
+        marsha_filename, functions + void_funcs, defined_types)
+    res = await retry_chat_completion({
+        'messages': [{
+            'role': 'system',
+            'content': '''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
+The assignment is written in markdown format.
+It includes sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
+You have already decided this document is not written well enough such that another engineer can reliably write a working function that meets expectations, nor a test suite to verify proper functionality.
+The description must be precise enough to determine what to do.
+The examples must be complete enough to likely catch all edge cases.
+You are writing a few paragraphs gently explaining the deficiencies in the task definition they have written, not coming up with examples assuming what they might have wanted, since that isn't clear in the first place, just why what they have provided is not precise enough.
+In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The mistakes simply are, and that they made them isn't a problem, just that they should learn from them.
+Do not include a "hello" or a "regards", etc, as your response is being attached to a code review system.
+''',
+        }, {
+            'role': 'user',
+            'content': f'''{marsha_for_code_llm}'''
+        }],
+    })
+    print(res.choices[0].message.content)
+
+
 async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
@@ -94,7 +144,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
     reses = await asyncio.gather(retry_chat_completion({
         'messages': [{
             'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write Python 3 functions. 
+            'content': f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
