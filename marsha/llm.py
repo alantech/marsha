@@ -11,20 +11,8 @@ import time
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
+from marsha.stats import MarshaStats
 from marsha.utils import read_file
-
-# OpenAI pricing model.
-# Format: (tokens, price). Price per 1024 tokens.
-PRICING_MODEL = {
-    'gpt-3.5-turbo': {
-        'in': [(4096, 0.0015), (16384, 0.002)],
-        'out': [(4096, 0.002), (16384, 0.004)]
-    },
-    'gpt-4': {
-        'in': [(8192, 0.03), (32768, 0.06)],
-        'out': [(8192, 0.06), (32768, 0.12)]
-    }
-}
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -92,7 +80,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
+async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     res = await retry_chat_completion({
@@ -113,12 +101,13 @@ Your answer is consumed by project management software, so only respond with Y f
         }],
         'max_tokens': 1,
     }, n_results=n_results)
+    stats.stage_update('first_stage', [res])
     if any([True if choice.message.content == 'N' else False for choice in res.choices]):
         return False
     return True
 
 
-async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: dict, retries: int = 3, debug: bool = False):
+async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     res = await retry_chat_completion({
@@ -139,10 +128,11 @@ Do not include a "hello" or a "regards", etc, as your response is being attached
             'content': f'''{marsha_for_code_llm}'''
         }],
     })
+    stats.stage_update('first_stage', [res])
     print(res.choices[0].message.content)
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: dict, retries: int = 3, debug: bool = False):
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     marsha_for_test_llm = format_marsha_for_llm(
@@ -224,7 +214,7 @@ The desired response must look like the following:
             'content': f'''{marsha_for_test_llm}'''
         }],
     }, n_results=n_results))
-    gather_stats(stats, 'first_stage', reses)
+    stats.stage_update('first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -264,7 +254,7 @@ The desired response must look like the following:
             raise Exception('Failed to generate code', marsha_filename)
 
 
-async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: dict, retries: int = 3, debug: bool = False):
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: MarshaStats, retries: int = 3, debug: bool = False):
     code = read_file(filename)
     res = await retry_chat_completion({
         'messages': [{
@@ -303,7 +293,7 @@ The desired response must look like the following:
 ```''',
         }],
     })
-    gather_stats(stats, 'second_stage', [res])
+    stats.stage_update('second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -321,7 +311,7 @@ The desired response must look like the following:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: dict, max_depth: int = 4, debug: bool = False):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: MarshaStats, max_depth: int = 4, debug: bool = False):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -440,7 +430,7 @@ async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, s
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], stats: dict, retries: int = 4, debug: bool = False):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], stats: MarshaStats, retries: int = 4, debug: bool = False):
     break_line = '\n'
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
@@ -579,7 +569,7 @@ The desired response must look like the following:
 {test_results}''',
             }],
         }, 'gpt-4')
-        gather_stats(stats, 'third_stage', [res])
+        stats.stage_update('third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -610,31 +600,3 @@ The desired response must look like the following:
         return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
-
-
-def gather_stats(stats: dict, stage: str, res: list):
-    stats[stage]['total_calls'] += len(res)
-    for r in res:
-        model = 'gpt-4' if r.model.startswith('gpt-4') else 'gpt-3.5-turbo'
-        input_tokens = r.usage.prompt_tokens
-        stats[stage][model]['input_tokens'] += input_tokens
-        pricing = PRICING_MODEL[model]
-        # Calculate input cost based on context length
-        if (input_tokens <= pricing['in'][0][0]):
-            stats[stage][model]['input_cost'] += input_tokens * \
-                pricing['in'][0][1] / 1024
-        elif (input_tokens <= pricing['in'][1][0]):
-            stats[stage][model]['input_cost'] += input_tokens * \
-                pricing['in'][1][1] / 1024
-        output_tokens = r.usage.completion_tokens
-        stats[stage][model]['output_tokens'] += output_tokens
-        # Calculate output cost based on context length
-        if (output_tokens <= pricing['out'][0][0]):
-            stats[stage][model]['output_cost'] += output_tokens * \
-                pricing['out'][0][1] / 1024
-        elif (output_tokens <= pricing['out'][1][0]):
-            stats[stage][model]['output_cost'] += output_tokens * \
-                pricing['out'][1][1] / 1024
-        # Calculate total cost
-        stats[stage][model]['total_cost'] += stats[stage][model]['input_cost'] + \
-            stats[stage][model]['output_cost']

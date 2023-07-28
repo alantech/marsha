@@ -9,7 +9,8 @@ import sys
 
 from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from marsha.utils import read_file, write_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
+from marsha.stats import MarshaStats
+from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -36,90 +37,10 @@ parser.add_argument('-s', '--stats', action='store_true',
 
 args = parser.parse_args()
 
-# TODO: make this a class?
-# Stats for the run of the compiler
-stats = {
-    'class_generation': {
-        'total_time': 0,
-        'total_calls': 0,
-        'gpt-3.5-turbo': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-        'gpt-4': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-    },
-    'first_stage': {
-        'total_time': 0,
-        'total_calls': 0,
-        'gpt-3.5-turbo': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-        'gpt-4': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-    },
-    'second_stage': {
-        'total_time': 0,
-        'total_calls': 0,
-        'gpt-3.5-turbo': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-        'gpt-4': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-    },
-    'third_stage': {
-        'total_time': 0,
-        'total_calls': 0,
-        'gpt-3.5-turbo': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-        'gpt-4': {
-            'input_tokens': 0,
-            'output_tokens': 0,
-            'input_cost': 0,
-            'output_cost': 0,
-            'total_cost': 0,
-        },
-    },
-    'total_time': 0,
-    'total_calls': 0,
-    'attempts': 0,
-    'total_cost': 0,
-}
-
 
 async def main():
     t1 = time.time()
+    stats = MarshaStats()
     input_file = args.source
     # Name without extension
     marsha_file_dirname = os.path.dirname(input_file)
@@ -206,47 +127,27 @@ async def main():
         break
     if attempts == 0:
         t2 = time.time()
-        stats['total_time'] = prettify_time_delta(t2 - t1)
-        stats['attempts'] = args.attempts
-        stats['total_calls'] = stats['first_stage']['total_calls'] + \
-            stats['second_stage']['total_calls'] + \
-            stats['third_stage']['total_calls'] + \
-            stats['class_generation']['total_calls']
-        stats['total_cost'] = stats['first_stage']['gpt-3.5-turbo']['total_cost'] + stats['first_stage']['gpt-4']['total_cost'] + \
-            stats['second_stage']['gpt-3.5-turbo']['total_cost'] + stats['second_stage']['gpt-4']['total_cost'] + \
-            stats['third_stage']['gpt-3.5-turbo']['total_cost'] + stats['third_stage']['gpt-4']['total_cost'] + \
-            stats['class_generation']['gpt-3.5-turbo']['total_cost'] + \
-            stats['class_generation']['gpt-4']['total_cost']
+        stats.aggregate(prettify_time_delta(t2 - t1), args.attempts)
         if should_write_stats:
-            stats_to_file(stats)
+            stats.to_file()
         raise Exception(
-            f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
+            f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
     t2 = time.time()
-    stats['total_time'] = prettify_time_delta(t2 - t1)
-    stats['attempts'] = args.attempts - attempts + 1
-    stats['total_calls'] = stats['first_stage']['total_calls'] + \
-        stats['second_stage']['total_calls'] + \
-        stats['third_stage']['total_calls'] + \
-        stats['class_generation']['total_calls']
-    stats['total_cost'] = stats['first_stage']['gpt-3.5-turbo']['total_cost'] + stats['first_stage']['gpt-4']['total_cost'] + \
-        stats['second_stage']['gpt-3.5-turbo']['total_cost'] + stats['second_stage']['gpt-4']['total_cost'] + \
-        stats['third_stage']['gpt-3.5-turbo']['total_cost'] + stats['third_stage']['gpt-4']['total_cost'] + \
-        stats['class_generation']['gpt-3.5-turbo']['total_cost'] + \
-        stats['class_generation']['gpt-4']['total_cost']
+    stats.aggregate(prettify_time_delta(t2 - t1), args.attempts - attempts + 1)
     if should_write_stats:
-        stats_to_file(stats)
+        stats.to_file()
     print(
-        f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats["total_cost"], 2)}.')
+        f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
 
 
-async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool, stats: dict) -> list[str]:
+async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool, stats: MarshaStats) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
     mds = None
     try:
         if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug):
-                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
+            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats):
+                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, stats)
                 sys.exit(1)
         mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
     except Exception as e:
@@ -258,7 +159,7 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
         raise e
     finally:
         t2 = time.time()
-        stats['first_stage']['total_time'] = prettify_time_delta(
+        stats.first_stage.total_time = prettify_time_delta(
             t2 - t1)
     return mds
 
@@ -287,7 +188,7 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     return types_defined
 
 
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], stats: dict, debug: bool = False):
+async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], stats: MarshaStats, debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
@@ -298,7 +199,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
         raise e
     finally:
         t_ssii = time.time()
-        stats['second_stage']['total_time'] = prettify_time_delta(
+        stats.second_stage.total_time = prettify_time_delta(
             t_ssii - t_ssi)
     if args.debug:
         for file in files:
@@ -313,7 +214,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
         raise e
     finally:
         t_tsii = time.time()
-        stats['third_stage']['total_time'] = prettify_time_delta(
+        stats.third_stage.total_time = prettify_time_delta(
             t_tsii - t_tsi)
     if args.debug:
         for file in files:
@@ -342,35 +243,6 @@ async def run_parallel_tasks(tasks: list) -> str:
         if done_task is not None and done_task.exception() is not None:
             raise done_task.exception()
         raise Exception('All tasks failed.')
-
-
-def stats_to_file(stats: dict):
-    stats_md = f'''# Stats
-{stats['class_generation']['total_time'] != 0 and f"""## Class generation
-Total time: {stats['class_generation']['total_time']}
-Total calls: {stats['class_generation']['total_calls']}
-
-"""}
-## First stage
-Total time: {stats['first_stage']['total_time']}
-Total calls: {stats['first_stage']['total_calls']}
-
-## Second stage
-Total time: {stats['second_stage']['total_time']}
-Total calls: {stats['second_stage']['total_calls']}
-
-## Third stage
-Total time: {stats['third_stage']['total_time']}
-Total calls: {stats['third_stage']['total_calls']}
-
-## Total
-Total time: {stats['total_time']}
-Total calls: {stats['total_calls']}
-Attempts: {stats['attempts']}
-Total cost: {stats['total_cost']}
-
-'''
-    write_file('stats.md', stats_md)
 
 
 def cleanup_tmp_directories(tmp_directories: list):
