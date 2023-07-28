@@ -288,7 +288,15 @@ def validate_marsha_fn(fn: str, void: bool = False):
     if ast['children'][1]['type'] != 'Paragraph':
         raise Exception(
             f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
-    # Extract content from all children and nested children
+    # Check usage examples if not void first because we need to check the length later
+    if not void:
+        if ast['children'][-1]['type'] != 'List':
+            raise Exception(
+                f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
+        if len(ast['children'][-1]['children']) < 2:  # We need at least a couple of examples
+            raise Exception(
+                f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
+    # Extract content from all children and nested children except header and examples if any
     fn_desc = ''
     range_stop = len(ast['children']) - 1 if not void else len(ast['children'])
     for i in range(1, range_stop):
@@ -297,14 +305,6 @@ def validate_marsha_fn(fn: str, void: bool = False):
     if len(fn_desc) <= 80:  # around a couple of sentences at least
         raise Exception(
             f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
-    # Check usage examples if not void
-    if not void:
-        if ast['children'][-1]['type'] != 'List':
-            raise Exception(
-                f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
-        if len(ast['children'][-1]['children']) < 2:  # We need at least a couple of examples
-            raise Exception(
-                f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
 
 
 def validate_marsha_type(type: str):
