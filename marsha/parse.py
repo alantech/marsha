@@ -131,7 +131,7 @@ def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_ty
 '''
         res.append(fn_def)
     if defined_types is not None:
-        res.append(f'## Convert the following type into classes')
+        res.append('## Convert the following type into classes')
         for defined_type in defined_types:
             type_def = f'''
 ##{defined_type}
@@ -173,7 +173,7 @@ def validate_first_stage_markdown(md, marsha_filename):
             return False
         if ast['children'][0]['children'][0]['content'].strip() != f'{marsha_filename}.py':
             return False
-        if ast['children'][2]['children'][0]['content'].strip() != f'requirements.txt':
+        if ast['children'][2]['children'][0]['content'].strip() != 'requirements.txt':
             return False
         if ast['children'][4]['children'][0]['content'].strip() != f'{marsha_filename}_test.py':
             return False

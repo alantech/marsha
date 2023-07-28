@@ -143,7 +143,7 @@ async def main():
         try:
             mds = await generate_python_code(
                 marsha_filename, functions, types_defined, void_funcs, n_results, debug, stats)
-        except Exception as e:
+        except Exception:
             continue
         # Early exit if quick and dirty
         if quick_and_dirty:
@@ -370,5 +370,5 @@ def cleanup_tmp_directories(tmp_directories: list):
     for tmp_directory in tmp_directories:
         try:
             tmp_directory.cleanup()
-        except:
+        except Exception:
             pass
