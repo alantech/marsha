@@ -290,17 +290,18 @@ def validate_marsha_fn(fn: str, void: bool = False):
             f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
     # Extract content from all children and nested children
     fn_desc = ''
-    for child in ast['children'][1]['children']:
-        fn_desc += to_markdown(child)
-    if len(fn_desc) <= 140:  # should not be smaller than a tweet
-        raise Exception(
-            f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
+    for i in range(1, len(ast['children']) - 2):
+        for child in ast['children'][i]['children']:
+            fn_desc += to_markdown(child)
+        if len(fn_desc) <= 140:  # should not be smaller than a tweet
+            raise Exception(
+                f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
     # Check usage examples if not void
     if not void:
-        if ast['children'][2]['type'] != 'List':
+        if ast['children'][-1]['type'] != 'List':
             raise Exception(
                 f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
-        if len(ast['children'][2]['children']) < 2:  # We need at least a couple of examples
+        if len(ast['children'][-1]['children']) < 2:  # We need at least a couple of examples
             raise Exception(
                 f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
 
