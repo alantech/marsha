@@ -24,7 +24,10 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 
 # func read_csv_file(path to file): file data without header
 
-This function read a CSV file and return the csv content without header.
+This function should read the content of a CSV file located at the specified path and return the data without the header row.
+
+* read_csv_file() = throws an error
+* read_csv_file('./pathA') = '1,2,3\n3,4,5'
 
 # func process_data(path to file with EmployeesByDepartment, path to file with DepartmentSkills): EmployeeSkills list as csv formatted string
 
