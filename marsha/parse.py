@@ -293,9 +293,9 @@ def validate_marsha_fn(fn: str, void: bool = False):
     for i in range(1, len(ast['children']) - 2):
         for child in ast['children'][i]['children']:
             fn_desc += to_markdown(child)
-        if len(fn_desc) <= 140:  # should not be smaller than a tweet
-            raise Exception(
-                f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
+    if len(fn_desc) <= 140:  # should not be smaller than a tweet
+        raise Exception(
+            f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
     # Check usage examples if not void
     if not void:
         if ast['children'][-1]['type'] != 'List':
