@@ -101,6 +101,7 @@ Your answer is consumed by project management software, so only respond with Y f
         }],
         'max_tokens': 1,
     }, n_results=n_results)
+    stats.stage_update('first_stage', [res])
     if any([True if choice.message.content == 'N' else False for choice in res.choices]):
         return False
     return True
@@ -127,6 +128,7 @@ Do not include a "hello" or a "regards", etc, as your response is being attached
             'content': f'''{marsha_for_code_llm}'''
         }],
     })
+    stats.stage_update('first_stage', [res])
     print(res.choices[0].message.content)
 
 
