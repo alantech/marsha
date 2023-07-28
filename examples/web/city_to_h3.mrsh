@@ -1,0 +1,9 @@
+# func city_to_h3(string of location to get the H3 index, resolution of the H3 index): H3 index as a string
+
+This function uses the 'h3' python library, as documented on https://h3geo.org specifically the 'geo_to_h3' function.
+
+For the location, the public.opendatasoft.com API should be used to query a city, for example, a query for "Austin, TX" looks like: https://public.opendatasoft.com/api/records/1.0/search/?dataset=geonames-all-cities-with-a-population-500&q=Austin%2C%20TX&facet=timezone&facet=country and then converts it into latitude and longitude, then uses the 'h3' 'geo_to_h3' function and the specified resolution to produce the H3 index
+
+* h3('Austin, TX', 9) = '894898d92abffff'
+* h3('San Francisco, CA', 200) raises an exception
+* h3('teh MOON', 9) raises an exception
