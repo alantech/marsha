@@ -1,0 +1,8 @@
+<!-- This is an example of a *bad* Marsha function. There is nowhere near enough information for Marsha to do something reasonable with this, and marsha will reject it. -->
+
+# func facebook(user request) facebook page
+
+Make facebook for me
+
+* facebook('home') = My facebook homepage
+* facebook('my friend') = My friend's facebook page

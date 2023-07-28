@@ -5,8 +5,9 @@ import openai
 import tempfile
 import time
 import traceback
+import sys
 
-from marsha.llm import gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
+from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
 from marsha.stats import MarshaStats
 from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
@@ -29,6 +30,8 @@ parser.add_argument('-a', '--attempts', type=int, default=1)
 parser.add_argument('-n', '--n-parallel-executions', type=int, default=3)
 parser.add_argument('--exclude-main-helper', action='store_true',
                     help='Skips addition of helper code for running as a script')
+parser.add_argument('--exclude-sanity-check', action='store_true',
+                    help='Skips an initial sanity check that function defintions will reliably generate working code')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 
@@ -64,7 +67,7 @@ async def main():
         try:
             mds = await generate_python_code(
                 marsha_filename, functions, types_defined, void_funcs, n_results, debug, stats)
-        except Exception as e:
+        except Exception:
             continue
         # Early exit if quick and dirty
         if quick_and_dirty:
@@ -142,6 +145,10 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     print('Generating Python code...')
     mds = None
     try:
+        if not args.exclude_sanity_check:
+            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug):
+                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
+                sys.exit(1)
         mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
     except Exception as e:
         print('First stage failure')
@@ -242,5 +249,5 @@ def cleanup_tmp_directories(tmp_directories: list):
     for tmp_directory in tmp_directories:
         try:
             tmp_directory.cleanup()
-        except:
+        except Exception:
             pass

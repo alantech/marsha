@@ -1,0 +1,34 @@
+name: Lint project
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.client_payload.ref }}
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+      - name: Lint project
+        run: |
+          cd marsha
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+          PEP8_LINT_RESULTS=`autopep8 -d *.py`
+          if [ "$PEP8_LINT_RESULTS" != '' ]; then
+            echo $PEP8_LINT_RESULTS
+            exit 1
+          fi
+          FLAKE8_LINT_RESULTS=`flake8 *.py`
+          if [ "$FLAKE8_LINT_RESULTS" != '' ]; then
+            echo $FLAKE8_LINT_RESULTS
+            exit 1
+          fi
+            
