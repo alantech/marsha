@@ -224,11 +224,19 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[s
     type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'
     for section in sections:
         if re.match(void_func_regex, section) and not re.match(func_regex, section):
-            res[2].append(f'# {section.lstrip()}')
+            void_func_str = f'# {section.lstrip()}'
+            validate_marsha_fn(void_func_str, True)
+            res[2].append(void_func_str)
         elif re.match(func_regex, section):
-            res[0].append(f'# {section.lstrip()}')
+            func_str = f'# {section.lstrip()}'
+            validate_marsha_fn(func_str)
+            res[0].append(func_str)
         elif re.match(type_regex, section):
-            res[1].append(f'# {section.lstrip()}')
+            type_str = f'# {section.lstrip()}'
+            validate_marsha_type(type_str)
+            res[1].append(type_str)
+    if len(res[0]) == 0 and len(res[2]) == 0 and len(res[1]) == 0:
+        raise Exception('No functions or types found in file')
     return res
 
 
@@ -265,3 +273,55 @@ def extract_func_name(type) -> str:
         raise Exception('Invalid Marsha function')
     header = ast['children'][0]['children'][0]['content']
     return header.split('(')[0].split('func')[1].strip()
+
+
+def validate_marsha_fn(fn: str, void: bool = False):
+    ast = ast_renderer.get_ast(Document(fn))
+    fn_heading = ast['children'][0]['children'][0]['content']
+    # Check function signature
+    if not void:
+        return_type = fn_heading.split('):')[1].strip()
+        if not return_type or return_type is None or return_type == '':
+            raise Exception(
+                f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
+    # Check description
+    if ast['children'][1]['type'] != 'Paragraph':
+        raise Exception(
+            f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
+    # Check usage examples if not void first because we need to check the length later
+    if not void:
+        if ast['children'][-1]['type'] != 'List':
+            raise Exception(
+                f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
+        if len(ast['children'][-1]['children']) < 2:  # We need at least a couple of examples
+            raise Exception(
+                f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
+    # Extract content from all children and nested children except header and examples if any
+    fn_desc = ''
+    range_stop = len(ast['children']) - 1 if not void else len(ast['children'])
+    for i in range(1, range_stop):
+        for child in ast['children'][i]['children']:
+            fn_desc += to_markdown(child)
+    if len(fn_desc) <= 80:  # around a couple of sentences at least
+        raise Exception(
+            f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
+
+
+def validate_marsha_type(type: str):
+    ast = ast_renderer.get_ast(Document(type))
+
+    if len(ast['children']) == 1:
+        type_heading = ast['children'][0]['children'][0]['content']
+        if len(type_heading.split(' ')) != 3:
+            raise Exception(
+                f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
+    else:
+        type_heading = ast['children'][0]['children'][0]['content']
+        if ast['children'][1]['type'] != 'Paragraph':
+            raise Exception(
+                f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
+        type_def_samples = filter(lambda x: x['type'] ==
+                                  'RawText', ast['children'][1]['children'])
+        if len(list(type_def_samples)) <= 2:  # We need at least the headers and a couple of examples
+            raise Exception(
+                f'Invalid Marsha type: Not enough examples for `{type_heading}`.')

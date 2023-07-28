@@ -22,4 +22,5 @@ We want to extract the following label:
 `total` looking for "TOTAL" (all uppercase). The information will be to the right, not in the next row.
 
 
+* extract_info() = throws an error
 * extract_info('./pathA') = { 'bill_to': '', 'ship_to': '', 'invoice_no': '', 'customer_id': '123', 'total': '345' }
