@@ -80,7 +80,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
             raise Exception('Could not execute chat completion')
 
 
-async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
+async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     res = await retry_chat_completion({
@@ -107,7 +107,7 @@ Your answer is consumed by project management software, so only respond with Y f
     return True
 
 
-async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats, retries: int = 3, debug: bool = False):
+async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     res = await retry_chat_completion({

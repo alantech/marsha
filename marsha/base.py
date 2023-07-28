@@ -146,8 +146,8 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     mds = None
     try:
         if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug):
-                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
+            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats):
+                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, stats)
                 sys.exit(1)
         mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
     except Exception as e:
