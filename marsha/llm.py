@@ -1,6 +1,5 @@
 import asyncio
 from asyncio.subprocess import Process
-import functools
 import openai
 import os
 import platform
@@ -12,21 +11,8 @@ import time
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
-from marsha.stats import MarshaStats
+from stats import MarshaStats
 from marsha.utils import read_file
-
-# OpenAI pricing model.
-# Format: (tokens, price). Price per 1024 tokens.
-PRICING_MODEL = {
-    'gpt35': {
-        'in': [(4096, 0.0015), (16384, 0.002)],
-        'out': [(4096, 0.002), (16384, 0.004)]
-    },
-    'gpt4': {
-        'in': [(8192, 0.03), (32768, 0.06)],
-        'out': [(8192, 0.06), (32768, 0.12)]
-    }
-}
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -176,7 +162,7 @@ The desired response must look like the following:
             'content': f'''{marsha_for_test_llm}'''
         }],
     }, n_results=n_results))
-    gather_stats(stats, 'first_stage', reses)
+    stats.stage_update('first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -255,7 +241,7 @@ The desired response must look like the following:
 ```''',
         }],
     })
-    gather_stats(stats, 'second_stage', [res])
+    stats.stage_update('second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -531,7 +517,7 @@ The desired response must look like the following:
 {test_results}''',
             }],
         }, 'gpt-4')
-        gather_stats(stats, 'third_stage', [res])
+        stats.stage_update('third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -562,48 +548,3 @@ The desired response must look like the following:
         return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
-
-
-def gather_stats(stats: MarshaStats, stage: str, res: list):
-    rsetattr(stats, f'{stage}.total_calls', rgetattr(
-        stats, f'{stage}.total_calls') + len(res))
-    for r in res:
-        model = 'gpt4' if r.model.startswith('gpt-4') else 'gpt35'
-        input_tokens = r.usage.prompt_tokens
-        rsetattr(stats, f'{stage}.{model}.input_tokens', rgetattr(
-            stats, f'{stage}.{model}.input_tokens') + input_tokens)
-        pricing = PRICING_MODEL[model]
-        # Calculate input cost based on context length
-        if (input_tokens <= pricing['in'][0][0]):
-            rsetattr(stats, f'{stage}.{model}.input_cost', rgetattr(
-                stats, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][0][1] / 1024)
-        elif (input_tokens <= pricing['in'][1][0]):
-            rsetattr(stats, f'{stage}.{model}.input_cost', rgetattr(
-                stats, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][1][1] / 1024)
-        output_tokens = r.usage.completion_tokens
-        rsetattr(stats, f'{stage}.{model}.output_tokens', rgetattr(
-            stats, f'{stage}.{model}.output_tokens') + output_tokens)
-        # Calculate output cost based on context length
-        if (output_tokens <= pricing['out'][0][0]):
-            rsetattr(stats, f'{stage}.{model}.output_cost', rgetattr(
-                stats, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][0][1] / 1024)
-        elif (output_tokens <= pricing['out'][1][0]):
-            rsetattr(stats, f'{stage}.{model}.output_cost', rgetattr(
-                stats, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][1][1] / 1024)
-        # Calculate total cost
-        rsetattr(stats, f'{stage}.{model}.total_cost', rgetattr(stats, f'{stage}.{model}.total_cost') +
-                 rgetattr(stats, f'{stage}.{model}.input_cost') + rgetattr(stats, f'{stage}.{model}.output_cost'))
-
-
-# TODO: Move to utils
-# https://stackoverflow.com/questions/31174295/getattr-and-setattr-on-nested-subobjects-chained-properties
-def rsetattr(obj, attr, val):
-    pre, _, post = attr.rpartition('.')
-    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
-
-
-def rgetattr(obj, attr, *args):
-    def _getattr(obj, attr):
-        print(obj, attr)
-        return getattr(obj, attr, *args)
-    return functools.reduce(_getattr, [obj] + attr.split('.'))

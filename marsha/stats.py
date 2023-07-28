@@ -1,4 +1,19 @@
+import functools
+
 from utils import write_file
+
+# OpenAI pricing model.
+# Format: (tokens, price). Price per 1024 tokens.
+PRICING_MODEL = {
+    'gpt35': {
+        'in': [(4096, 0.0015), (16384, 0.002)],
+        'out': [(4096, 0.002), (16384, 0.004)]
+    },
+    'gpt4': {
+        'in': [(8192, 0.03), (32768, 0.06)],
+        'out': [(8192, 0.06), (32768, 0.12)]
+    }
+}
 
 
 class ModelStats:
@@ -39,6 +54,36 @@ class MarshaStats:
             self.second_stage.gpt4.total_cost + \
             self.third_stage.gpt35.total_cost + self.third_stage.gpt4.total_cost
 
+    def stage_update(self, stage: str, res: list):
+        rsetattr(self, f'{stage}.total_calls', rgetattr(
+            self, f'{stage}.total_calls') + len(res))
+        for r in res:
+            model = 'gpt4' if r.model.startswith('gpt-4') else 'gpt35'
+            input_tokens = r.usage.prompt_tokens
+            rsetattr(self, f'{stage}.{model}.input_tokens', rgetattr(
+                self, f'{stage}.{model}.input_tokens') + input_tokens)
+            pricing = PRICING_MODEL[model]
+            # Calculate input cost based on context length
+            if (input_tokens <= pricing['in'][0][0]):
+                rsetattr(self, f'{stage}.{model}.input_cost', rgetattr(
+                    self, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][0][1] / 1024)
+            elif (input_tokens <= pricing['in'][1][0]):
+                rsetattr(self, f'{stage}.{model}.input_cost', rgetattr(
+                    self, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][1][1] / 1024)
+            output_tokens = r.usage.completion_tokens
+            rsetattr(self, f'{stage}.{model}.output_tokens', rgetattr(
+                self, f'{stage}.{model}.output_tokens') + output_tokens)
+            # Calculate output cost based on context length
+            if (output_tokens <= pricing['out'][0][0]):
+                rsetattr(self, f'{stage}.{model}.output_cost', rgetattr(
+                    self, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][0][1] / 1024)
+            elif (output_tokens <= pricing['out'][1][0]):
+                rsetattr(self, f'{stage}.{model}.output_cost', rgetattr(
+                    self, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][1][1] / 1024)
+            # Calculate total cost
+            rsetattr(self, f'{stage}.{model}.total_cost', rgetattr(self, f'{stage}.{model}.total_cost') +
+                     rgetattr(self, f'{stage}.{model}.input_cost') + rgetattr(self, f'{stage}.{model}.output_cost'))
+
     def to_file(self, filename: str = 'stats.md'):
         write_file(filename, content=self.__str__())
 
@@ -69,3 +114,19 @@ Total calls: {self.total_calls}
 Attempts: {self.attempts}
 Total cost: {self.total_cost}
 '''
+
+
+"""
+Source: https://stackoverflow.com/questions/31174295/getattr-and-setattr-on-nested-subobjects-chained-properties
+"""
+
+
+def rsetattr(obj, attr, val):
+    pre, _, post = attr.rpartition('.')
+    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
+
+
+def rgetattr(obj, attr, *args):
+    def _getattr(obj, attr):
+        return getattr(obj, attr, *args)
+    return functools.reduce(_getattr, [obj] + attr.split('.'))
