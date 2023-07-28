@@ -1,6 +1,6 @@
 import functools
 
-from utils import write_file
+from marsha.utils import write_file
 
 # OpenAI pricing model.
 # Format: (tokens, price). Price per 1024 tokens.
