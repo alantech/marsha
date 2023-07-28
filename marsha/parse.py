@@ -293,7 +293,7 @@ def validate_marsha_fn(fn: str, void: bool = False):
     for i in range(1, len(ast['children']) - 1):
         for child in ast['children'][i]['children']:
             fn_desc += to_markdown(child)
-    if len(fn_desc) <= 140:  # should not be smaller than a tweet
+    if len(fn_desc) <= 80:  # around a couple of sentences at least
         raise Exception(
             f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
     # Check usage examples if not void
