@@ -11,7 +11,7 @@ import time
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
-from stats import MarshaStats
+from marsha.stats import MarshaStats
 from marsha.utils import read_file
 
 # Get time at startup to make human legible "start times" in the logs
