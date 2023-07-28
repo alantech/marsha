@@ -290,7 +290,7 @@ def validate_marsha_fn(fn: str, void: bool = False):
             f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
     # Extract content from all children and nested children
     fn_desc = ''
-    for i in range(1, len(ast['children']) - 2):
+    for i in range(1, len(ast['children']) - 1):
         for child in ast['children'][i]['children']:
             fn_desc += to_markdown(child)
     if len(fn_desc) <= 140:  # should not be smaller than a tweet
