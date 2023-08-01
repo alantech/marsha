@@ -24,7 +24,7 @@ def service_worker():
 
 def query_openllamacpp(handler):
     payload = handler.get_payload()
-    result = subprocess.run(['./main', '-p', payload['query']], capture_output=True, encoding='utf8')
+    result = subprocess.run(['./main', '-t', str(os.cpu_count()), '-p', payload['query']], capture_output=True, encoding='utf8')
     return {
             "response": result.stdout,
             "stderr": result.stderr,
