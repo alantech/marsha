@@ -19,14 +19,12 @@ WORKDIR /
 ## Grab the llama.cpp repo
 RUN git clone https://github.com/ggerganov/llama.cpp.git
 
-## Grab the (massive) OpenLLaMa weights
-RUN git clone https://huggingface.co/openlm-research/open_llama_7b_v2
+## Grab the (massive) Llama 2 weights
+RUN git clone https://huggingface.co/localmodels/Llama-2-13B-Chat-ggml
 
-## Build llama.cpp and convert the open llama weights
+## Build llama.cpp
 WORKDIR /llama.cpp
 RUN make
-RUN python3 -m pip install -r requirements.txt
-RUN python3 convert.py ../open_llama_7b_v2
 
 # Output image
 FROM base as main
@@ -35,9 +33,9 @@ FROM base as main
 WORKDIR /
 COPY --from=build /llama.cpp llama.cpp
 
-## Copy converted weights only from OpenLLaMa
+## Copy Q4_0 weights only from OpenLLaMa
 RUN mkdir -p /llama.cpp/models/7B
-COPY --from=build /open_llama_7b_v2/ggml-model-f16.bin /llama.cpp/models/7B/ggml-model.bin
+COPY --from=build /Llama-2-13B-Chat-ggml/llama-2-13b-chat.ggmlv3.q4_0.bin /llama.cpp/models/7B/ggml-model.bin
 
 ## Copy simple web server script
 WORKDIR /llama.cpp
