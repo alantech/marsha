@@ -5,7 +5,8 @@ if __name__ == '__main__':
     lookup = globals()
     func_names = [r.__name__ for r in lookup.values() if callable(r)]
     default_func = func_names[-1]
-    parser = argparse.ArgumentParser(description='Marsha-generated CLI options')
+    parser = argparse.ArgumentParser(
+        description='Marsha-generated CLI options')
     parser.add_argument('-c', '--func', action='store', required=False, choices=func_names, default=default_func,
                         help='Specifies the function to call. Defaults to the last defined function')
     parser.add_argument('-j', '--force-json', action='store_true', required=False,
@@ -20,7 +21,8 @@ if __name__ == '__main__':
                         help='Saves the result to a file instead of stdout')
     parser.add_argument('-s', '--serve', action='store', required=False, type=int,
                         help='Spins up a simple REST web server on the specified port. When used all other options are ignored')
-    parser.add_argument('params', nargs='*', help='Arguments to be provided to the function being run. Optimistically converted to simple python types by default, and left as strings if not possible')
+    parser.add_argument(
+        'params', nargs='*', help='Arguments to be provided to the function being run. Optimistically converted to simple python types by default, and left as strings if not possible')
     args = parser.parse_args()
     func = lookup[args.func]
     if args.serve is not None:
@@ -33,7 +35,8 @@ if __name__ == '__main__':
                     self.send_response(404)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(bytes('{"error": "' + self.path + ' does not exist"}', 'utf-8'))
+                    self.wfile.write(
+                        bytes('{"error": "' + self.path + ' does not exist"}', 'utf-8'))
                     return
                 func = lookup[func_name]
                 content_len = int(self.headers.get('Content-Length', 0))
@@ -47,7 +50,8 @@ if __name__ == '__main__':
                         self.send_response(400)
                         self.send_header('Content-Type', 'application/json')
                         self.end_headers()
-                        self.wfile.write(bytes('{"error": "Invalid JSON provided"}', 'utf-8'))
+                        self.wfile.write(
+                            bytes('{"error": "Invalid JSON provided"}', 'utf-8'))
                         return
                 else:
                     post_payload = post_body.decode('utf-8')
@@ -63,7 +67,8 @@ if __name__ == '__main__':
                     if is_json:
                         self.send_header('Content-Type', 'application/json')
                         self.end_headers()
-                        self.wfile.write(bytes('{"error": "' + str(e) + '"}', 'utf-8'))
+                        self.wfile.write(
+                            bytes('{"error": "' + str(e) + '"}', 'utf-8'))
                     else:
                         self.send_header('Content-Type', 'text/plain')
                         self.end_headers()
