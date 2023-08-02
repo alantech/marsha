@@ -35,6 +35,6 @@ def get_filename_from_path(path: str):
 
 
 def add_helper(filename: str):
-    helper = os.path.join(os.path.dirname(os.path.abspath(getsourcefile(lambda:0))), 'helper.py')
+    helper = os.path.join(os.path.dirname(os.path.abspath(getsourcefile(lambda: 0))), 'helper.py')
     with open(filename, 'a') as o, open(helper, 'r') as i:
         o.write(i.read())
