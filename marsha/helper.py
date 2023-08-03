@@ -29,6 +29,29 @@ if __name__ == '__main__':
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class MarshaServer(BaseHTTPRequestHandler):
+            def do_GET(self):
+                func_name = self.path.split('/')[1]
+                if func_name not in func_names:
+                    self.send_response(404)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(
+                        bytes('{"error": "' + self.path + ' does not exist"}', 'utf-8'))
+                    return
+                func = lookup[func_name]
+                if func.__code__.co_argcount != 0:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(
+                        bytes('{"error": "' + self.path + ' is not a GET path"}', 'utf-8'))
+                    return
+                out = func()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(bytes(json.dumps(out), 'utf-8'))
+
             def do_POST(self):
                 func_name = self.path.split('/')[1]
                 if func_name not in func_names:
