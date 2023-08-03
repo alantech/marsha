@@ -65,7 +65,7 @@ example 2 value 1, example 2 value 2, example 2 value 3
 example 3 value 1, example 3 value 2, example 3, value 3
 ```
 
-Similar to a function, but specifying which database it is connected to with `using [dbname]` and the return type is a custom type defined at the end after a horizontal rule `---`.
+Similar to a function, but specifying which database it is connected to with `using {dbname}` and the return type is a custom type defined at the end after a horizontal rule `---`.
 
 ```md
 # schema {name} for {dbname} {example.csv}
