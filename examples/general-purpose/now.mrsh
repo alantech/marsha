@@ -1,0 +1,7 @@
+# func now(): the current date and time
+
+This function prints the current date and time in an english format. It includes the day of the week, month, day, and year for the date. For the time it incldues the hour, minute, AM/PM, and timezone.
+
+* now() = 'Today is Wednesday, August 2nd, 2023. It is currently 5:19PM CDT'
+* now() = 'Today is Monday, July 31st, 2023. It is currently 8:37AM CDT'
+* now() = 'Today is Sunday, January 20th, 2019. It is currently 3:14PM PST'
