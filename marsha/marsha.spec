@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('../examples', './examples')]
+datas = [('../examples', './examples'), ('./helper.py', './marsha')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('pyflakes')
