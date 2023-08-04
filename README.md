@@ -16,6 +16,8 @@ pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
 
+> See our [examples](./examples/) or take a look to the [`how-to` guides](./how-to/).
+
 ## Syntax
 
 The Marsha syntax looks a lot like markdown and is a mixture of English and mathematical notation. It has its own file format `.mrsh` that houses function definition(s). The syntax is subject to change as Marsha is currently in an alpha state. If you have a legitimate use case for Marsha, please let us know.
