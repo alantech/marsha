@@ -8,7 +8,7 @@
 
 ![Alt text](assets/jupyter-notebook/openai-key.png)
 
-- Create the `.mrsh` file with the desired definition. In this case we show how can be defined inline and then saved into a file.
+- Create the `.mrsh` file with the desired definition. In this case, we show how can be defined inline and then saved into a file.
 
 ![Alt text](assets/jupyter-notebook/marsha-file.png)
 
@@ -20,13 +20,13 @@ Then it is defining a set of functions trying to follow the single responsibilit
 
 ![Alt text](assets/jupyter-notebook/exec-marsha.png)
 
-The generated code are just a Python script, it's test file and the required dependencies.
+Marsha generates a Python script, the respective test file for the Python Script and the required dependencies.
 
-- Now there are two options. One is running the file directly [using the compiled marsha code](https://github.com/alantech/marsha#using-compiled-marsha-code). The other option is to just import it in the workflow.
+- Now there are two options. One is running the file directly [using the compiled marsha code](https://github.com/alantech/marsha#using-compiled-marsha-code). The other option is to just import it into the workflow.
 
 ![Alt text](assets/jupyter-notebook/usage.png)
 
-First it need to install the needed requirements, and it can just be imported and used inside another python script. In this case it is creating a visualization with `matplotlib` for the result obtained.
+First, it needs to install the needed requirements, and it can just be imported and used inside another Python script. In this case, it is creating a visualization with `matplotlib` for the result obtained.
 
 
 > The complete notebook example can be found [here](https://github.com/alantech/marsha/tree/main/examples/data-oriented/notebook)
