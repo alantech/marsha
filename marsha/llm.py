@@ -56,6 +56,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
     t1 = time.time()
     query['model'] = model
     query['n'] = n_results
+    query['temperature'] = 0.2
     while True:
         try:
             out = await openai.ChatCompletion.acreate(**query)
