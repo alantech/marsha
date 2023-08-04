@@ -20,7 +20,10 @@ WORKDIR /
 RUN git clone https://github.com/ggerganov/llama.cpp.git
 
 ## Grab the (massive) Llama 2 weights
-RUN git clone https://huggingface.co/localmodels/Llama-2-13B-Chat-ggml
+RUN git clone --depth 1 --no-checkout https://huggingface.co/localmodels/Llama-2-13B-Chat-ggml
+WORKDIR /Llama-2-13B-Chat-ggml
+RUN git lfs pull --include "llama-2-13b-chat.ggmlv3.q4_0.bin"
+WORKDIR /
 
 ## Build llama.cpp
 WORKDIR /llama.cpp
