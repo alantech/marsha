@@ -42,7 +42,7 @@ async def acreate(model='gpt-3.5-turbo', messages=[], name=None, temperature=1.0
     fmt_messages = '\n\n'.join([f"""{message['role'].upper()}:
 
 {message['content']}""" for message in messages])
-    req = f"""This ASSISTANT obeys the SYSTEM directives to solve the problem posed by the USER. The ASSISTANT follows the output format specified by the SYSTEM exactly, as the output directly entered into a task management system, NO COMMENTARY BEFORE OR AFTER THE DEFINED OUTPUT FORMAT.
+    req = f"""This is a transcript of an advanced AI ASSISTANT. The AI SYSTEM gives it a persona and STRICT output formatting rules, and it solves a problem statement posed to it by the USER. It is emotionless and provides NO SECONDARY EXPLANATORY TEXT, solely the requested output in the requested format. The transcript is ended immediately after this with "END OF TRANSCRIPT".
 
 {fmt_messages}
 
@@ -61,5 +61,6 @@ ASSISTANT: """
                                                                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE), float('inf'))
         print(stdout, stderr)
         print(stdout.split(req)[1])
-        choices.append(DotDict({'message': {'content': stdout.split(req)[1]}}))
+        print(stdout.split(req)[1].split('END OF TRANSCRIPT')[0])
+        choices.append(DotDict({'message': {'content': stdout.split(req)[1].split('END OF TRANSCRIPT')[0]}}))
     return DotDict({'model': model, 'usage': {'prompt_tokens': 0, 'completion_tokens': 0}, 'choices': choices})
