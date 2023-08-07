@@ -146,7 +146,7 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
     ---- start ----
 {marsha_for_code_llm}
     ---- end ----''')
-    
+
     if use_llama:
         reses = []
         reses.append(await retry_chat_completion({
