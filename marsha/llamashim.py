@@ -47,9 +47,8 @@ async def acreate(model='gpt-3.5-turbo', messages=[], name=None, temperature=1.0
 {fmt_messages}
 
 ASSISTANT: """
-    # TODO: All of the configuration options
     args = [llamacpp, '-m', os.getenv('LLAMACPP_MODEL'), '-t',
-            str(multiprocessing.cpu_count()), '-c', '4096', '-eps', '1e-5', '-p', req]
+            str(multiprocessing.cpu_count()), '-c', '4096', '-eps', '1e-5', '--temp', str(0.75), '-p', req]
     if max_tokens != float('inf'):
         args.extend(['-n', str(max_tokens)])
     if gpu_support:
