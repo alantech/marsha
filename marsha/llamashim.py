@@ -21,13 +21,11 @@ gpu_support = True if 'gpu-layers' in subprocess.run([llamacpp, '--help'], captu
 
 
 async def run_subprocess(stream: asyncio.subprocess.Process, timeout: float = 60.0) -> tuple[str, str]:
-    print(0)
     stdout = ''
     stderr = ''
     try:
         stdout, stderr = await asyncio.wait_for(stream.communicate(), timeout)
     except asyncio.exceptions.TimeoutError:
-        print(1)
         try:
             stream.kill()
         except OSError:
@@ -35,14 +33,15 @@ async def run_subprocess(stream: asyncio.subprocess.Process, timeout: float = 60
             pass
         raise Exception('run_subprocess timeout...')
     except Exception as e:
-        print(e)
         raise e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
 async def acreate(model='gpt-3.5-turbo', messages=[], name=None, temperature=1.0, top_p=None, n=1, max_tokens=float('inf')):
-    fmt_messages = '\n\n'.join([f"""{message['role'].capitalize()}: {message['content']}""" for message in messages])
-    req = f"""This is an advanced, configurable AI assistant. The 'SYSTEM' directives provide constraints on how the 'ASSISTANT' AI may answer 'USER' requests. When the 'SYSTEM' and 'USER' are in conflict, the 'ASSISTANT' follows the 'SYSTEM' constraints.
+    fmt_messages = '\n\n'.join([f"""{message['role'].upper()}:
+
+{message['content']}""" for message in messages])
+    req = f"""This ASSISTANT obeys the SYSTEM directives to solve the problem posed by the USER. The ASSISTANT follows the output format specified by the SYSTEM exactly, as the output directly entered into a task management system, NO COMMENTARY BEFORE OR AFTER THE DEFINED OUTPUT FORMAT.
 
 {fmt_messages}
 
@@ -50,13 +49,13 @@ ASSISTANT: """
     # TODO: All of the configuration options
     args = [llamacpp, '-m', os.getenv('LLAMACPP_MODEL'), '-t', str(multiprocessing.cpu_count()), '-c', '4096', '-p', req]
     if max_tokens != float('inf'):
-        args.extend(['-n', max_tokens])
+        args.extend(['-n', str(max_tokens)])
     if gpu_support:
         args.extend(['-ngl', '43'])  # TODO: Figure out how to determine the proper number of layers here based on GPU memory size and the model chosen
     choices = []
     for i in range(n):
-        stdout, stderr = await run_subprocess(await asyncio.create_subprocess_exec(
-            llamacpp, '-m', os.getenv('LLAMACPP_MODEL'), '-t', str(multiprocessing.cpu_count()), '-c', '4096', '-p', req, stdout=subprocess.PIPE, stderr=subprocess.PIPE), float('inf'))
+        stdout, stderr = await run_subprocess(await asyncio.create_subprocess_exec(*args,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE), float('inf'))
         print(stdout, stderr)
         print(stdout.split(req)[1])
         choices.append(DotDict({'message': {'content': stdout.split(req)[1]}}))
