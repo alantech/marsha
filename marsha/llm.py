@@ -13,6 +13,10 @@ from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import MarshaStats
 from marsha.utils import read_file
+from marsha.llamashim import acreate
+
+# Flag if using Llama.cpp or OpenAI
+use_llama = True if os.getenv('LLAMACPP_MODEL') else False
 
 # Get time at startup to make human legible "start times" in the logs
 t0 = time.time()
@@ -58,7 +62,7 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
     query['n'] = n_results
     while True:
         try:
-            out = await openai.ChatCompletion.acreate(**query)
+            out = await acreate(**query) if use_llama else await openai.ChatCompletion.acreate(**query)
             t2 = time.time()
             print(
                 f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
@@ -143,10 +147,12 @@ async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined
 {marsha_for_code_llm}
     ---- end ----''')
 
-    reses = await asyncio.gather(retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write Python 3 functions.
+    if use_llama:
+        reses = []
+        reses.append(await retry_chat_completion({
+            'messages': [{
+                'role': 'system',
+                'content': f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
@@ -178,14 +184,15 @@ The desired response must look like the following:
 ```
 
 ''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_code_llm}'''
-        }],
-    }, n_results=n_results), retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+            }, {
+                'role': 'user',
+                'content': f'''{marsha_for_code_llm}'''
+            }],
+        }, n_results=n_results))
+        reses.append(await retry_chat_completion({
+            'messages': [{
+                'role': 'system',
+                'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
@@ -209,11 +216,83 @@ The desired response must look like the following:
 ```
 
 ''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_test_llm}'''
-        }],
-    }, n_results=n_results))
+            }, {
+                'role': 'user',
+                'content': f'''{marsha_for_test_llm}'''
+            }],
+        }, n_results=n_results))
+    else:
+        reses = await asyncio.gather(retry_chat_completion({
+            'messages': [{
+                'role': 'system',
+                'content': f'''You are a senior software engineer assigned to write Python 3 functions.
+The assignment is written in markdown format.
+The description of each function should be included as a docstring.
+Add type hints if feasible.
+The filename should exactly match the name `{marsha_filename}.py`.
+Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
+If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{marsha_filename}.py`.
+The content of the first section must be a python code block with the generated code.
+The second section header must be the filename `requirements.txt`.
+The content of the second section must be a text code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {marsha_filename}.py
+
+```py
+<generated code>
+```
+
+# requirements.txt
+
+```txt
+<dependencies needed>
+```
+
+''',
+            }, {
+                'role': 'user',
+                'content': f'''{marsha_for_code_llm}'''
+            }],
+        }, n_results=n_results), retry_chat_completion({
+            'messages': [{
+                'role': 'system',
+                'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+The assignment is written in markdown format.
+The unit tests created should exactly match the example cases provided for each function.
+You have to create a TestCase per function provided.
+The filename should exactly match the name `{marsha_filename}_test.py`.
+Unknown imports might come from the file where the function is defined, or from the standard library.
+If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
+Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{marsha_filename}_test.py`.
+The content of the first section must be a python code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {marsha_filename}_test.py
+
+```py
+<generated code>
+```
+
+''',
+            }, {
+                'role': 'user',
+                'content': f'''{marsha_for_test_llm}'''
+            }],
+        }, n_results=n_results))
     stats.stage_update('first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)

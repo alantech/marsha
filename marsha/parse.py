@@ -72,7 +72,8 @@ def to_markdown(node):
 
 def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
     break_line = '\n'
-    res = [f'# Requirements for file `{marsha_filename}`']
+    res = [f'''# Requirements for file `{marsha_filename}.py`
+''']
     for func in functions:
         ast = ast_renderer.get_ast(Document(func))
         if ast['children'][0]['type'] != 'Heading':
