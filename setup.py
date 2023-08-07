@@ -6,22 +6,20 @@ from setuptools.command.develop import develop
 from setuptools.command.install import install
 
 
-script_directory = os.path.dirname(os.path.abspath(__file__))
-
-
-def setup_llamacpp():
-    if not os.path.exists(os.path.join(script_directory, './marsha/bin')):
-        os.makedirs(os.path.join(script_directory, './marsha/bin'))
-    if not os.path.exists(os.path.join(script_directory, './marsha/bin/llamacpp')):
-        tmpdir = tempfile.TemporaryDirectory(
-            suffix='__marsha_setup__')
-        subprocess.Popen(['git', 'clone', 'https://github.com/ggerganov/llama.cpp.git'], cwd=tmpdir)
-        cuda_support = True if len(subprocess.run(['command', '-v', 'nvcc'], capture_output=True, encoding='utf8').stdout) > 0 else False
-        if cuda_support:
-            subprocess.Popen(['make', 'LLAMA_CUBLAS=1'], cwd=os.path.join(tmpdir, './llama.cpp'))
-        else:
-            subprocess.Popen(['make'], cwd=os.path.join(tmpdir, './llama.cpp'))
-        subprocess.Popen(['cp', os.path.join(tmpdir, './llama.cpp/main'), os.path.join(script_directory, './marsha/bin/llamacpp')])
+def setup_llamacpp(install_libbase):
+    if not os.path.exists(os.path.join(install_libbase, 'marsha/bin')):
+        os.makedirs(os.path.join(install_libbase, 'marsha/bin'))
+    if not os.path.exists(os.path.join(install_libbase, 'marsha/bin/llamacpp')):
+        with tempfile.TemporaryDirectory(
+                suffix='__marsha_setup__') as tmpdir:
+            print(tmpdir)
+            print(subprocess.run(['bash', '-c', f'cd {tmpdir}; git clone https://github.com/ggerganov/llama.cpp.git']))
+            cuda_support = True if len(subprocess.run(['bash', '-c', 'command -v nvcc'], capture_output=True, encoding='utf8').stdout) > 0 else False
+            if cuda_support:
+                print(subprocess.run(['bash', '-c', f'cd {os.path.join(tmpdir, "llama.cpp")}; make LLAMA_CUBLAS=1']))
+            else:
+                print(subprocess.run(['bash', '-c', f'cd {os.path.join(tmpdir, "llama.cpp")}; make']))
+            subprocess.run(['cp', os.path.join(tmpdir, 'llama.cpp/main'), os.path.join(install_libbase, 'marsha/bin/llamacpp')])
 
 
 class PostDevelopCommand(develop):
@@ -35,7 +33,7 @@ class PostInstallCommand(install):
     """Post-installation for installation mode."""
     def run(self):
         install.run(self)
-        setup_llamacpp()
+        setup_llamacpp(self.install_libbase)
 
 
 setup(
