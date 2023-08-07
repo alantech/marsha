@@ -16,7 +16,7 @@ pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
 
-> See our [examples](./examples/) or take a look to the [`how-to` guides](./how-to/).
+> See our [examples](./examples/) or take a look to our [`how-to` guides](./how-to/). On them, you can take a look at how to use marsha for different purposes, from creating just functions that can be imported and integrated with other scripts to how to use marsha to create a simple REST web server.
 
 ## Syntax
 
