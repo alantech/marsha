@@ -1,21 +1,17 @@
 import asyncio
 from asyncio.subprocess import Process
-import openai
 import os
 import platform
 import shutil
 import subprocess
 import sys
-import time
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import MarshaStats
 from marsha.utils import read_file
-
-# Get time at startup to make human legible "start times" in the logs
-t0 = time.time()
+from marsha.chatgptmapper import ChatGPTMapper
 
 # PyInstaller creates a temp folder and stores path in _MEIPASS
 base_path = '.'
@@ -28,65 +24,8 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
-def prettify_time_delta(delta, max_depth=2):
-    rnd = round if max_depth == 1 else int
-    if not max_depth:
-        return ''
-    if delta < 1:
-        return f'''{format(delta * 1000, '3g')}ms'''
-    elif delta < 60:
-        sec = rnd(delta)
-        subdelta = delta - sec
-        return f'''{format(sec, '2g')}sec {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
-    elif delta < 3600:
-        mn = rnd(delta / 60)
-        subdelta = delta - mn * 60
-        return f'''{format(mn, '2g')}min {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
-    elif delta < 86400:
-        hr = rnd(delta / 3600)
-        subdelta = delta - hr * 3600
-        return f'''{format(hr, '2g')}hr {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
-    else:
-        day = rnd(delta / 86400)
-        subdelta = delta - day * 86400
-        return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
-
-
-async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_results=1):
-    t1 = time.time()
-    query['model'] = model
-    query['n'] = n_results
-    while True:
-        try:
-            out = await openai.ChatCompletion.acreate(**query)
-            t2 = time.time()
-            print(
-                f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
-            return out
-        except openai.error.InvalidRequestError as e:
-            if e.code == 'context_length_exceeded':
-                # Try to cover up this error by choosing the bigger, more expensive model
-                query['model'] = 'gpt-4'
-            max_tries = max_tries - 1
-            if max_tries == 0:
-                raise e
-            time.sleep(3 / max_tries)
-        except Exception as e:
-            max_tries = max_tries - 1
-            if max_tries == 0:
-                raise e
-            time.sleep(3 / max_tries)
-        if max_tries == 0:
-            raise Exception('Could not execute chat completion')
-
-
 async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats):
-    marsha_for_code_llm = format_marsha_for_llm(
-        marsha_filename, functions + void_funcs, defined_types)
-    res = await retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': '''You are a senior software engineer reviewing an assignment to write a Python 3 function.
+    gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
 You are assessing if this document has enough context such that a junior software engineer with a couple of years of experience should be able to write the desired function and a test suite to verify it.
@@ -94,26 +33,18 @@ The description must be precise enough to determine what to do.
 The examples must be complete enough to likely catch all edge cases.
 If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
 Your answer is consumed by project management software, so only respond with Y for yes or N for no.
-''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_code_llm}'''
-        }],
-        'max_tokens': 1,
-    }, n_results=n_results)
-    stats.stage_update('first_stage', [res])
-    if any([True if choice.message.content == 'N' else False for choice in res.choices]):
+''', max_tokens=1, n_results=n_results)
+    marsha_for_code_llm = format_marsha_for_llm(
+        marsha_filename, functions + void_funcs, defined_types)
+    gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
+    # TODO: Revive stats
+    # stats.stage_update('first_stage', [res])
+    if any([True if opinion == 'N' else False for opinion in gpt_opinions]):
         return False
     return True
 
 
-async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats):
-    marsha_for_code_llm = format_marsha_for_llm(
-        marsha_filename, functions + void_funcs, defined_types)
-    res = await retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': '''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
+gpt_improve = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
 The assignment is written in markdown format.
 It includes sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
 You have already decided this document is not written well enough such that another engineer can reliably write a working function that meets expectations, nor a test suite to verify proper functionality.
@@ -122,31 +53,22 @@ The examples must be complete enough to likely catch all edge cases.
 You are writing a few paragraphs gently explaining the deficiencies in the task definition they have written, not coming up with examples assuming what they might have wanted, since that isn't clear in the first place, just why what they have provided is not precise enough.
 In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The mistakes simply are, and that they made them isn't a problem, just that they should learn from them.
 Do not include a "hello" or a "regards", etc, as your response is being attached to a code review system.
-''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_code_llm}'''
-        }],
-    })
-    stats.stage_update('first_stage', [res])
-    print(res.choices[0].message.content)
+''')
+
+
+async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats):
+    marsha_for_code_llm = format_marsha_for_llm(
+        marsha_filename, functions + void_funcs, defined_types)
+    improvements = await gpt_improve.run(marsha_for_code_llm)
+    # TODO: Revive stats
+    # stats.stage_update('first_stage', [res])
+    print(improvements)
 
 
 async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
-    marsha_for_test_llm = format_marsha_for_llm(
-        marsha_filename, functions, defined_types)
-    if debug:
-        print(f'''marsha_for_llm =
-    ---- start ----
-{marsha_for_code_llm}
-    ---- end ----''')
-
-    reses = await asyncio.gather(retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write Python 3 functions.
+    gpt_gen_code = ChatGPTMapper(f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
@@ -177,15 +99,10 @@ The desired response must look like the following:
 <dependencies needed>
 ```
 
-''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_code_llm}'''
-        }],
-    }, n_results=n_results), retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+''', n_results=n_results)
+    marsha_for_test_llm = format_marsha_for_llm(
+        marsha_filename, functions, defined_types)
+    gpt_gen_test = ChatGPTMapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
@@ -208,20 +125,25 @@ The desired response must look like the following:
 <generated code>
 ```
 
-''',
-        }, {
-            'role': 'user',
-            'content': f'''{marsha_for_test_llm}'''
-        }],
-    }, n_results=n_results))
-    stats.stage_update('first_stage', reses)
+''', n_results=n_results)
+    if debug:
+        print(f'''marsha_for_llm =
+    ---- start ----
+{marsha_for_code_llm}
+    ---- end ----''')
+
+    reses = await asyncio.gather(gpt_gen_code.run(marsha_for_code_llm), gpt_gen_test.run(marsha_for_test_llm))
+    # TODO: Revive stats
+    # stats.stage_update('first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
         mds = list()
         for i in range(n_results):
-            doc = reses[0].choices[i].message.content + \
-                '\n\n' + reses[1].choices[i].message.content
+            # TODO: This unfairly reduces the success probability of the separate GPT calls, requiring both in the same run
+            # to pass. It should instead try to use the same pass if possible, but otherwise use a different pairing so bad
+            # dice rolls don't compound each other.
+            doc = reses[0][i] + '\n\n' + reses[1][i]
             # Some validation that the generated file matches the expected format of:
             # # function_name.py
             # ```py
@@ -256,10 +178,7 @@ The desired response must look like the following:
 
 async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: MarshaStats, retries: int = 3, debug: bool = False):
     code = read_file(filename)
-    res = await retry_chat_completion({
-        'messages': [{
-            'role': 'system',
-            'content': f'''You are a senior software engineer working with Python 3.
+    gpt_fix = ChatGPTMapper(f'''You are a senior software engineer working with Python 3.
 You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
 All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
@@ -277,10 +196,8 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''',
-        }, {
-            'role': 'user',
-            'content': f'''# {filename}
+''')
+    fixed_code = await gpt_fix.run(f'''# {filename}
 
 ```py
 {code}
@@ -290,20 +207,18 @@ The desired response must look like the following:
 
 ```
 {lint_text}
-```''',
-        }],
-    })
-    stats.stage_update('second_stage', [res])
+```''')
+    # TODO: Revive stats
+    # stats.stage_update('second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
-        doc = res.choices[0].message.content
-        if not validate_second_stage_markdown(doc, filename):
+        if not validate_second_stage_markdown(fixed_code, filename):
             if debug:
                 print(f'''[Second stage] Invalid doc:
-{doc}''')
+{fixed_code}''')
             raise Exception('Invalid output format')
-        write_files_from_markdown(doc)
+        write_files_from_markdown(fixed_code)
     except Exception:
         if retries > 0:
             return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1, debug)
@@ -495,10 +410,7 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
         requirements = read_file(req_file) if req_file is not None else None
         void_function_names = list(
             map(lambda f: extract_func_name(f), void_functions))
-        res = await retry_chat_completion({
-            'messages': [{
-                'role': 'system',
-                'content': f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
+        gpt_fix = ChatGPTMapper(f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
 You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Do not write new unit tests, just fix the existing ones.
@@ -537,10 +449,8 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''',
-            }, {
-                'role': 'user',
-                'content': f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
+''', model='gpt-4')
+        fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
 
 {f"""## Do not test the following functions:
 
@@ -566,14 +476,12 @@ The desired response must look like the following:
 
 # Test Results
 
-{test_results}''',
-            }],
-        }, 'gpt-4')
-        stats.stage_update('third_stage', [res])
+{test_results}''')
+        # TODO: Revive stats
+        # stats.stage_update('third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
-            doc = res.choices[0].message.content
             # Some validation that the generated file matches the expected format of:
             # # function_name.py
             # ```py
@@ -587,10 +495,10 @@ The desired response must look like the following:
             # ```py
             # <insert code here>
             # ```
-            if not validate_first_stage_markdown(doc, marsha_filename):
+            if not validate_first_stage_markdown(fixed_code, marsha_filename):
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
-            files = write_files_from_markdown(doc, subdir=subdir)
+            files = write_files_from_markdown(fixed_code, subdir=subdir)
         except Exception:
             if retries == 0:
                 raise Exception('Failed to fix code', marsha_filename)

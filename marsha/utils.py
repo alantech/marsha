@@ -4,6 +4,30 @@ import os
 import shutil
 
 
+def prettify_time_delta(delta, max_depth=2):
+    rnd = round if max_depth == 1 else int
+    if not max_depth:
+        return ''
+    if delta < 1:
+        return f'''{format(delta * 1000, '3g')}ms'''
+    elif delta < 60:
+        sec = rnd(delta)
+        subdelta = delta - sec
+        return f'''{format(sec, '2g')}sec {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
+    elif delta < 3600:
+        mn = rnd(delta / 60)
+        subdelta = delta - mn * 60
+        return f'''{format(mn, '2g')}min {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
+    elif delta < 86400:
+        hr = rnd(delta / 3600)
+        subdelta = delta - hr * 3600
+        return f'''{format(hr, '2g')}hr {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
+    else:
+        day = rnd(delta / 86400)
+        subdelta = delta - day * 86400
+        return f'''{format(day, '2g')}days {prettify_time_delta(subdelta, max_depth - 1)}'''.rstrip()
+
+
 def read_file(filename: str, mode: str = 'r'):
     with open(filename, mode) as f:
         content = f.read()

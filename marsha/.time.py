@@ -5,7 +5,7 @@ import math
 import os
 import time
 
-from marsha.llm import prettify_time_delta
+from marsha.utils import prettify_time_delta
 
 from mistletoe import Document, ast_renderer
 
@@ -42,7 +42,7 @@ for i in range(total_runs):
             run_stats_file = open('stats.md', 'r')
             run_stats = run_stats_file.read()
             run_stats_file.close()
-        except Exception as e:
+        except Exception:
             raise Exception('Error reading stats file. Maybe something went run while running Marsha and the stats were not generated?')
         try:
             ast = ast_renderer.get_ast(Document(run_stats))

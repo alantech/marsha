@@ -7,10 +7,10 @@ import time
 import traceback
 import sys
 
-from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files, prettify_time_delta
+from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
 from marsha.stats import MarshaStats
-from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree
+from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree, prettify_time_delta
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
