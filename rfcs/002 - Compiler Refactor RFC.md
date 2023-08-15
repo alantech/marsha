@@ -8,7 +8,7 @@
 
 ### Accepted
 
-YYYY-MM-DD
+2023-08-15
 
 #### Approvers
 
@@ -76,23 +76,23 @@ The solution we come up with needs to keep the complexity of all of these differ
 
 #### Proposal: Marsha as Extensions that append to lists of layers
 
-Taking a very rough inspiration from LLMs themselves, we'll have a singular kind of "transformer" that is the foundational piece of the compiler, and they will be organized into layers where each layer executes in parallel and their outputs are fed into the next layer, etc. Each logical feature will be an extension that concatenates its logic into the appropriate layers, with the "meaning" said layers being a convention per extension "group".
+Taking a very rough inspiration from LLMs themselves, we'll have a singular kind of "mapper" that is the foundational piece of the compiler, and they will be organized into layers where each layer executes in parallel and their outputs are fed into the next layer, etc. Each logical feature will be an extension that concatenates its logic into the appropriate layers, with the "meaning" said layers being a convention per extension "group".
 
 Now working backwards, an Extension Group is a collection of extensions that all declare membership of a particular group name. Extensions won't be allowed to mix between groups to reduce the complexity involved, and because an Extension Group declares how many layers exist and their input and output formats (most layers will likely be lists of some class type, but the input for the first layer will be `None` and use the quasi-global configuration data to set itself up and the output of the last layer can only be `None` or `str`).
 
 A new extension that wishes to insert a special layer between existing layers would have to fork the entire extension group project, which seems wasteful, but as long as the layer definitions are "cheap" (simple and easy to read), just forking an extension group under a new name shouldn't be too big of a burden.
 
-The "transformer" logic in each layer will consist of just the #2 operation type listed above: `input -> transform -> check and maybe retry -> output or error`, as the third step becomes a simple no-op in other cases, it could have a default `f(a) = a`-type implementation and made an optional element of that class.
+The "mapper" logic in each layer will consist of just the #2 operation type listed above: `input -> transform -> check and maybe retry -> output or error`, as the third step becomes a simple no-op in other cases, it could have a default `f(a) = a`-type implementation and made an optional element of that class.
 
-Yes, class. The use of the word "transformer" here could be confusing, so this part is definitely subject to change, but there'd be a `BaseTransformer` class that must be extended and where you must implement the `transform` method, but the `check` method could use the default implementation. Both of these methods are `async` so they can do whatever you want within them.
+Yes, class. The use of the word "mapper" here could be confusing, so this part is definitely subject to change, but there'd be a `BaseMapper` class that must be extended and where you must implement the `transform` method, but the `check` method could use the default implementation. Both of these methods are `async` so they can do whatever you want within them.
 
-And you could always Bring-Your-Own-LLM, but it would probably be best if the Marsha project itself maintained a collection of `*Transformer` classes that automatically make LLMs like ChatGPT, LLamaV2, WizardCoder, etc, and other useful tools like Markdown AST, Python venv projects, etc, easily defineable with as few lines of code as possible. Each transformer is given the entirety of the prior layer's output, which will usually be a list of outputs when there are multiple transformers in a layer, but would be without the list wrapper if there is only one transformer in that layer (so for instance, loading the `*.mrsh` file could be a transformer in its own layer all by itself that loads and parses the AST, and then feeds that AST root node to the next layer that does the code and test LLM operations in parallel for ChatGPT, while Llama V2 locally could make that a singular transformer so they run sequentially).
+And you could always Bring-Your-Own-LLM, but it would probably be best if the Marsha project itself maintained a collection of `*Mapper` classes that automatically make LLMs like ChatGPT, LLamaV2, WizardCoder, etc, and other useful tools like Markdown AST, Python venv projects, etc, easily defineable with as few lines of code as possible. Each mapper is given the entirety of the prior layer's output, which will usually be a list of outputs when there are multiple mapper in a layer, but would be without the list wrapper if there is only one mapper in that layer (so for instance, loading the `*.mrsh` file could be a mapper in its own layer all by itself that loads and parses the AST, and then feeds that AST root node to the next layer that does the code and test LLM operations in parallel for ChatGPT, while Llama V2 locally could make that a singular mapper so they run sequentially).
 
-Even though the transformers run in parallel, we'll use asyncio's `gather` mechanism to make sure they stay in the "expected" order.
+Even though the mappers run in parallel, we'll use asyncio's `gather` mechanism to make sure they stay in the "expected" order.
 
-You could conceivably just have the Extension Group directly place the transformers in the "right" places, but that means there'd be no way for a user to add or remove "optional" or "recommended" extensions, so there'd be zero configurability for them (and therefore *all* experimentation with how Marsha should work would require forking the extension group every time). If instead there are "required", "recommended", and "optional" extensions within an extension group, the user could manually disable recommended extensions or manually enable optional extensions to configure the behavior. Then the Extension Group defines the order in which each extension appends its transformers to the different layers, and each Extension defines which layers each transformer belongs to. This should allow experimentation with new syntax that is incompatible with existing syntax by marking the incompatible syntax a recommended extension and the new syntax an optional extension, and a savvy user could swap them out if desired.
+You could conceivably just have the Extension Group directly place the amppers in the "right" places, but that means there'd be no way for a user to add or remove "optional" or "recommended" extensions, so there'd be zero configurability for them (and therefore *all* experimentation with how Marsha should work would require forking the extension group every time). If instead there are "required", "recommended", and "optional" extensions within an extension group, the user could manually disable recommended extensions or manually enable optional extensions to configure the behavior. Then the Extension Group defines the order in which each extension appends its mappers to the different layers, and each Extension defines which layers each transformer belongs to. This should allow experimentation with new syntax that is incompatible with existing syntax by marking the incompatible syntax a recommended extension and the new syntax an optional extension, and a savvy user could swap them out if desired.
 
-These concepts would be baked into `Extension` and `ExtensionGroup` classes that would force the desired organization onto the code, and they, along with the `*Transformer`s could be put together into a Python module (or just a singular `*.py` file) and then [dynamically imported by Marsha](https://docs.python.org/3/library/importlib.html#module-importlib) so they could live outside of the codebase.
+These concepts would be baked into `Extension` and `ExtensionGroup` classes that would force the desired organization onto the code, and they, along with the `*Mapper`s could be put together into a Python module (or just a singular `*.py` file) and then [dynamically imported by Marsha](https://docs.python.org/3/library/importlib.html#module-importlib) so they could live outside of the codebase.
 
 If the user does not specify an extension group, it would be assumed to use the default extension group that will be baked into Marsha (or later, if/when we add decompilation/debugging/etc functionality, it would depend on the subcommand called, like `marsha compile ...`, `marsha decompile ...`, `marsha debug ...`, etc). Similarly, if no extension manipulation is requested by the user, the required and recommended extensions would be loaded (otherwise, the set of extensions to load will be modified based on the inclusion/exclusion lists).
 
@@ -102,9 +102,9 @@ This gives us a fairly flexible control over how Marsha works and how it can be 
 
 #### Marsha as fully undirected graph of transformers
 
-Here, each transformer simply declares a named source for its input and a named output destination, with `START` and `END` being special nodes. This is very similar in spirit to [queue-flow](https://dfellis.github.io/queue-flow/) that I wrote so many years ago, and could even handle multiple nodes reaching `END` at different times by using introspection on the event loop to decide when to actually quit.
+Here, each mapper simply declares a named source for its input and a named output destination, with `START` and `END` being special nodes. This is very similar in spirit to [queue-flow](https://dfellis.github.io/queue-flow/) that I wrote so many years ago, and could even handle multiple nodes reaching `END` at different times by using introspection on the event loop to decide when to actually quit.
 
-It was rejected because while you can write pretty succinct code that efficiently handles sync or async functions, the named queues make it difficult/impossible to have runtime-configurable extension configuration with it, and it doesn't help the logical grouping of syntactic elements that are spread across multiple transformers throughout the graph, so readability would only be marginally improved. (That last part was pretty general to queue-flow -- I tended to get "write-only" code out of it that was fast, efficient, and near impossible for other developers to read, because the connections between the named queues were often spread across files and hard to follow.)
+It was rejected because while you can write pretty succinct code that efficiently handles sync or async functions, the named queues make it difficult/impossible to have runtime-configurable extension configuration with it, and it doesn't help the logical grouping of syntactic elements that are spread across multiple mappers throughout the graph, so readability would only be marginally improved. (That last part was pretty general to queue-flow -- I tended to get "write-only" code out of it that was fast, efficient, and near impossible for other developers to read, because the connections between the named queues were often spread across files and hard to follow.)
 
 #### Marsha as database and trigger-transformers
 
@@ -132,10 +132,10 @@ Absolutely everything in the codebase, but we could probably do this piecemeal, 
 
 ## Expected Timeline
 
-1. Create `BaseTransformer`, `ChatGPTTransformer`, `MarkdownASTTransformer`, etc classes
+1. Create `BaseMapper`, `ChatGPTMapper`, `MarkdownASTMapper`, etc classes
 2. Rewrite the Marsha stages with these classes.
 3. Create the `Extension` and `ExtensionGroup` classes (and/or better name for `ExtensionGroup`?)
 4. Rewrite the pipeline to use these classes with a hardwired instantiation. (Temporarily dropping `--quick-and-dirty` and potentially other flags)
 5. Convert the hardwired instantiation into a default that is used if the user doesn't provide an `ExtensionGroup` and extension configuration options, but use the specified `ExtensionGroup` if defined.
 6. Restore `--quick-and-dirty` (and potentially others) as an `ExtensionGroup`
-7. Start implementing `Llama2Transformer`, `WizardCoderTransformer`, etc for some experiments, DB-specific ones for others, etc.
+7. Start implementing `Llama2Mapper`, `WizardCoderMapper`, etc for some experiments, DB-specific ones for others, etc.
