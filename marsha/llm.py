@@ -9,7 +9,6 @@ import sys
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
-from marsha.stats import MarshaStats
 from marsha.utils import read_file
 from marsha.chatgptmapper import ChatGPTMapper
 
@@ -24,7 +23,7 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
-async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats):
+async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int):
     gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
@@ -33,12 +32,10 @@ The description must be precise enough to determine what to do.
 The examples must be complete enough to likely catch all edge cases.
 If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
 Your answer is consumed by project management software, so only respond with Y for yes or N for no.
-''', max_tokens=1, n_results=n_results)
+''', max_tokens=1, n_results=n_results, stats_stage='first_stage')
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
-    # TODO: Revive stats
-    # stats.stage_update('first_stage', [res])
     if any([True if opinion == 'N' else False for opinion in gpt_opinions]):
         return False
     return True
@@ -53,19 +50,17 @@ The examples must be complete enough to likely catch all edge cases.
 You are writing a few paragraphs gently explaining the deficiencies in the task definition they have written, not coming up with examples assuming what they might have wanted, since that isn't clear in the first place, just why what they have provided is not precise enough.
 In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The mistakes simply are, and that they made them isn't a problem, just that they should learn from them.
 Do not include a "hello" or a "regards", etc, as your response is being attached to a code review system.
-''')
+''', stats_stage='first_stage')
 
 
-async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], stats: MarshaStats):
+async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str]):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     improvements = await gpt_improve.run(marsha_for_code_llm)
-    # TODO: Revive stats
-    # stats.stage_update('first_stage', [res])
     print(improvements)
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, stats: MarshaStats, retries: int = 3, debug: bool = False):
+async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, retries: int = 3, debug: bool = False):
     marsha_for_code_llm = format_marsha_for_llm(
         marsha_filename, functions + void_funcs, defined_types)
     gpt_gen_code = ChatGPTMapper(f'''You are a senior software engineer assigned to write Python 3 functions.
@@ -99,7 +94,7 @@ The desired response must look like the following:
 <dependencies needed>
 ```
 
-''', n_results=n_results)
+''', n_results=n_results, stats_stage='first_stage')
     marsha_for_test_llm = format_marsha_for_llm(
         marsha_filename, functions, defined_types)
     gpt_gen_test = ChatGPTMapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
@@ -125,7 +120,7 @@ The desired response must look like the following:
 <generated code>
 ```
 
-''', n_results=n_results)
+''', n_results=n_results, stats_stage='first_stage')
     if debug:
         print(f'''marsha_for_llm =
     ---- start ----
@@ -133,8 +128,6 @@ The desired response must look like the following:
     ---- end ----''')
 
     reses = await asyncio.gather(gpt_gen_code.run(marsha_for_code_llm), gpt_gen_test.run(marsha_for_test_llm))
-    # TODO: Revive stats
-    # stats.stage_update('first_stage', reses)
     # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
     # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
     try:
@@ -171,12 +164,12 @@ The desired response must look like the following:
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, defined_types, void_funcs, n_results, stats, retries - 1, debug)
+            return await gpt_func_to_python(marsha_filename, functions, defined_types, void_funcs, n_results, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', marsha_filename)
 
 
-async def fix_file(marsha_filename: str, filename: str, lint_text: str, stats: MarshaStats, retries: int = 3, debug: bool = False):
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
     code = read_file(filename)
     gpt_fix = ChatGPTMapper(f'''You are a senior software engineer working with Python 3.
 You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
@@ -196,7 +189,7 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''')
+''', stats_stage='second_stage')
     fixed_code = await gpt_fix.run(f'''# {filename}
 
 ```py
@@ -208,8 +201,6 @@ The desired response must look like the following:
 ```
 {lint_text}
 ```''')
-    # TODO: Revive stats
-    # stats.stage_update('second_stage', [res])
     # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
     # try again (or fully error out, for now)
     try:
@@ -221,12 +212,12 @@ The desired response must look like the following:
         write_files_from_markdown(fixed_code)
     except Exception:
         if retries > 0:
-            return await fix_file(marsha_filename, filename, lint_text, stats, retries - 1, debug)
+            return await fix_file(marsha_filename, filename, lint_text, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: MarshaStats, max_depth: int = 4, debug: bool = False):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     options = parse_options()
@@ -322,10 +313,10 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], stats: Mars
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
             jobs.append(fix_file(marsha_filename, file,
-                        lint_text, stats, debug=debug))
+                        lint_text, debug=debug))
     await asyncio.gather(*jobs)
 
-    await lint_and_fix_files(marsha_filename, files, stats, max_depth - 1, debug)
+    await lint_and_fix_files(marsha_filename, files, max_depth - 1, debug)
 
 
 async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, str]:
@@ -345,7 +336,7 @@ async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, s
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], stats: MarshaStats, retries: int = 4, debug: bool = False):
+async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], retries: int = 4, debug: bool = False):
     break_line = '\n'
     if retries == 0:
         raise Exception('Failed to fix code', marsha_filename)
@@ -449,7 +440,7 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''', model='gpt-4')
+''', model='gpt-4', stats_stage='third_stage')
         fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
 
 {f"""## Do not test the following functions:
@@ -477,8 +468,6 @@ The desired response must look like the following:
 # Test Results
 
 {test_results}''')
-        # TODO: Revive stats
-        # stats.stage_update('third_stage', [res])
         # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
         # try again (or fully error out, for now)
         try:
@@ -505,6 +494,6 @@ The desired response must look like the following:
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
-        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, retries - 1, debug)
+        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, retries - 1, debug)

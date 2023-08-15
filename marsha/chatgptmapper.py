@@ -2,6 +2,7 @@ import openai
 import time
 
 from marsha.basemapper import BaseMapper
+from marsha.stats import stats
 from marsha.utils import prettify_time_delta
 
 # Get time at startup to make human legible "start times" in the logs
@@ -39,13 +40,14 @@ async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_res
 class ChatGPTMapper(BaseMapper):
     """ChatGPT-based mapper class"""
 
-    def __init__(self, system, model='gpt-3.5-turbo', max_tokens=None, max_retries=3, n_results=1):
+    def __init__(self, system, model='gpt-3.5-turbo', max_tokens=None, max_retries=3, n_results=1, stats_stage=None):
         BaseMapper.__init__(self)
         self.system = system
         self.model = model
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.n_results = n_results
+        self.stats_stage = stats_stage
 
     async def transform(self, user_request):
         query_obj = {
@@ -60,5 +62,8 @@ class ChatGPTMapper(BaseMapper):
         if self.max_tokens is not None:
             query_obj['max_tokens'] = self.max_tokens
         res = await retry_chat_completion(query_obj, self.model, self.max_retries, self.n_results)
+
+        if self.stats_stage is not None:
+            stats.stage_update(self.stats_stage, [res])
 
         return [choice.message.content for choice in res.choices] if self.n_results > 1 else res.choices[0].message.content

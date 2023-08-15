@@ -9,7 +9,7 @@ import sys
 
 from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files
 from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
-from marsha.stats import MarshaStats
+from marsha.stats import stats
 from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree, prettify_time_delta
 
 # Set up OpenAI
@@ -40,7 +40,6 @@ args = parser.parse_args()
 
 async def main():
     t1 = time.time()
-    stats = MarshaStats()
     input_file = args.source
     # Name without extension
     marsha_file_dirname = os.path.dirname(input_file)
@@ -66,7 +65,7 @@ async def main():
         # First stage: generate code for functions and classes
         try:
             mds = await generate_python_code(
-                marsha_filename, functions, types_defined, void_funcs, n_results, debug, stats)
+                marsha_filename, functions, types_defined, void_funcs, n_results, debug)
         except Exception:
             continue
         # Early exit if quick and dirty
@@ -94,7 +93,7 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, stats, debug), name=file_group[0]))
+                review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, debug), name=file_group[0]))
         try:
             done_task_name = await run_parallel_tasks(tasks)
             print('Writing generated code to files...')
@@ -140,16 +139,16 @@ async def main():
         f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
 
 
-async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool, stats: MarshaStats) -> list[str]:
+async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
     mds = None
     try:
         if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats):
-                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs, stats)
+            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results):
+                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs)
                 sys.exit(1)
-        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, stats, debug=debug)
+        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, debug=debug)
     except Exception as e:
         print('First stage failure')
         print(e)
@@ -188,11 +187,11 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     return types_defined
 
 
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], stats: MarshaStats, debug: bool = False):
+async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
-        await lint_and_fix_files(marsha_filename, files, stats, debug=debug)
+        await lint_and_fix_files(marsha_filename, files, debug=debug)
     except Exception as e:
         print('Second stage failure')
         print(e)
@@ -207,7 +206,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, stats, debug=debug)
+        await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)
