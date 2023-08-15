@@ -100,7 +100,7 @@ This gives us a fairly flexible control over how Marsha works and how it can be 
 
 ### Alternatives Considered
 
-#### Marsha as fully undirected graph of transformers
+#### Marsha as fully undirected graph of mappers
 
 Here, each mapper simply declares a named source for its input and a named output destination, with `START` and `END` being special nodes. This is very similar in spirit to [queue-flow](https://dfellis.github.io/queue-flow/) that I wrote so many years ago, and could even handle multiple nodes reaching `END` at different times by using introspection on the event loop to decide when to actually quit.
 
