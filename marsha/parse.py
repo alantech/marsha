@@ -3,6 +3,7 @@ import re
 
 from mistletoe import Document, ast_renderer
 
+from marsha.meta import MarshaMeta
 from marsha.utils import write_file
 
 
@@ -70,10 +71,10 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_types: list[str] = None):
+def format_marsha_for_llm(meta: MarshaMeta):
     break_line = '\n'
-    res = [f'# Requirements for file `{marsha_filename}`']
-    for func in functions:
+    res = [f'# Requirements for file `{meta.filename}`']
+    for func in meta.functions + meta.void_funcs:
         ast = ast_renderer.get_ast(Document(func))
         if ast['children'][0]['type'] != 'Heading':
             raise Exception('Invalid Marsha function')
@@ -130,9 +131,9 @@ def format_marsha_for_llm(marsha_filename: str, functions: list[str], defined_ty
 {reqs}""" if len(reqs) > 0 else ''}
 '''
         res.append(fn_def)
-    if defined_types is not None:
+    if meta.types is not None:
         res.append('## Convert the following type into classes')
-        for defined_type in defined_types:
+        for defined_type in meta.types:
             type_def = f'''
 ##{defined_type}
 '''
