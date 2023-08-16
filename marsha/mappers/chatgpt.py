@@ -1,7 +1,7 @@
 import openai
 import time
 
-from marsha.basemapper import BaseMapper
+from marsha.mappers.base import BaseMapper
 from marsha.stats import stats
 from marsha.utils import prettify_time_delta
 

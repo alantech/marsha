@@ -5,13 +5,12 @@ import openai
 import tempfile
 import time
 import traceback
-import sys
 
-from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files
+from marsha.llm import generate_python_code, review_and_fix
 from marsha.meta import MarshaMeta
 from marsha.parse import write_files_from_markdown
 from marsha.stats import stats
-from marsha.utils import read_file, autoformat_files, copy_file, add_helper, copy_tree, prettify_time_delta
+from marsha.utils import read_file, copy_file, add_helper, copy_tree, prettify_time_delta
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -57,7 +56,7 @@ async def main():
         attempts = attempts - 1
         # First stage: generate code for functions and classes
         try:
-            mds = await generate_python_code(meta, n_results, debug)
+            mds = await generate_python_code(args, meta, n_results, debug)
         except Exception:
             continue
         # Early exit if quick and dirty
@@ -85,7 +84,7 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(meta, file_group, debug), name=file_group[0]))
+                review_and_fix(args, meta, file_group, debug), name=file_group[0]))
         try:
             done_task_name = await run_parallel_tasks(tasks)
             print('Writing generated code to files...')
@@ -129,68 +128,6 @@ async def main():
         stats.to_file()
     print(
         f'{meta.filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
-
-
-async def generate_python_code(meta: MarshaMeta, n_results: int, debug: bool) -> list[str]:
-    t1 = time.time()
-    print('Generating Python code...')
-    mds = None
-    try:
-        if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(meta, n_results):
-                await gpt_improve_func(meta)
-                sys.exit(1)
-        mds = await gpt_func_to_python(meta, n_results, debug=debug)
-    except Exception as e:
-        print('First stage failure')
-        print(e)
-        if debug:
-            traceback.print_tb(e.__traceback__)
-        print('Retrying...')
-        raise e
-    finally:
-        t2 = time.time()
-        stats.first_stage.total_time = prettify_time_delta(
-            t2 - t1)
-    return mds
-
-
-async def review_and_fix(meta: MarshaMeta, files: list[str], debug: bool = False):
-    t_ssi = time.time()
-    print('Parsing generated code...')
-    try:
-        await lint_and_fix_files(meta.filename, files, debug=debug)
-    except Exception as e:
-        print('Second stage failure')
-        print(e)
-        raise e
-    finally:
-        t_ssii = time.time()
-        stats.second_stage.total_time = prettify_time_delta(
-            t_ssii - t_ssi)
-    if args.debug:
-        for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
-    t_tsi = time.time()
-    print('Verifying and correcting generated code...')
-    try:
-        await test_and_fix_files(meta, files, debug=debug)
-    except Exception as e:
-        print('Third stage failure')
-        print(e)
-        raise e
-    finally:
-        t_tsii = time.time()
-        stats.third_stage.total_time = prettify_time_delta(
-            t_tsii - t_tsi)
-    if args.debug:
-        for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
-    print('Formatting code...')
-    autoformat_files(files)
-    if args.debug:
-        for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
 
 
 async def run_parallel_tasks(tasks: list) -> str:
