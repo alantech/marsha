@@ -8,9 +8,10 @@ import traceback
 import sys
 
 from marsha.llm import gpt_can_func_python, gpt_improve_func, gpt_func_to_python, lint_and_fix_files, test_and_fix_files
-from marsha.parse import extract_functions_and_types, extract_type_name, write_files_from_markdown, is_defined_from_file, extract_type_filename
+from marsha.meta import MarshaMeta
+from marsha.parse import write_files_from_markdown
 from marsha.stats import stats
-from marsha.utils import read_file, autoformat_files, copy_file, get_filename_from_path, add_helper, copy_tree, prettify_time_delta
+from marsha.utils import read_file, autoformat_files, copy_file, add_helper, copy_tree, prettify_time_delta
 
 # Set up OpenAI
 openai.organization = os.getenv('OPENAI_ORG')
@@ -42,16 +43,8 @@ async def main():
     t1 = time.time()
     input_file = args.source
     # Name without extension
-    marsha_file_dirname = os.path.dirname(input_file)
-    marsha_filename = get_filename_from_path(input_file)
-    marsha_file_content = read_file(input_file)
-    functions, types, void_funcs = extract_functions_and_types(
-        marsha_file_content)
-    types_defined = None
-    # Pre-process types in case we need to open a file to get the type definition
-    if len(types) > 0:
-        types_defined = await process_types(types, marsha_file_dirname)
-    print(f'Compiling functions for {marsha_filename}...')
+    meta = await MarshaMeta(input_file).populate()
+    print(f'Compiling functions for {meta.filename}...')
     quick_and_dirty = args.quick_and_dirty
     debug = args.debug
     should_write_stats = args.stats
@@ -64,8 +57,7 @@ async def main():
         attempts = attempts - 1
         # First stage: generate code for functions and classes
         try:
-            mds = await generate_python_code(
-                marsha_filename, functions, types_defined, void_funcs, n_results, debug)
+            mds = await generate_python_code(meta, n_results, debug)
         except Exception:
             continue
         # Early exit if quick and dirty
@@ -81,7 +73,7 @@ async def main():
         for idx, md in enumerate(mds):
             print('Writing generated code to temporary files...')
             tmpdir = tempfile.TemporaryDirectory(
-                suffix=f'_-_{marsha_filename}_{idx}')
+                suffix=f'_-_{meta.filename}_{idx}')
             tmp_directories.append(tmpdir)
             file_groups = file_groups + \
                 [write_files_from_markdown(
@@ -93,16 +85,16 @@ async def main():
         tasks = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
-                review_and_fix(marsha_filename, file_group, functions, types_defined, void_funcs, debug), name=file_group[0]))
+                review_and_fix(meta, file_group, debug), name=file_group[0]))
         try:
             done_task_name = await run_parallel_tasks(tasks)
             print('Writing generated code to files...')
             filename = done_task_name
-            copy_file(filename, f'{marsha_filename}.py')
+            copy_file(filename, f'{meta.filename}.py')
             if not args.exclude_main_helper:
-                add_helper(f'{marsha_filename}.py')
+                add_helper(f'{meta.filename}.py')
             test_filename = filename.replace('.py', '_test.py')
-            copy_file(test_filename, f'{marsha_filename}_test.py')
+            copy_file(test_filename, f'{meta.filename}_test.py')
             directory = os.path.dirname(filename)
             requirements_filename = os.path.join(
                 directory, 'requirements.txt')
@@ -130,25 +122,25 @@ async def main():
         if should_write_stats:
             stats.to_file()
         raise Exception(
-            f'Failed to generate working code for {marsha_filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
+            f'Failed to generate working code for {meta.filename}. Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
     t2 = time.time()
     stats.aggregate(prettify_time_delta(t2 - t1), args.attempts - attempts + 1)
     if should_write_stats:
         stats.to_file()
     print(
-        f'{marsha_filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
+        f'{meta.filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
 
 
-async def generate_python_code(marsha_filename: str, functions: list[str], types_defined: list[str], void_funcs: list[str], n_results: int, debug: bool) -> list[str]:
+async def generate_python_code(meta: MarshaMeta, n_results: int, debug: bool) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
     mds = None
     try:
         if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(marsha_filename, functions, types_defined, void_funcs, n_results):
-                await gpt_improve_func(marsha_filename, functions, types_defined, void_funcs)
+            if not await gpt_can_func_python(meta, n_results):
+                await gpt_improve_func(meta)
                 sys.exit(1)
-        mds = await gpt_func_to_python(marsha_filename, functions, types_defined, void_funcs, n_results, debug=debug)
+        mds = await gpt_func_to_python(meta, n_results, debug=debug)
     except Exception as e:
         print('First stage failure')
         print(e)
@@ -163,35 +155,11 @@ async def generate_python_code(marsha_filename: str, functions: list[str], types
     return mds
 
 
-async def process_types(raw_types: list[str], dirname: str) -> list[str]:
-    types_defined = []
-    for raw_type in raw_types:
-        type_name = extract_type_name(raw_type)
-        # If type is defined from a file, read the file
-        if is_defined_from_file(raw_type):
-            print('Reading type from file...')
-            filename = extract_type_filename(raw_type)
-            full_path = f'{dirname}/{filename}'
-            try:
-                type_data = read_file(full_path)
-            except Exception as e:
-                err = f'Failed to read file: {full_path}'
-                if args.debug:
-                    print(err)
-                    print(e)
-                raise Exception(err)
-            raw_type = f'''# type {type_name}
-{type_data}
-            '''
-        types_defined.append(raw_type)
-    return types_defined
-
-
-async def review_and_fix(marsha_filename: str, files: list[str], functions: list[str], defined_types: list[str], void_functions: list[str], debug: bool = False):
+async def review_and_fix(meta: MarshaMeta, files: list[str], debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
     try:
-        await lint_and_fix_files(marsha_filename, files, debug=debug)
+        await lint_and_fix_files(meta.filename, files, debug=debug)
     except Exception as e:
         print('Second stage failure')
         print(e)
@@ -206,7 +174,7 @@ async def review_and_fix(marsha_filename: str, files: list[str], functions: list
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, debug=debug)
+        await test_and_fix_files(meta, files, debug=debug)
     except Exception as e:
         print('Third stage failure')
         print(e)

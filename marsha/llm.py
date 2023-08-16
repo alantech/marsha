@@ -8,6 +8,7 @@ import sys
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
+from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.utils import read_file
 from marsha.chatgptmapper import ChatGPTMapper
@@ -23,7 +24,7 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
-async def gpt_can_func_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int):
+async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
     gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
@@ -33,8 +34,7 @@ The examples must be complete enough to likely catch all edge cases.
 If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
 Your answer is consumed by project management software, so only respond with Y for yes or N for no.
 ''', max_tokens=1, n_results=n_results, stats_stage='first_stage')
-    marsha_for_code_llm = format_marsha_for_llm(
-        marsha_filename, functions + void_funcs, defined_types)
+    marsha_for_code_llm = format_marsha_for_llm(meta)
     gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
     if any([True if opinion == 'N' else False for opinion in gpt_opinions]):
         return False
@@ -53,21 +53,19 @@ Do not include a "hello" or a "regards", etc, as your response is being attached
 ''', stats_stage='first_stage')
 
 
-async def gpt_improve_func(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str]):
-    marsha_for_code_llm = format_marsha_for_llm(
-        marsha_filename, functions + void_funcs, defined_types)
+async def gpt_improve_func(meta: MarshaMeta):
+    marsha_for_code_llm = format_marsha_for_llm(meta)
     improvements = await gpt_improve.run(marsha_for_code_llm)
     print(improvements)
 
 
-async def gpt_func_to_python(marsha_filename: str, functions: list[str], defined_types: list[str], void_funcs: list[str], n_results: int, retries: int = 3, debug: bool = False):
-    marsha_for_code_llm = format_marsha_for_llm(
-        marsha_filename, functions + void_funcs, defined_types)
+async def gpt_func_to_python(meta: MarshaMeta, n_results: int, retries: int = 3, debug: bool = False):
+    marsha_for_code_llm = format_marsha_for_llm(meta)
     gpt_gen_code = ChatGPTMapper(f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
-The filename should exactly match the name `{marsha_filename}.py`.
+The filename should exactly match the name `{meta.filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
@@ -75,14 +73,14 @@ If need to convert `type` to Python classes, you will receive a markdown where t
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
-The first section header must be the filename `{marsha_filename}.py`.
+The first section header must be the filename `{meta.filename}.py`.
 The content of the first section must be a python code block with the generated code.
 The second section header must be the filename `requirements.txt`.
 The content of the second section must be a text code block with the generated code.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
-# {marsha_filename}.py
+# {meta.filename}.py
 
 ```py
 <generated code>
@@ -95,13 +93,12 @@ The desired response must look like the following:
 ```
 
 ''', n_results=n_results, stats_stage='first_stage')
-    marsha_for_test_llm = format_marsha_for_llm(
-        marsha_filename, functions, defined_types)
+    marsha_for_test_llm = format_marsha_for_llm(meta)
     gpt_gen_test = ChatGPTMapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
-The filename should exactly match the name `{marsha_filename}_test.py`.
+The filename should exactly match the name `{meta.filename}_test.py`.
 Unknown imports might come from the file where the function is defined, or from the standard library.
 If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
 Make sure to follow PEP8 guidelines.
@@ -109,12 +106,12 @@ Make sure to include all needed standard Python libraries imports.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
-The first section header must be the filename `{marsha_filename}_test.py`.
+The first section header must be the filename `{meta.filename}_test.py`.
 The content of the first section must be a python code block with the generated code.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
-# {marsha_filename}_test.py
+# {meta.filename}_test.py
 
 ```py
 <generated code>
@@ -150,7 +147,7 @@ The desired response must look like the following:
             # ```py
             # <insert code here>
             # ```
-            if validate_first_stage_markdown(doc, marsha_filename):
+            if validate_first_stage_markdown(doc, meta.filename):
                 mds.append(doc)
             else:
                 if debug:
@@ -164,9 +161,9 @@ The desired response must look like the following:
             print(
                 f'Failed to parse doc. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(marsha_filename, functions, defined_types, void_funcs, n_results, retries - 1, debug)
+            return await gpt_func_to_python(meta, n_results, retries - 1, debug)
         else:
-            raise Exception('Failed to generate code', marsha_filename)
+            raise Exception('Failed to generate code', meta.filename)
 
 
 async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
@@ -336,15 +333,15 @@ async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, s
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
-async def test_and_fix_files(marsha_filename: str, functions: list[str], defined_types: list[str], void_functions: list[str], files: list[str], retries: int = 4, debug: bool = False):
+async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False):
     break_line = '\n'
     if retries == 0:
-        raise Exception('Failed to fix code', marsha_filename)
+        raise Exception('Failed to fix code', meta.filename)
     # There should only be two files, the test file and the code file
     test_file = [file for file in files if file.endswith(
-        f'{marsha_filename}_test.py')][0]
+        f'{meta.filename}_test.py')][0]
     code_file = [file for file in files if file.endswith(
-        f'{marsha_filename}.py')][0]
+        f'{meta.filename}.py')][0]
     req_files = [file for file in files if file.endswith('requirements.txt')]
     # Define virtual environment path
     code_file_abspath = os.path.abspath(code_file)
@@ -400,12 +397,12 @@ async def test_and_fix_files(marsha_filename: str, functions: list[str], defined
         code = read_file(code_file)
         requirements = read_file(req_file) if req_file is not None else None
         void_function_names = list(
-            map(lambda f: extract_func_name(f), void_functions))
+            map(lambda f: extract_func_name(f), meta.void_funcs))
         gpt_fix = ChatGPTMapper(f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
 You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Do not write new unit tests, just fix the existing ones.
-{f"Do not make any reference to the functions {', '.join(void_function_names)} in `{marsha_filename}_test.py`." if len(void_function_names) > 0 else ""}
+{f"Do not make any reference to the functions {', '.join(void_function_names)} in `{meta.filename}_test.py`." if len(void_function_names) > 0 else ""}
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
@@ -413,16 +410,16 @@ Generate `requirements.txt` file with all needed dependencies, do not add fixed 
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
-The first section header must be the filename `{marsha_filename}.py`.
+The first section header must be the filename `{meta.filename}.py`.
 The content of the first section must be a python code block with the generated code.
 The second section header must be the filename `requirements.txt`.
 The content of the second section must be a text code block with the generated code.
-The third section header must be the filename `{marsha_filename}_test.py`.
+The third section header must be the filename `{meta.filename}_test.py`.
 The content of the third section must be a python code block with the generated code.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
-# {marsha_filename}.py
+# {meta.filename}.py
 
 ```py
 <fixed code>
@@ -434,14 +431,14 @@ The desired response must look like the following:
 <dependencies needed>
 ```
 
-# {marsha_filename}_test.py
+# {meta.filename}_test.py
 
 ```py
 <fixed code>
 ```
 
 ''', model='gpt-4', stats_stage='third_stage')
-        fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(marsha_filename, functions + void_functions, defined_types)}
+        fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(meta)}
 
 {f"""## Do not test the following functions:
 
@@ -484,16 +481,16 @@ The desired response must look like the following:
             # ```py
             # <insert code here>
             # ```
-            if not validate_first_stage_markdown(fixed_code, marsha_filename):
+            if not validate_first_stage_markdown(fixed_code, meta.filename):
                 raise Exception('Invalid output format')
             subdir = '/'.join(code_file.split('/')[:-1])
             files = write_files_from_markdown(fixed_code, subdir=subdir)
         except Exception:
             if retries == 0:
-                raise Exception('Failed to fix code', marsha_filename)
+                raise Exception('Failed to fix code', meta.filename)
 
         # We figure out if this pass has succeeded by re-running the tests recursively, where it
         # ejects from the iteration if the tests pass
-        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, retries - 1, debug)
+        return await test_and_fix_files(meta, files, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
-        return await test_and_fix_files(marsha_filename, functions, defined_types, void_functions, files, retries - 1, debug)
+        return await test_and_fix_files(meta, files, retries - 1, debug)
