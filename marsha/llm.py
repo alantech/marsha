@@ -2,6 +2,8 @@ import asyncio
 from asyncio.subprocess import Process
 import os
 import platform
+import time
+import traceback
 import shutil
 import subprocess
 import sys
@@ -10,8 +12,9 @@ from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
-from marsha.utils import read_file
-from marsha.chatgptmapper import ChatGPTMapper
+from marsha.stats import stats
+from marsha.utils import read_file, autoformat_files, prettify_time_delta
+from marsha.mappers.chatgpt import ChatGPTMapper
 
 # PyInstaller creates a temp folder and stores path in _MEIPASS
 base_path = '.'
@@ -494,3 +497,65 @@ The desired response must look like the following:
         return await test_and_fix_files(meta, files, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(meta, files, retries - 1, debug)
+
+
+async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> list[str]:
+    t1 = time.time()
+    print('Generating Python code...')
+    mds = None
+    try:
+        if not args.exclude_sanity_check:
+            if not await gpt_can_func_python(meta, n_results):
+                await gpt_improve_func(meta)
+                sys.exit(1)
+        mds = await gpt_func_to_python(meta, n_results, debug=debug)
+    except Exception as e:
+        print('First stage failure')
+        print(e)
+        if debug:
+            traceback.print_tb(e.__traceback__)
+        print('Retrying...')
+        raise e
+    finally:
+        t2 = time.time()
+        stats.first_stage.total_time = prettify_time_delta(
+            t2 - t1)
+    return mds
+
+
+async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool = False):
+    t_ssi = time.time()
+    print('Parsing generated code...')
+    try:
+        await lint_and_fix_files(meta.filename, files, debug=debug)
+    except Exception as e:
+        print('Second stage failure')
+        print(e)
+        raise e
+    finally:
+        t_ssii = time.time()
+        stats.second_stage.total_time = prettify_time_delta(
+            t_ssii - t_ssi)
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n{read_file(file)}\n')
+    t_tsi = time.time()
+    print('Verifying and correcting generated code...')
+    try:
+        await test_and_fix_files(meta, files, debug=debug)
+    except Exception as e:
+        print('Third stage failure')
+        print(e)
+        raise e
+    finally:
+        t_tsii = time.time()
+        stats.third_stage.total_time = prettify_time_delta(
+            t_tsii - t_tsi)
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n{read_file(file)}\n')
+    print('Formatting code...')
+    autoformat_files(files)
+    if args.debug:
+        for file in files:
+            print(f'# {file}\n{read_file(file)}\n')
