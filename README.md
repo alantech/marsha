@@ -16,6 +16,8 @@ pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
 
+> See our [examples](./examples/) or take a look to our [`how-to` guides](./how-to/). On them, you can take a look at how to use marsha for different purposes, from creating just functions that can be imported and integrated with other scripts to how to use marsha to create a simple REST web server.
+
 ## Syntax
 
 The Marsha syntax looks a lot like markdown and is a mixture of English and mathematical notation. It has its own file format `.mrsh` that houses function definition(s). The syntax is subject to change as Marsha is currently in an alpha state. If you have a legitimate use case for Marsha, please let us know.
@@ -89,7 +91,7 @@ This function receives a list of EmployeesByDepartment and a list of DepartmentS
 
 The Marsha syntax is meant to be:
 - minimal and "obvious", but also discourage lax or incomplete information that could lead to unpredictable behavior
-- be mechanically parseable for syntax highlighting and quick feedback on correctness issues to the user
+- be mechanically parsable for syntax highlighting and quick feedback on correctness issues to the user
 - make it easy to define examples to reduce the probability of generating faulty code and allow generating tests that the application code can be tested against
 
 ## Compiler
@@ -165,7 +167,7 @@ options:
 * `params` are all non-option arguments provided, in order, to the function you are invoking.
 * `-j` and `-t` let you choose if the param(s) provided will be parsed as JSON or kept as plain text. By default it will opportunistically parse the arguments but if it fails will keep it as text
 * `-i`, `-f`, and `-o` let you choose how input and output is managed. By default inputs are the `params` arguments and the output is to `stdout`, but you can use `-i` to then ignore all `params` and treat `stdin` as the singular input param for your function. Similarly `-f` will do the same, but for the file you specify, and `-o` will write the result to a file you specify instead of to `stdout`.
-* `-s` Is a flag to instead run a simple REST server. Using this flag causes it to ignore all other flags. The various function names become `/func_name` endpoints that you can POST to and get a response body back. If you set the `Content-Type` header to `application/json` the input and output will be JSON, if not it will be plain text. If your function takes mutliple arguments, it *must* be called in JSON mode with the arguments each being an element of a top-level array.
+* `-s` Is a flag to instead run a simple REST server. Using this flag causes it to ignore all other flags. The various function names become `/func_name` endpoints that you can POST to and get a response body back. If you set the `Content-Type` header to `application/json` the input and output will be JSON, if not it will be plain text. If your function takes multiple arguments, it *must* be called in JSON mode with the arguments each being an element of a top-level array.
 
 ## Roadmap
 
@@ -179,7 +181,7 @@ options:
 - Edits to Marsha mutating existing Python code instead of regenerating
 - "Decompiler" from source code into Marsha syntax
 - "Debugger" meta mode to take existing Marsha definition and an example of an unexpected failure and recommend what to update with the Marsha definition.
-- Optmization "levels" (spend more time on more iterations with the LLM improving performance, security, etc)
+- Optimization "levels" (spend more time on more iterations with the LLM improving performance, security, etc)
 - Marsha GUI mode: visual editor baked into the compiler (eventually with the decompiler/debugger/etc features), and able to generate a GUI wrapper for generated code, enabling end-to-end non-terminal usage
 - Better support for a mixed environment (Marsha functions can be used by Python, but how to get Marsha to use hand-written Python functions)
 - Better "web scraping" behavior (LLM likes to assume the internet still looks like it did in November 2021, but HTML structure has often changed for the largest websites; automatically correcting that assumption would be nice)
