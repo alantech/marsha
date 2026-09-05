@@ -1,0 +1,14 @@
+#!/bin/sh
+# marsha launcher installed by `make install` (see marsha/Makefile).
+#
+# Runs the marsha package from the build virtualenv, passing all
+# arguments through. If the venv has moved, point MARSHA_VENV at it.
+venv="${MARSHA_VENV:-__MARSHA_VENV__}"
+
+if [ ! -x "$venv/bin/python" ]; then
+    echo "marsha: virtualenv not found at: $venv" >&2
+    echo "marsha: rebuild it with 'make ./venv' or set MARSHA_VENV to its location" >&2
+    exit 1
+fi
+
+exec "$venv/bin/python" -m marsha "$@"
