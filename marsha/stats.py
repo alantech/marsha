@@ -1,19 +1,21 @@
-import functools
-
 from marsha.utils import write_file
 
-# OpenAI pricing model.
-# Format: (tokens, price). Price per 1024 tokens.
+# Price per 1024 tokens (input, output), matched by longest model name prefix
 PRICING_MODEL = {
-    'gpt35': {
-        'in': [(4096, 0.0015), (16384, 0.002)],
-        'out': [(4096, 0.002), (16384, 0.004)]
-    },
-    'gpt4': {
-        'in': [(8192, 0.03), (32768, 0.06)],
-        'out': [(8192, 0.06), (32768, 0.12)]
-    }
+    'gpt-5-mini': (0.000244140625, 0.001953125),
+    'gpt-5-nano': (0.000048828125, 0.000390625),
+    'gpt-5': (0.001220703125, 0.009765625),
+    'gpt-4': (0.03, 0.06),
+    'gpt-3.5': (0.0015, 0.002),
 }
+
+
+def price_for(model):
+    best = None
+    for prefix in PRICING_MODEL:
+        if model.startswith(prefix) and (best is None or len(prefix) > len(best)):
+            best = prefix
+    return PRICING_MODEL[best] if best else (0.0, 0.0)
 
 
 class ModelStats:
@@ -31,8 +33,20 @@ class StageStats:
         self.name = name
         self.total_time = total_time
         self.total_calls = total_calls
-        self.gpt35 = ModelStats('gpt-3.5-turbo', 0, 0, 0, 0, 0)
-        self.gpt4 = ModelStats('gpt-4', 0, 0, 0, 0, 0)
+        self.models = {}
+
+    def update(self, res: list):
+        self.total_calls += len(res)
+        for r in res:
+            ms = self.models.get(r.model)
+            if ms is None:
+                ms = self.models[r.model] = ModelStats(r.model, 0, 0, 0, 0, 0)
+            in_price, out_price = price_for(r.model)
+            ms.input_tokens += r.usage.prompt_tokens
+            ms.input_cost += r.usage.prompt_tokens * in_price / 1024
+            ms.output_tokens += r.usage.completion_tokens
+            ms.output_cost += r.usage.completion_tokens * out_price / 1024
+            ms.total_cost = ms.input_cost + ms.output_cost
 
 
 class MarshaStats:
@@ -45,44 +59,21 @@ class MarshaStats:
         self.second_stage = StageStats('second_stage', 0, 0)
         self.third_stage = StageStats('third_stage', 0, 0)
 
+    @property
+    def stages(self):
+        return [self.first_stage, self.second_stage, self.third_stage]
+
+    def stage_update(self, stage: str, res: list):
+        stage_stats = getattr(self, stage, None)
+        if isinstance(stage_stats, StageStats):
+            stage_stats.update(res)
+
     def aggregate(self, total_time, attempts):
         self.total_time = total_time
         self.attempts = attempts
-        self.total_calls = self.first_stage.total_calls + \
-            self.second_stage.total_calls + self.third_stage.total_calls
-        self.total_cost = self.first_stage.gpt35.total_cost + self.first_stage.gpt4.total_cost + self.second_stage.gpt35.total_cost + \
-            self.second_stage.gpt4.total_cost + \
-            self.third_stage.gpt35.total_cost + self.third_stage.gpt4.total_cost
-
-    def stage_update(self, stage: str, res: list):
-        rsetattr(self, f'{stage}.total_calls', rgetattr(
-            self, f'{stage}.total_calls') + len(res))
-        for r in res:
-            model = 'gpt4' if r.model.startswith('gpt-4') else 'gpt35'
-            input_tokens = r.usage.prompt_tokens
-            rsetattr(self, f'{stage}.{model}.input_tokens', rgetattr(
-                self, f'{stage}.{model}.input_tokens') + input_tokens)
-            pricing = PRICING_MODEL[model]
-            # Calculate input cost based on context length
-            if (input_tokens <= pricing['in'][0][0]):
-                rsetattr(self, f'{stage}.{model}.input_cost', rgetattr(
-                    self, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][0][1] / 1024)
-            elif (input_tokens <= pricing['in'][1][0]):
-                rsetattr(self, f'{stage}.{model}.input_cost', rgetattr(
-                    self, f'{stage}.{model}.input_cost') + input_tokens * pricing['in'][1][1] / 1024)
-            output_tokens = r.usage.completion_tokens
-            rsetattr(self, f'{stage}.{model}.output_tokens', rgetattr(
-                self, f'{stage}.{model}.output_tokens') + output_tokens)
-            # Calculate output cost based on context length
-            if (output_tokens <= pricing['out'][0][0]):
-                rsetattr(self, f'{stage}.{model}.output_cost', rgetattr(
-                    self, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][0][1] / 1024)
-            elif (output_tokens <= pricing['out'][1][0]):
-                rsetattr(self, f'{stage}.{model}.output_cost', rgetattr(
-                    self, f'{stage}.{model}.output_cost') + output_tokens * pricing['out'][1][1] / 1024)
-            # Calculate total cost
-            rsetattr(self, f'{stage}.{model}.total_cost', rgetattr(self, f'{stage}.{model}.total_cost') +
-                     rgetattr(self, f'{stage}.{model}.input_cost') + rgetattr(self, f'{stage}.{model}.output_cost'))
+        self.total_calls = sum(stage.total_calls for stage in self.stages)
+        self.total_cost = sum(
+            ms.total_cost for stage in self.stages for ms in stage.models.values())
 
     def to_file(self, filename: str = 'stats.md'):
         write_file(filename, content=self.__str__())
@@ -91,45 +82,29 @@ class MarshaStats:
         return self.__str__()
 
     def __str__(self):
-        return f'''# Stats
-
-## First stage
-Total time: {self.first_stage.total_time}
-Total calls: {self.first_stage.total_calls}
-Total cost: {self.first_stage.gpt35.total_cost + self.first_stage.gpt4.total_cost}
-
-## Second stage
-Total time: {self.second_stage.total_time}
-Total calls: {self.second_stage.total_calls}
-Total cost: {self.second_stage.gpt35.total_cost + self.second_stage.gpt4.total_cost}
-
-## Third stage
-Total time: {self.third_stage.total_time}
-Total calls: {self.third_stage.total_calls}
-Total cost: {self.third_stage.gpt35.total_cost + self.third_stage.gpt4.total_cost}
-
-## Total
-Total time: {self.total_time}
-Total calls: {self.total_calls}
-Attempts: {self.attempts}
-Total cost: {self.total_cost}
-'''
-
-
-"""
-Source: https://stackoverflow.com/questions/31174295/getattr-and-setattr-on-nested-subobjects-chained-properties
-"""
-
-
-def rsetattr(obj, attr, val):
-    pre, _, post = attr.rpartition('.')
-    return setattr(rgetattr(obj, pre) if pre else obj, post, val)
-
-
-def rgetattr(obj, attr, *args):
-    def _getattr(obj, attr):
-        return getattr(obj, attr, *args)
-    return functools.reduce(_getattr, [obj] + attr.split('.'))
+        stage_titles = {
+            'first_stage': 'First',
+            'second_stage': 'Second',
+            'third_stage': 'Third',
+        }
+        lines = ['# Stats', '']
+        for stage in self.stages:
+            total_cost = sum(ms.total_cost for ms in stage.models.values())
+            lines.append(f'## {stage_titles[stage.name]} stage')
+            lines.append(f'Total time: {stage.total_time}')
+            lines.append(f'Total calls: {stage.total_calls}')
+            lines.append(f'Total cost: {total_cost}')
+            for ms in stage.models.values():
+                lines.append(
+                    f'  {ms.name}: {ms.input_tokens} input tokens, '
+                    f'{ms.output_tokens} output tokens, cost {ms.total_cost}')
+            lines.append('')
+        lines.append('## Total')
+        lines.append(f'Total time: {self.total_time}')
+        lines.append(f'Total calls: {self.total_calls}')
+        lines.append(f'Attempts: {self.attempts}')
+        lines.append(f'Total cost: {self.total_cost}')
+        return '\n'.join(lines)
 
 
 stats = MarshaStats()

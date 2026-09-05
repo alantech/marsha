@@ -2,9 +2,10 @@ autopep8
 flake8
 mccabe
 mistletoe
-openai
+openai>=1.0
 pycodestyle
 pydocstyle
 pyflakes
 pyinstaller
 pylama
+setuptools<81

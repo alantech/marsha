@@ -1,20 +1,17 @@
 import argparse
 import asyncio
 import os
-import openai
 import tempfile
 import time
 import traceback
 
+from marsha.config import resolve_model, set_cli_model
 from marsha.llm import generate_python_code, review_and_fix
+from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
 from marsha.parse import write_files_from_markdown
 from marsha.stats import stats
 from marsha.utils import read_file, copy_file, add_helper, copy_tree, prettify_time_delta
-
-# Set up OpenAI
-openai.organization = os.getenv('OPENAI_ORG')
-openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
 # Parse the input arguments
 parser = argparse.ArgumentParser(
@@ -31,11 +28,23 @@ parser.add_argument('-n', '--n-parallel-executions', type=int, default=3)
 parser.add_argument('--exclude-main-helper', action='store_true',
                     help='Skips addition of helper code for running as a script')
 parser.add_argument('--exclude-sanity-check', action='store_true',
-                    help='Skips an initial sanity check that function defintions will reliably generate working code')
+                    help='Skips an initial sanity check that the definition is self-consistent')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
+parser.add_argument('--api-base',
+                    help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file')
+parser.add_argument('--model',
+                    help='Model to use for code generation, overriding the model in the config file')
 
 args = parser.parse_args()
+
+# Set up the shared LLM client
+set_cli_model(args.model)
+client = create_client(args.api_base)
+set_client(client)
+if args.debug:
+    print(f'Using LLM endpoint: {client.base_url}')
+    print(f'Using LLM model: {resolve_model()}')
 
 
 async def main():
