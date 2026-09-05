@@ -1,0 +1,38 @@
+[project]
+name = "marsha"
+version = "0.0.1"
+description = "Marsha is a higher-level programming language."
+readme = "README.md"
+authors = [
+    { name = "Alan Technologies Maintainers", email = "hello@alantechnologies.com" },
+]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "autopep8",
+    "flake8",
+    "mccabe",
+    "mistletoe",
+    "openai>=1.0",
+    "pycodestyle",
+    "pydocstyle",
+    "pyflakes",
+    "pyinstaller",
+    "pylama",
+    "setuptools<81",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+]
+urls = { repository = "https://github.com/alantech/marsha" }
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["marsha*"]
