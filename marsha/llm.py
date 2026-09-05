@@ -38,10 +38,9 @@ async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
     gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-You are assessing only whether the document is self-consistent: whether its description, inputs, outputs, and examples can all be true at the same time.
-Underspecification is not a reason to reject: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably, and that is acceptable.
-The examples may be more specific than the description, choosing among the options the description leaves open; that is not a contradiction.
-Reject only when the document contradicts itself, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example violates a stated requirement.
+You are assessing only whether the document is self-consistent. Use this test: could at least one implementation exist that satisfies every part of the document (description, inputs, outputs, and all examples) at the same time? If such an implementation could exist, the document is self-consistent.
+Underspecification is not a reason to reject: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably. If the description allows several outcomes (several valid orderings, several equivalent error messages, several formats) and the examples show one of them, an implementation that follows the examples satisfies the document, so that is self-consistent.
+Reject only when no implementation could satisfy the document as written, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example is malformed or violates a stated requirement.
 Your answer is consumed by project management software, so only respond with Y if the document is self-consistent, or N if it contradicts itself.
 ''', n_results=n_results, stats_stage='first_stage', **answer)
     marsha_for_code_llm = format_marsha_for_llm(meta)
