@@ -9,10 +9,10 @@ Marsha is an LLM-based programming language. Describe what you want done with a 
 
 ## Usage
 
-The Marsha compiler can be used to compile the syntax using a `pip` module via a terminal or Jupyter Notebook:
+The Marsha compiler can be used to compile the syntax using a `uv`-installed package via a terminal or Jupyter Notebook:
 
 ```bash
-pip install git+https://github.com/alantech/marsha
+uv pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
 

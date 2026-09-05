@@ -3,6 +3,7 @@ build/
 dist/
 venv/
 marsha.egg-info/
+marsha/workers/
 .env
 examples/**/*.py
 examples/**/requirements.txt

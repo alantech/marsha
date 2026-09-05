@@ -20,6 +20,10 @@ on:
         description: "Number of parallel runs"
         required: false
         default: 3
+      n_jobs:
+        description: "Number of test runs executed in parallel"
+        required: false
+        default: 5
 
 jobs:
   run:
@@ -36,6 +40,8 @@ jobs:
           python-version: "3.10"
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
+      - name: Install uv
+        run: python -m pip install uv
       - name: Output Inputs
         run: echo "${{ toJSON(github.event.inputs) }}"
       - name: Output Payload
@@ -45,11 +51,11 @@ jobs:
         run: |
           cd marsha
           if ${{ github.event.client_payload.test != '' }}; then
-            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} time
+            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} n_jobs=${{github.event.client_payload.n_jobs || 5}} time
           elif ${{ github.event.inputs.test != '' }}; then
-            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} time
+            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} n_jobs=${{github.event.inputs.n_jobs || 5}} time
           else
-            make attempts=1 test=../examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 time
+            make attempts=1 test=../examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 n_jobs=5 time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT

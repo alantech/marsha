@@ -3,7 +3,9 @@
 import argparse
 import math
 import os
+import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from marsha.utils import prettify_time_delta
 
@@ -19,31 +21,64 @@ parser.add_argument('source')
 parser.add_argument('attempts', type=int, default=3)
 parser.add_argument('n_parallel_executions', type=int, default=1)
 parser.add_argument('stats', type=bool, default=False)
+parser.add_argument(
+    '--n_jobs', type=int, default=1,
+    help='Run this many executions in parallel, each in its own subdirectory'
+)
 args = parser.parse_args()
+
+source = os.path.abspath(args.source)
+total_runs = 30
+n_jobs = args.n_jobs
+
+
+def worker_dir(i):
+    if n_jobs == 1:
+        return None
+    workdir = f'workers/run-{i:03d}'
+    os.makedirs(workdir, exist_ok=True)
+    if not os.path.exists(os.path.join(workdir, 'dist')):
+        os.symlink('../../dist', os.path.join(workdir, 'dist'))
+    return workdir
+
+
+def run_once(i):
+    workdir = worker_dir(i)
+    print(f'Run {i + 1} / {total_runs}')
+    t_1 = time.time()
+    print(
+        f'Running ./dist/marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
+    proc = subprocess.run(
+        f'./dist/marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}',
+        shell=True,
+        cwd=workdir)
+    t_2 = time.time()
+    testtime = t_2 - t_1
+    run_stats = None
+    if args.stats:
+        try:
+            run_stats_file = open(os.path.join(workdir or '.', 'stats.md'), 'r')
+            run_stats = run_stats_file.read()
+            run_stats_file.close()
+        except Exception:
+            raise Exception('Error reading stats file. Maybe something went run while running Marsha and the stats were not generated?')
+    return i, proc.returncode, testtime, run_stats
+
+
+if n_jobs > 1:
+    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+        results = list(executor.map(run_once, range(total_runs)))
+else:
+    results = [run_once(i) for i in range(total_runs)]
 
 exitcodes = []
 times = []
 calls = []
 cost = []
-total_runs = 30
-for i in range(total_runs):
-    print(f'Run {i + 1} / {total_runs}')
-    t_1 = time.time()
-    print(
-        f'Running ./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
-    exitcode = os.system(
-        f'./dist/marsha {args.source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
-    t_2 = time.time()
-    testtime = t_2 - t_1
+for i, exitcode, testtime, run_stats in results:
     exitcodes.append(exitcode)
     times.append(testtime)
     if args.stats:
-        try:
-            run_stats_file = open('stats.md', 'r')
-            run_stats = run_stats_file.read()
-            run_stats_file.close()
-        except Exception:
-            raise Exception('Error reading stats file. Maybe something went run while running Marsha and the stats were not generated?')
         try:
             ast = ast_renderer.get_ast(Document(run_stats))
             results_child = ast['children'].pop()

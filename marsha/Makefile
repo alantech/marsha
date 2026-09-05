@@ -1,9 +1,11 @@
-./dist/marsha: ./venv ./*.py ./marsha.spec
-	. ./venv/bin/activate; pip install -r requirements.txt
-	. ./venv/bin/activate; pyinstaller __main__.py --name marsha --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ../examples:./examples --add-data ./helper.py:./marsha
+n_jobs ?= 1
+
+./dist/marsha: ./venv ./*.py ./mappers/*.py ./marsha.spec requirements.txt
+	uv pip install --python ./venv/bin/python -r requirements.txt
+	./venv/bin/pyinstaller __main__.py --name marsha --onefile --collect-all pyflakes --collect-all mccabe --collect-all pycodestyle --collect-all pydocstyle --collect-all pylama --add-data ../examples:./examples --add-data ./helper.py:./marsha
 
 ./venv:
-	(command -v $(python) && $(python) -m venv venv) || (command -v python && python -m venv venv) || (command -v python3 && python3 -m venv venv)
+	uv venv venv
 
 .PHONY: clean
 clean:
@@ -15,8 +17,8 @@ install: ./dist/marsha
 
 .PHONY: format
 format:
-	. ./venv/bin/activate; autopep8 -i *.py
+	./venv/bin/autopep8 -i *.py
 
 .PHONY: time
 time: ./dist/marsha .time.py
-	. ./venv/bin/activate; pip install --upgrade ..; ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats)
+	uv pip install --python ./venv/bin/python --upgrade ..; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs)
