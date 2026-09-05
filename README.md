@@ -146,8 +146,8 @@ options:
   --exclude-main-helper
                         Skips addition of helper code for running as a script
   --exclude-sanity-check
-                        Skips an initial sanity check that function defintions
-                        will reliably generate working code
+                        Skips an initial sanity check that the definition is
+                        self-consistent
   -s, --stats           Save stats and write them to a file
   --api-base API_BASE   Base URL of an OpenAI-compatible API to use for LLM
                         requests, e.g. a local llama.cpp server. Overrides the

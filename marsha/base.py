@@ -28,7 +28,7 @@ parser.add_argument('-n', '--n-parallel-executions', type=int, default=3)
 parser.add_argument('--exclude-main-helper', action='store_true',
                     help='Skips addition of helper code for running as a script')
 parser.add_argument('--exclude-sanity-check', action='store_true',
-                    help='Skips an initial sanity check that function defintions will reliably generate working code')
+                    help='Skips an initial sanity check that the definition is self-consistent')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 parser.add_argument('--api-base',

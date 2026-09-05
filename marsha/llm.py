@@ -38,11 +38,11 @@ async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
     gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-You are assessing if this document has enough context such that a junior software engineer with a couple of years of experience should be able to write the desired function and a test suite to verify it.
-The description must be precise enough to determine what to do.
-The examples must be complete enough to likely catch all edge cases.
-If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
-Your answer is consumed by project management software, so only respond with Y for yes or N for no.
+You are assessing only whether the document is self-consistent: whether its description, inputs, outputs, and examples can all be true at the same time.
+Underspecification is not a reason to reject: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably, and that is acceptable.
+The examples may be more specific than the description, choosing among the options the description leaves open; that is not a contradiction.
+Reject only when the document contradicts itself, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example violates a stated requirement.
+Your answer is consumed by project management software, so only respond with Y if the document is self-consistent, or N if it contradicts itself.
 ''', n_results=n_results, stats_stage='first_stage', **answer)
     marsha_for_code_llm = format_marsha_for_llm(meta)
     gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
@@ -54,11 +54,10 @@ Your answer is consumed by project management software, so only respond with Y f
 gpt_improve = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
 The assignment is written in markdown format.
 It includes sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-You have already decided this document is not written well enough such that another engineer can reliably write a working function that meets expectations, nor a test suite to verify proper functionality.
-The description must be precise enough to determine what to do.
-The examples must be complete enough to likely catch all edge cases.
-You are writing a few paragraphs gently explaining the deficiencies in the task definition they have written, not coming up with examples assuming what they might have wanted, since that isn't clear in the first place, just why what they have provided is not precise enough.
-In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The mistakes simply are, and that they made them isn't a problem, just that they should learn from them.
+You have already decided this document contradicts itself, so it cannot be implemented as written.
+You are writing a few paragraphs gently explaining the specific contradictions in the task definition, with concrete pointers to where each one appears (the description, particular examples, etc), so the author can resolve them.
+Do not ask for more examples or more precision in areas that are merely unspecified: unspecified behavior is acceptable and for the implementer to decide, like unspecified behavior in C.
+In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The contradictions simply are, and that is not a problem, just something to resolve.
 Do not include a "hello" or a "regards", etc, as your response is being attached to a code review system.
 ''', stats_stage='first_stage')
 
