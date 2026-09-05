@@ -1,20 +1,16 @@
 import argparse
 import asyncio
 import os
-import openai
 import tempfile
 import time
 import traceback
 
 from marsha.llm import generate_python_code, review_and_fix
+from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
 from marsha.parse import write_files_from_markdown
 from marsha.stats import stats
 from marsha.utils import read_file, copy_file, add_helper, copy_tree, prettify_time_delta
-
-# Set up OpenAI
-openai.organization = os.getenv('OPENAI_ORG')
-openai.api_key = os.getenv('OPENAI_SECRET_KEY')
 
 # Parse the input arguments
 parser = argparse.ArgumentParser(
@@ -36,6 +32,9 @@ parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 
 args = parser.parse_args()
+
+# Set up the shared LLM client
+set_client(create_client())
 
 
 async def main():

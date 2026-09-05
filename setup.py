@@ -14,12 +14,13 @@ setup(
         'flake8',
         'mccabe',
         'mistletoe',
-        'openai',
+        'openai>=1.0',
         'pycodestyle',
         'pydocstyle',
         'pyflakes',
         'pyinstaller',
-        'pylama'
+        'pylama',
+        'setuptools<81'
     ],
     classifiers=[
         'Development Status :: 2 - Pre-Alpha',

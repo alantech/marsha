@@ -1,6 +1,8 @@
-import openai
 import time
 
+import openai
+
+from marsha.llm_client import get_client
 from marsha.mappers.base import BaseMapper
 from marsha.stats import stats
 from marsha.utils import prettify_time_delta
@@ -10,18 +12,20 @@ t0 = time.time()
 
 
 async def retry_chat_completion(query, model='gpt-3.5-turbo', max_tries=3, n_results=1):
+    client = get_client()
     t1 = time.time()
     query['model'] = model
     query['n'] = n_results
     while True:
         try:
-            out = await openai.ChatCompletion.acreate(**query)
+            out = await client.chat.completions.create(**query)
             t2 = time.time()
+            total_tokens = out.usage.total_tokens if out.usage is not None else 9001
             print(
-                f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / out.get('usage', {}).get('total_tokens', 9001)}''')
+                f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / total_tokens}''')
             return out
-        except openai.error.InvalidRequestError as e:
-            if e.code == 'context_length_exceeded':
+        except openai.BadRequestError as e:
+            if getattr(e, 'code', None) == 'context_length_exceeded':
                 # Try to cover up this error by choosing the bigger, more expensive model
                 query['model'] = 'gpt-4'
             max_tries = max_tries - 1
