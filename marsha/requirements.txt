@@ -6,6 +6,5 @@ openai>=1.0
 pycodestyle
 pydocstyle
 pyflakes
-pyinstaller
 pylama
 setuptools<81
