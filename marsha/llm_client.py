@@ -2,12 +2,15 @@ import os
 
 import openai
 
+from marsha.config import resolve_api_base, resolve_api_key
+
 _client = None
 
 
-def create_client():
+def create_client(api_base=None):
     return openai.AsyncOpenAI(
-        api_key=os.getenv('OPENAI_SECRET_KEY') or os.getenv('OPENAI_API_KEY'),
+        base_url=resolve_api_base(api_base),
+        api_key=resolve_api_key(),
         organization=os.getenv('OPENAI_ORG'),
     )
 

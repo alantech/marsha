@@ -30,11 +30,16 @@ parser.add_argument('--exclude-sanity-check', action='store_true',
                     help='Skips an initial sanity check that function defintions will reliably generate working code')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
+parser.add_argument('--api-base',
+                    help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file')
 
 args = parser.parse_args()
 
 # Set up the shared LLM client
-set_client(create_client())
+client = create_client(args.api_base)
+set_client(client)
+if args.debug:
+    print(f'Using LLM endpoint: {client.base_url}')
 
 
 async def main():

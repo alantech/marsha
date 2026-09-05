@@ -96,18 +96,38 @@ The Marsha syntax is meant to be:
 
 Marsha is compiled by an LLM into tested software that meets the requirements described, but implementation details can vary greatly across runs much like if different developers implemented it for you. There is typically more than one way to write software that fulfills a set of requirements. However, the compiler is best-effort and sometimes it will fail to generate the described program. We aim for 80%+ accuracy on our [examples](./examples/). In general, the more detailed the description and the more examples are provided the more likely the output will work.
 
-In order to use the compiler, the following environment variables must be set:
+In order to use the compiler, Marsha needs to know which LLM to send requests to. By default it uses the OpenAI API, which requires the following environment variables to be set:
 
 * `OPENAI_ORG`
-* `OPENAI_SECRET_KEY`
+* `OPENAI_SECRET_KEY` (or `OPENAI_API_KEY`)
 
-Support for other LLMs, including running something locally, is planned but not yet implemented.
+Any OpenAI-compatible API can be used instead, such as the server that ships with [llama.cpp](https://github.com/ggml-org/llama.cpp) for running models locally. The endpoint can be configured with the `--api-base` command line flag, the `OPENAI_BASE_URL` environment variable, or a config file, in that order of precedence.
+
+The config file is a JSON file with the keys `api_base` and `api_key`, read from the standard configuration location for your OS:
+
+* Linux: `~/.config/marsha/config.json` (or `$XDG_CONFIG_HOME/marsha/config.json` if that is set)
+* macOS: `~/Library/Application Support/marsha/config.json`
+* Windows: `%LOCALAPPDATA%\marsha\config.json`
+
+Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
+
+```json
+{
+    "api_base": "http://localhost:8080/v1",
+    "api_key": "sk-local"
+}
+```
+
+The key can be anything; local servers like llama.cpp do not validate it.
 
 There are also a few flags on how to use Marsha:
 
 ```sh
 $ marsha --help
-usage: marsha [-h] [-d] [-q] [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper] [-s] source
+usage: marsha [-h] [-d] [-q] [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS]
+              [--exclude-main-helper] [--exclude-sanity-check] [-s]
+              [--api-base API_BASE]
+              source
 
 Marsha AI Compiler
 
@@ -123,7 +143,14 @@ options:
   -n N_PARALLEL_EXECUTIONS, --n-parallel-executions N_PARALLEL_EXECUTIONS
   --exclude-main-helper
                         Skips addition of helper code for running as a script
+  --exclude-sanity-check
+                        Skips an initial sanity check that function defintions
+                        will reliably generate working code
   -s, --stats           Save stats and write them to a file
+  --api-base API_BASE   Base URL of an OpenAI-compatible API to use for LLM
+                        requests, e.g. a local llama.cpp server. Overrides the
+                        OPENAI_BASE_URL environment variable and the config
+                        file
 ```
 
 * `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
@@ -132,6 +159,7 @@ options:
 * `-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
 * `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
+* `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
 
 ## Using compiled Marsha code
 
