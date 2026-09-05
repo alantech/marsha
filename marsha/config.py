@@ -5,6 +5,10 @@ import platform
 APP_NAME = 'marsha'
 CONFIG_FILENAME = 'config.json'
 DEFAULT_API_BASE = 'https://api.openai.com/v1'
+DEFAULT_MODEL = 'gpt-5-mini'
+DEFAULT_STRONG_MODEL = 'gpt-5'
+
+_cli_model = None
 
 
 def get_config_dir():
@@ -41,6 +45,11 @@ def load_config_file():
     return config
 
 
+def set_cli_model(model):
+    global _cli_model
+    _cli_model = model
+
+
 def resolve_api_base(cli_value=None):
     if cli_value:
         return cli_value
@@ -58,3 +67,19 @@ def resolve_api_key():
     if env_value:
         return env_value
     return load_config_file().get('api_key')
+
+
+def resolve_model():
+    if _cli_model:
+        return _cli_model
+    file_value = load_config_file().get('model')
+    if file_value:
+        return file_value
+    return DEFAULT_MODEL
+
+
+def resolve_strong_model():
+    file_value = load_config_file().get('model_strong')
+    if file_value:
+        return file_value
+    return DEFAULT_STRONG_MODEL

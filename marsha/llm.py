@@ -10,11 +10,12 @@ import sys
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
+from marsha.config import resolve_model, resolve_strong_model
 from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import stats
 from marsha.utils import read_file, autoformat_files, prettify_time_delta
-from marsha.mappers.chatgpt import ChatGPTMapper
+from marsha.mappers.chatgpt import ChatGPTMapper, uses_completion_tokens
 
 # PyInstaller creates a temp folder and stores path in _MEIPASS
 base_path = '.'
@@ -28,6 +29,12 @@ if shutil.which(python) is None:
 
 
 async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
+    # Reasoning models need a larger budget for their chain of thought, so the
+    # one-token cap only applies to non-reasoning models
+    if uses_completion_tokens(resolve_model()):
+        answer = {'max_tokens': 1024, 'reasoning_effort': 'minimal'}
+    else:
+        answer = {'max_tokens': 1}
     gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
@@ -36,7 +43,7 @@ The description must be precise enough to determine what to do.
 The examples must be complete enough to likely catch all edge cases.
 If the description and examples are broad enough that different engineers could reasonably create very different functions that supposedly meet the requirements but do different things, that is another reason to reject this assignment.
 Your answer is consumed by project management software, so only respond with Y for yes or N for no.
-''', max_tokens=1, n_results=n_results, stats_stage='first_stage')
+''', n_results=n_results, stats_stage='first_stage', **answer)
     marsha_for_code_llm = format_marsha_for_llm(meta)
     gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
     if any([True if opinion == 'N' else False for opinion in gpt_opinions]):
@@ -440,7 +447,7 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''', model='gpt-4', stats_stage='third_stage')
+''', model=resolve_strong_model(), stats_stage='third_stage')
         fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(meta)}
 
 {f"""## Do not test the following functions:

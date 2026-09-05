@@ -103,11 +103,13 @@ In order to use the compiler, Marsha needs to know which LLM to send requests to
 
 Any OpenAI-compatible API can be used instead, such as the server that ships with [llama.cpp](https://github.com/ggml-org/llama.cpp) for running models locally. The endpoint can be configured with the `--api-base` command line flag, the `OPENAI_BASE_URL` environment variable, or a config file, in that order of precedence.
 
-The config file is a JSON file with the keys `api_base` and `api_key`, read from the standard configuration location for your OS:
+The config file is a JSON file read from the standard configuration location for your OS:
 
 * Linux: `~/.config/marsha/config.json` (or `$XDG_CONFIG_HOME/marsha/config.json` if that is set)
 * macOS: `~/Library/Application Support/marsha/config.json`
 * Windows: `%LOCALAPPDATA%\marsha\config.json`
+
+It supports the keys `api_base`, `api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-5-mini`; `model_strong` (default `gpt-5`) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
 
 Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
 
@@ -126,7 +128,7 @@ There are also a few flags on how to use Marsha:
 $ marsha --help
 usage: marsha [-h] [-d] [-q] [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS]
               [--exclude-main-helper] [--exclude-sanity-check] [-s]
-              [--api-base API_BASE]
+              [--api-base API_BASE] [--model MODEL]
               source
 
 Marsha AI Compiler
@@ -151,6 +153,8 @@ options:
                         requests, e.g. a local llama.cpp server. Overrides the
                         OPENAI_BASE_URL environment variable and the config
                         file
+  --model MODEL         Model to use for code generation, overriding the model
+                        in the config file
 ```
 
 * `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
@@ -160,6 +164,7 @@ options:
 * `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
 * `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
+* `--model` Overrides the model used for code generation (default `gpt-5-mini`), eg to use a different OpenAI model or the name of a locally served model.
 
 ## Using compiled Marsha code
 
