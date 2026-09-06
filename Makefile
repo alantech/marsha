@@ -8,7 +8,7 @@ PREFIX ?= $(HOME)/.local
 
 .PHONY: clean
 clean:
-	git clean -ffdx -e .env -e OPENAI_ORG -e OPENAI_SECRET_KEY
+	git clean -ffdx -e .env
 
 .PHONY: install
 install: ./venv
