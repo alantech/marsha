@@ -10,12 +10,13 @@ import sys
 
 from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
-from marsha.config import resolve_model, resolve_strong_model
+from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import stats
 from marsha.utils import read_file, autoformat_files, prettify_time_delta
-from marsha.mappers.chatgpt import ChatGPTMapper, uses_completion_tokens
+from marsha.mappers import get_mapper
+from marsha.mappers.chatgpt import uses_completion_tokens
 
 # Determine what name the user's `python` executable is (`python` or `python3`)
 python = 'python' if shutil.which('python') is not None else 'python3'
@@ -26,11 +27,11 @@ if shutil.which(python) is None:
 async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
     # Reasoning models need a larger budget for their chain of thought, so the
     # one-token cap only applies to non-reasoning models
-    if uses_completion_tokens(resolve_model()):
+    if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
         answer = {'max_tokens': 1024, 'reasoning_effort': 'minimal'}
     else:
         answer = {'max_tokens': 1}
-    gpt_can_func = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
+    gpt_can_func = get_mapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
 You are assessing only whether the document is self-consistent. Use this test: could at least one implementation exist that satisfies every part of the document (description, inputs, outputs, and all examples) at the same time? If such an implementation could exist, the document is self-consistent.
@@ -45,7 +46,9 @@ Your answer is consumed by project management software, so only respond with Y i
     return True
 
 
-gpt_improve = ChatGPTMapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
+def get_gpt_improve():
+    # Constructed per call so the LLM provider is resolved from the parsed CLI args
+    return get_mapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
 The assignment is written in markdown format.
 It includes sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
 You have already decided this document contradicts itself, so it cannot be implemented as written.
@@ -58,13 +61,13 @@ Do not include a "hello" or a "regards", etc, as your response is being attached
 
 async def gpt_improve_func(meta: MarshaMeta):
     marsha_for_code_llm = format_marsha_for_llm(meta)
-    improvements = await gpt_improve.run(marsha_for_code_llm)
+    improvements = await get_gpt_improve().run(marsha_for_code_llm)
     print(improvements)
 
 
 async def gpt_func_to_python(meta: MarshaMeta, n_results: int, retries: int = 3, debug: bool = False):
     marsha_for_code_llm = format_marsha_for_llm(meta)
-    gpt_gen_code = ChatGPTMapper(f'''You are a senior software engineer assigned to write Python 3 functions.
+    gpt_gen_code = get_mapper(f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
 Add type hints if feasible.
@@ -97,7 +100,7 @@ The desired response must look like the following:
 
 ''', n_results=n_results, stats_stage='first_stage')
     marsha_for_test_llm = format_marsha_for_llm(meta)
-    gpt_gen_test = ChatGPTMapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+    gpt_gen_test = get_mapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.
 The unit tests created should exactly match the example cases provided for each function.
 You have to create a TestCase per function provided.
@@ -171,7 +174,7 @@ The desired response must look like the following:
 
 async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
     code = read_file(filename)
-    gpt_fix = ChatGPTMapper(f'''You are a senior software engineer working with Python 3.
+    gpt_fix = get_mapper(f'''You are a senior software engineer working with Python 3.
 You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
 All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
@@ -401,7 +404,7 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
         requirements = read_file(req_file) if req_file is not None else None
         void_function_names = list(
             map(lambda f: extract_func_name(f), meta.void_funcs))
-        gpt_fix = ChatGPTMapper(f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
+        gpt_fix = get_mapper(f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
 You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
 Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
 Do not write new unit tests, just fix the existing ones.
