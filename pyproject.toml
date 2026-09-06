@@ -17,7 +17,6 @@ dependencies = [
     "pycodestyle",
     "pydocstyle",
     "pyflakes",
-    "pyinstaller",
     "pylama",
     "setuptools<81",
 ]

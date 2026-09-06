@@ -28,6 +28,10 @@ parser.add_argument(
 args = parser.parse_args()
 
 source = os.path.abspath(args.source)
+if os.name == 'nt':
+    venv_python = os.path.abspath(os.path.join('venv', 'Scripts', 'python.exe'))
+else:
+    venv_python = os.path.abspath(os.path.join('venv', 'bin', 'python'))
 total_runs = 30
 n_jobs = args.n_jobs
 
@@ -37,8 +41,6 @@ def worker_dir(i):
         return None
     workdir = f'workers/run-{i:03d}'
     os.makedirs(workdir, exist_ok=True)
-    if not os.path.exists(os.path.join(workdir, 'dist')):
-        os.symlink('../../dist', os.path.join(workdir, 'dist'))
     return workdir
 
 
@@ -46,12 +48,9 @@ def run_once(i):
     workdir = worker_dir(i)
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
-    print(
-        f'Running ./dist/marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}')
-    proc = subprocess.run(
-        f'./dist/marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}',
-        shell=True,
-        cwd=workdir)
+    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}'
+    print(f'Running {cmd}')
+    proc = subprocess.run(cmd, shell=True, cwd=workdir)
     t_2 = time.time()
     testtime = t_2 - t_1
     run_stats = None

@@ -17,11 +17,6 @@ from marsha.stats import stats
 from marsha.utils import read_file, autoformat_files, prettify_time_delta
 from marsha.mappers.chatgpt import ChatGPTMapper, uses_completion_tokens
 
-# PyInstaller creates a temp folder and stores path in _MEIPASS
-base_path = '.'
-if hasattr(sys, '_MEIPASS'):
-    base_path = sys._MEIPASS
-
 # Determine what name the user's `python` executable is (`python` or `python3`)
 python = 'python' if shutil.which('python') is not None else 'python3'
 if shutil.which(python) is None:

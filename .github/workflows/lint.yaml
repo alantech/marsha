@@ -19,15 +19,14 @@ jobs:
         run: python -m pip install uv
       - name: Lint project
         run: |
-          cd marsha
           uv venv venv
           uv pip install --python ./venv/bin/python -r requirements.txt
-          PEP8_LINT_RESULTS=`./venv/bin/autopep8 -d *.py`
+          PEP8_LINT_RESULTS=`./venv/bin/autopep8 -d marsha/*.py`
           if [ "$PEP8_LINT_RESULTS" != '' ]; then
             echo $PEP8_LINT_RESULTS
             exit 1
           fi
-          FLAKE8_LINT_RESULTS=`./venv/bin/flake8 *.py`
+          FLAKE8_LINT_RESULTS=`./venv/bin/flake8 marsha/*.py`
           if [ "$FLAKE8_LINT_RESULTS" != '' ]; then
             echo $FLAKE8_LINT_RESULTS
             exit 1

@@ -1,0 +1,13 @@
+@echo off
+rem marsha launcher installed by install.bat (see marsha.bat.in).
+rem
+rem Runs the marsha package from the build virtualenv, passing all
+rem arguments through. If the venv has moved, set MARSHA_VENV to it.
+setlocal
+if "%MARSHA_VENV%"=="" set "MARSHA_VENV=__MARSHA_VENV__"
+if not exist "%MARSHA_VENV%\Scripts\python.exe" (
+    echo marsha: virtualenv not found at: %MARSHA_VENV% 1>&2
+    echo marsha: rebuild it with install.bat or set MARSHA_VENV to its location 1>&2
+    exit /b 1
+)
+"%MARSHA_VENV%\Scripts\python.exe" -m marsha %*
