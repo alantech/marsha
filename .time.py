@@ -25,6 +25,10 @@ parser.add_argument(
     '--n_jobs', type=int, default=1,
     help='Run this many executions in parallel, each in its own subdirectory'
 )
+parser.add_argument(
+    '--provider', default='openai', choices=['openai', 'anthropic'],
+    help='LLM provider to use for the runs'
+)
 args = parser.parse_args()
 
 source = os.path.abspath(args.source)
@@ -48,7 +52,7 @@ def run_once(i):
     workdir = worker_dir(i)
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
-    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}'
+    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"} --provider {args.provider}'
     print(f'Running {cmd}')
     proc = subprocess.run(cmd, shell=True, cwd=workdir)
     t_2 = time.time()
