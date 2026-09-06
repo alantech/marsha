@@ -112,7 +112,7 @@ In order to use the compiler, Marsha needs to know which LLM to send requests to
 
 Any OpenAI-compatible API can be used instead, such as the server that ships with [llama.cpp](https://github.com/ggml-org/llama.cpp) for running models locally. The endpoint can be configured with the `--api-base` command line flag, the `OPENAI_BASE_URL` environment variable, or a config file, in that order of precedence.
 
-Anthropic's Claude models are also supported. Select them with `--provider anthropic` (or the `provider` config file key); the API key comes from `CLAUDE_API_KEY` (or `ANTHROPIC_API_KEY`). The default code-generation model is `claude-sonnet-5`; the strong model (default `claude-opus-5`) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
+Anthropic's Claude models are also supported. Select them with `--provider anthropic` (or the `provider` config file key); the API key comes from `CLAUDE_API_KEY` (or `ANTHROPIC_API_KEY`). The default code-generation model is `claude-haiku-4-5`; the strong model (default `claude-opus-5`) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
 
 The config file is a JSON file read from the standard configuration location for your OS:
 
@@ -120,7 +120,7 @@ The config file is a JSON file read from the standard configuration location for
 * macOS: `~/Library/Application Support/marsha/config.json`
 * Windows: `%LOCALAPPDATA%\marsha\config.json`
 
-It supports the keys `provider`, `api_base`, `api_key`, `claude_api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-5-mini` (`claude-sonnet-5` with the anthropic provider); `model_strong` (default `gpt-5`, `claude-opus-5` with the anthropic provider) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
+It supports the keys `provider`, `api_base`, `api_key`, `claude_api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-5-mini` (`claude-haiku-4-5` with the anthropic provider); `model_strong` (default `gpt-5`, `claude-opus-5` with the anthropic provider) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
 
 Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
 
@@ -179,7 +179,7 @@ options:
 * `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
 * `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
-* `--model` Overrides the model used for code generation (default `gpt-5-mini`, `claude-sonnet-5` with the anthropic provider), eg to use a different model or the name of a locally served model.
+* `--model` Overrides the model used for code generation (default `gpt-5-mini`, `claude-haiku-4-5` with the anthropic provider), eg to use a different model or the name of a locally served model.
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).
 
 ## Using compiled Marsha code

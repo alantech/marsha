@@ -8,7 +8,7 @@ DEFAULT_API_BASE = 'https://api.openai.com/v1'
 DEFAULT_PROVIDER = 'openai'
 DEFAULT_MODEL = 'gpt-5-mini'
 DEFAULT_STRONG_MODEL = 'gpt-5'
-ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-5'
+ANTHROPIC_DEFAULT_MODEL = 'claude-haiku-4-5'
 ANTHROPIC_DEFAULT_STRONG_MODEL = 'claude-opus-5'
 PROVIDERS = ('openai', 'anthropic')
 
