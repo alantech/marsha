@@ -29,6 +29,10 @@ parser.add_argument(
     '--provider', default='openai', choices=['openai', 'anthropic'],
     help='LLM provider to use for the runs'
 )
+parser.add_argument(
+    '--runs', type=int, default=30,
+    help='Number of executions to time'
+)
 args = parser.parse_args()
 
 source = os.path.abspath(args.source)
@@ -36,7 +40,7 @@ if os.name == 'nt':
     venv_python = os.path.abspath(os.path.join('venv', 'Scripts', 'python.exe'))
 else:
     venv_python = os.path.abspath(os.path.join('venv', 'bin', 'python'))
-total_runs = 30
+total_runs = args.runs
 n_jobs = args.n_jobs
 
 
