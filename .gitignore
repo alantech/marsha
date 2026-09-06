@@ -3,8 +3,10 @@ build/
 dist/
 venv/
 marsha.egg-info/
-marsha/workers/
+workers/
 .env
 examples/**/*.py
 examples/**/requirements.txt
-*.ipynb*
+*.ipynb
+results.md
+agg_stats.md

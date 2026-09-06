@@ -16,13 +16,14 @@ uv pip install git+https://github.com/alantech/marsha
 python -m marsha data_mangling.mrsh
 ```
 
-From a source checkout you can instead install a `marsha` command directly. In the `marsha/` directory, run:
+From a source checkout you can instead install a `marsha` command directly:
 
 ```bash
-make install
+make install    # Linux / macOS
+install.bat     # Windows
 ```
 
-This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (override the location with `make install PREFIX=/usr/local`) that simply runs `python -m marsha` from that virtualenv, passing your arguments through. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` removes the launcher.
+This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (`~/.local/bin/marsha.bat` on Windows; override the location with `make install PREFIX=/usr/local` or `install.bat C:\tools`) that simply runs `python -m marsha` from that virtualenv, passing your arguments through. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` / `uninstall.bat` remove the launcher.
 
 ## Syntax
 

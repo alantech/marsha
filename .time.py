@@ -28,7 +28,10 @@ parser.add_argument(
 args = parser.parse_args()
 
 source = os.path.abspath(args.source)
-venv_python = os.path.abspath(os.path.join('venv', 'bin', 'python'))
+if os.name == 'nt':
+    venv_python = os.path.abspath(os.path.join('venv', 'Scripts', 'python.exe'))
+else:
+    venv_python = os.path.abspath(os.path.join('venv', 'bin', 'python'))
 total_runs = 30
 n_jobs = args.n_jobs
 
