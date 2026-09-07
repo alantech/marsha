@@ -14,6 +14,11 @@ def _console():
 
 
 def print_diagnostic(kind, text):
-    """Print a warning or error to stderr; rich renders the markdown and omits color when not attached to a terminal"""
+    """Print a warning or error to stderr. Rich renders the markdown (with color only when attached
+    to a terminal); the trailing whitespace its list renderer leaves on each line is trimmed."""
     color = 'yellow' if kind == 'warning' else 'red'
-    _console().print(f'[bold {color}]{kind}:[/]', Markdown(text))
+    console = _console()
+    with console.capture() as capture:
+        console.print(f'[bold {color}]{kind}:[/]', Markdown(text))
+    for line in capture.get().splitlines():
+        print(line.rstrip(), file=sys.stderr)
