@@ -4,6 +4,7 @@ import argparse
 import math
 import os
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -141,6 +142,11 @@ print(results)
 res_file = open('results.md', 'w')
 res_file.write(results)
 res_file.close()
+
+# Fail the suite if fewer than 90% of the runs succeeded
+if sum(successes) * 100 < total_runs * 90:
+    print(f'Suite FAILED: only {sum(successes)} of {total_runs} runs succeeded (below the 90% threshold)')
+    sys.exit(1)
 
 if args.stats:
     with open('agg_stats.md', 'r') as f:
