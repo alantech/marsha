@@ -19,6 +19,7 @@ dependencies = [
     "pydocstyle",
     "pyflakes",
     "pylama",
+    "rich",
     "setuptools<81",
 ]
 classifiers = [
