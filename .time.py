@@ -25,6 +25,14 @@ parser.add_argument(
     '--n_jobs', type=int, default=1,
     help='Run this many executions in parallel, each in its own subdirectory'
 )
+parser.add_argument(
+    '--provider', default='openai', choices=['openai', 'anthropic'],
+    help='LLM provider to use for the runs'
+)
+parser.add_argument(
+    '--runs', type=int, default=30,
+    help='Number of executions to time'
+)
 args = parser.parse_args()
 
 source = os.path.abspath(args.source)
@@ -32,7 +40,7 @@ if os.name == 'nt':
     venv_python = os.path.abspath(os.path.join('venv', 'Scripts', 'python.exe'))
 else:
     venv_python = os.path.abspath(os.path.join('venv', 'bin', 'python'))
-total_runs = 30
+total_runs = args.runs
 n_jobs = args.n_jobs
 
 
@@ -48,19 +56,21 @@ def run_once(i):
     workdir = worker_dir(i)
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
-    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"}'
+    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"} --provider {args.provider}'
     print(f'Running {cmd}')
     proc = subprocess.run(cmd, shell=True, cwd=workdir)
     t_2 = time.time()
     testtime = t_2 - t_1
+    print(f'Run {i + 1} / {total_runs} finished with exit code {proc.returncode} in {prettify_time_delta(testtime)}')
     run_stats = None
     if args.stats:
         try:
             run_stats_file = open(os.path.join(workdir or '.', 'stats.md'), 'r')
             run_stats = run_stats_file.read()
             run_stats_file.close()
-        except Exception:
-            raise Exception('Error reading stats file. Maybe something went run while running Marsha and the stats were not generated?')
+        except Exception as e:
+            # A run that exited without stats (eg killed mid-run) is a failed run, not a harness error
+            print(f'Run {i + 1} / {total_runs} produced no stats.md (exit code {proc.returncode}): {e}')
     return i, proc.returncode, testtime, run_stats
 
 

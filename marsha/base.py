@@ -5,7 +5,7 @@ import tempfile
 import time
 import traceback
 
-from marsha.config import resolve_model, set_cli_model
+from marsha.config import resolve_model, resolve_provider, set_cli_model, set_cli_provider
 from marsha.llm import generate_python_code, review_and_fix
 from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
@@ -32,17 +32,22 @@ parser.add_argument('--exclude-sanity-check', action='store_true',
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 parser.add_argument('--api-base',
-                    help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file')
+                    help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file (openai provider only)')
 parser.add_argument('--model',
                     help='Model to use for code generation, overriding the model in the config file')
+parser.add_argument('--provider',
+                    choices=['openai', 'anthropic'],
+                    help='LLM provider to use: openai (default; any OpenAI-compatible API) or anthropic (Claude)')
 
 args = parser.parse_args()
 
 # Set up the shared LLM client
 set_cli_model(args.model)
+set_cli_provider(args.provider)
 client = create_client(args.api_base)
 set_client(client)
 if args.debug:
+    print(f'Using LLM provider: {resolve_provider()}')
     print(f'Using LLM endpoint: {client.base_url}')
     print(f'Using LLM model: {resolve_model()}')
 

@@ -1,4 +1,6 @@
 n_jobs ?= 1
+provider ?= openai
+runs ?= 30
 PREFIX ?= $(HOME)/.local
 
 ./venv:
@@ -25,4 +27,4 @@ format:
 
 .PHONY: time
 time: ./venv .time.py
-	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs)
+	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs) --provider $(provider) --runs $(runs)

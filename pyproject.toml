@@ -9,6 +9,7 @@ authors = [
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic",
     "autopep8",
     "flake8",
     "mccabe",

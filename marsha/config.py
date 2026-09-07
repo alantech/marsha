@@ -5,10 +5,15 @@ import platform
 APP_NAME = 'marsha'
 CONFIG_FILENAME = 'config.json'
 DEFAULT_API_BASE = 'https://api.openai.com/v1'
+DEFAULT_PROVIDER = 'openai'
 DEFAULT_MODEL = 'gpt-5-mini'
 DEFAULT_STRONG_MODEL = 'gpt-5'
+ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-5'
+ANTHROPIC_DEFAULT_STRONG_MODEL = 'claude-opus-5'
+PROVIDERS = ('openai', 'anthropic')
 
 _cli_model = None
+_cli_provider = None
 
 
 def get_config_dir():
@@ -50,6 +55,22 @@ def set_cli_model(model):
     _cli_model = model
 
 
+def set_cli_provider(provider):
+    global _cli_provider
+    _cli_provider = provider
+
+
+def resolve_provider():
+    if _cli_provider:
+        provider = _cli_provider
+    else:
+        provider = load_config_file().get('provider') or DEFAULT_PROVIDER
+    if provider not in PROVIDERS:
+        raise Exception(
+            f'Unknown LLM provider: {provider} (expected one of: {", ".join(PROVIDERS)})')
+    return provider
+
+
 def resolve_api_base(cli_value=None):
     if cli_value:
         return cli_value
@@ -62,7 +83,14 @@ def resolve_api_base(cli_value=None):
     return DEFAULT_API_BASE
 
 
-def resolve_api_key():
+def resolve_api_key(provider=None):
+    provider = provider or resolve_provider()
+    if provider == 'anthropic':
+        env_value = os.getenv('CLAUDE_API_KEY') or os.getenv(
+            'ANTHROPIC_API_KEY')
+        if env_value:
+            return env_value
+        return load_config_file().get('claude_api_key')
     env_value = os.getenv('OPENAI_SECRET_KEY') or os.getenv('OPENAI_API_KEY')
     if env_value:
         return env_value
@@ -75,6 +103,8 @@ def resolve_model():
     file_value = load_config_file().get('model')
     if file_value:
         return file_value
+    if resolve_provider() == 'anthropic':
+        return ANTHROPIC_DEFAULT_MODEL
     return DEFAULT_MODEL
 
 
@@ -82,4 +112,6 @@ def resolve_strong_model():
     file_value = load_config_file().get('model_strong')
     if file_value:
         return file_value
+    if resolve_provider() == 'anthropic':
+        return ANTHROPIC_DEFAULT_STRONG_MODEL
     return DEFAULT_STRONG_MODEL
