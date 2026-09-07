@@ -1,5 +1,6 @@
 import asyncio
 from asyncio.subprocess import Process
+import json
 import os
 import platform
 import time
@@ -14,6 +15,7 @@ from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import stats
+from marsha.term import print_diagnostic
 from marsha.utils import read_file, autoformat_files, prettify_time_delta
 from marsha.mappers import get_mapper
 from marsha.mappers.chatgpt import uses_completion_tokens
@@ -24,45 +26,73 @@ if shutil.which(python) is None:
     raise Exception('Python not found')
 
 
-async def gpt_can_func_python(meta: MarshaMeta, n_results: int):
-    # Reasoning models need a larger budget for their chain of thought, so the
-    # one-token cap only applies to non-reasoning models
-    if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        answer = {'max_tokens': 1024, 'reasoning_effort': 'minimal'}
-    else:
-        answer = {'max_tokens': 1}
-    gpt_can_func = get_mapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function.
+SPEC_CHECK_PROMPT = '''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-You are assessing only whether the document is self-consistent. Use this test: could at least one implementation exist that satisfies every part of the document (description, inputs, outputs, and all examples) at the same time? If such an implementation could exist, the document is self-consistent.
-Underspecification is not a reason to reject: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably. If the description allows several outcomes (several valid orderings, several equivalent error messages, several formats) and the examples show one of them, an implementation that follows the examples satisfies the document, so that is self-consistent.
-Reject only when no implementation could satisfy the document as written, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example is malformed or violates a stated requirement.
-Your answer is consumed by project management software, so only respond with Y if the document is self-consistent, or N if it contradicts itself.
-''', n_results=n_results, stats_stage='first_stage', **answer)
+
+First, decide whether the document is compilable. Use this test: could at least one implementation exist that satisfies every part of the document (description, inputs, outputs, and all examples) at the same time? If such an implementation could exist, the document is compilable.
+Underspecification is not a reason the document is not compilable: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably. If the description allows several outcomes (several valid orderings, several equivalent error messages, several formats) and the examples show one of them, an implementation that follows the examples satisfies the document, so it is compilable.
+One section adding more detail than another is not a contradiction: sections only conflict when they state opposing views on what the code should be doing.
+The document is not compilable only when no implementation could satisfy it as written, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example is malformed or violates a stated requirement.
+
+Second, list warnings for significant ambiguities. A warning is for an underspecified or ambiguous area that could result in differently-behaving code between independent generation runs, eg a missing exception type or message, missing edge cases, an ambiguous output precision or format, or non-deterministic behavior that would make the generated code flaky to test.
+Be careful not to wear out the user with useless warnings: only warn when the ambiguity is significant enough that two reasonable implementers could plausibly produce different behavior. Do not warn about style, and do not ask for more examples or more precision in areas that are merely unspecified but unlikely to change the behavior.
+
+Respond with a single JSON object and nothing else, in exactly this shape:
+{"compilable": true, "warnings": ["...", "..."]}
+When the document is not compilable, include a third key, an "errors" array with one or more entries:
+{"compilable": false, "warnings": ["..."], "errors": ["...", "..."]}
+Each warning and each error is a markdown-formatted string that cites the relevant portion of the document using inline quotes of the document's own words. Each error must quote the sections that conflict with each other and explain why no implementation could satisfy both.
+Do not wrap the JSON object in code fences.
+'''
+
+
+def parse_spec_check(text):
+    """Parse the structured spec check response; raise on anything malformed"""
+    t = text.strip()
+    if t.startswith('```'):
+        t = t.split('\n', 1)[1] if '\n' in t else ''
+        if t.rstrip().endswith('```'):
+            t = t.rstrip()[:-3]
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        start, end = t.find('{'), t.rfind('}')
+        if start == -1 or end <= start:
+            raise Exception(
+                f'No JSON object in spec check response: {text[:200]}')
+        obj = json.loads(t[start:end + 1])
+    if not isinstance(obj, dict) or not isinstance(obj.get('compilable'), bool):
+        raise Exception(f'Invalid spec check response: {text[:200]}')
+    warnings = obj.get('warnings', [])
+    errors = obj.get('errors', [])
+    if not isinstance(warnings, list) or not all(isinstance(w, str) for w in warnings):
+        raise Exception(f'Invalid spec check response: {text[:200]}')
+    if not isinstance(errors, list) or not all(isinstance(e, str) for e in errors):
+        raise Exception(f'Invalid spec check response: {text[:200]}')
+    if not obj['compilable'] and len(errors) == 0:
+        raise Exception(f'Not compilable without errors: {text[:200]}')
+    return {'compilable': obj['compilable'], 'warnings': warnings, 'errors': errors}
+
+
+async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
+    # Reasoning models need a larger budget for their chain of thought
+    if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
+        answer = {'max_tokens': 8192, 'reasoning_effort': 'minimal'}
+    elif resolve_provider() == 'anthropic':
+        answer = {'max_tokens': 4096}
+    else:
+        # Local OpenAI-compatible servers: leave the output budget to the server
+        answer = {}
+    gpt_check = get_mapper(SPEC_CHECK_PROMPT, n_results=1,
+                           stats_stage='first_stage', **answer)
     marsha_for_code_llm = format_marsha_for_llm(meta)
-    gpt_opinions = await gpt_can_func.run(marsha_for_code_llm)
-    if any([True if opinion == 'N' else False for opinion in gpt_opinions]):
-        return False
-    return True
-
-
-def get_gpt_improve():
-    # Constructed per call so the LLM provider is resolved from the parsed CLI args
-    return get_mapper('''You are a senior software engineer reviewing an assignment to write a Python 3 function that a junior software engineer has written.
-The assignment is written in markdown format.
-It includes sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-You have already decided this document contradicts itself, so it cannot be implemented as written.
-You are writing a few paragraphs gently explaining the specific contradictions in the task definition, with concrete pointers to where each one appears (the description, particular examples, etc), so the author can resolve them.
-Do not ask for more examples or more precision in areas that are merely unspecified: unspecified behavior is acceptable and for the implementer to decide, like unspecified behavior in C.
-In your response do not refer to the person at all or tell them what mistakes "they" have made. This is a blameless culture. The contradictions simply are, and that is not a problem, just something to resolve.
-Do not include a "hello" or a "regards", etc, as your response is being attached to a code review system.
-''', stats_stage='first_stage')
-
-
-async def gpt_improve_func(meta: MarshaMeta):
-    marsha_for_code_llm = format_marsha_for_llm(meta)
-    improvements = await get_gpt_improve().run(marsha_for_code_llm)
-    print(improvements)
+    try:
+        return parse_spec_check(await gpt_check.run(marsha_for_code_llm))
+    except Exception:
+        if retries > 0:
+            return await gpt_check_spec(meta, retries - 1)
+        raise
 
 
 async def gpt_func_to_python(meta: MarshaMeta, n_results: int, retries: int = 3, debug: bool = False):
@@ -508,8 +538,13 @@ async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bo
     mds = None
     try:
         if not args.exclude_sanity_check:
-            if not await gpt_can_func_python(meta, n_results):
-                await gpt_improve_func(meta)
+            check = await gpt_check_spec(meta)
+            if not args.no_warn:
+                for warning in check['warnings']:
+                    print_diagnostic('warning', warning)
+            for error in check['errors']:
+                print_diagnostic('error', error)
+            if not check['compilable']:
                 sys.exit(1)
         mds = await gpt_func_to_python(meta, n_results, debug=debug)
     except Exception as e:
