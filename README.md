@@ -107,6 +107,8 @@ Marsha is compiled by an LLM into tested software that meets the requirements de
 
 Before generating any code, the compiler runs a sanity check that the definition is self-consistent, and prints warnings about significant ambiguities to `stderr` that could result in differently-behaving code between generation runs. Warnings are always shown while compiling, like a conventional compiler's; `--no-warn` suppresses them, but the check itself still runs and still fails the compile when the definition contradicts itself.
 
+The compiler then generates a test suite for the definition — the *oracle* — anchored to the description and examples in the `.mrsh` file, and only then generates the implementation to satisfy it. The implementation is written against this fixed oracle rather than the two being generated independently and reconciled afterwards. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
+
 In order to use the compiler, Marsha needs to know which LLM to send requests to. By default it uses the OpenAI API, which requires the following environment variables to be set:
 
 * `OPENAI_ORG`

@@ -13,7 +13,7 @@ from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
 
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.meta import MarshaMeta
-from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
+from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, validate_impl_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import stats
 from marsha.term import print_diagnostic
 from marsha.utils import read_file, autoformat_files, prettify_time_delta
@@ -46,6 +46,20 @@ Each warning and each error is a markdown-formatted string that cites the releva
 Do not wrap the JSON object in code fences.
 '''
 
+DIAGNOSE_PROMPT = '''You are a senior software engineer debugging a Python 3 project.
+You are given the assignment (in markdown), the implementation, the unit test suite (the oracle), and the unit test results.
+The test suite was derived from the assignment and is authoritative for what the code should do, except where a test is itself wrong.
+Determine the root cause of the failure:
+- "implementation": the code is at fault — it does not correctly implement the assignment (a bug, a missing edge case, wrong logic, a missing or wrong import, etc.).
+- "test": a test is at fault — it asserts behavior the assignment does not actually require (it is over-strict, it contradicts the assignment, it tests an implementation detail, or it pins down an exact error-message wording or output format that the assignment leaves open).
+Choose "test" only when the failing assertion is genuinely not required by the assignment; when in doubt, choose "implementation".
+Respond with a single JSON object and nothing else, in exactly this shape:
+{"fault": "implementation", "reason": "..."}
+or
+{"fault": "test", "reason": "..."}
+Do not wrap the JSON object in code fences.
+'''
+
 
 def parse_spec_check(text):
     """Parse the structured spec check response; raise on anything malformed"""
@@ -75,6 +89,32 @@ def parse_spec_check(text):
     return {'compilable': obj['compilable'], 'warnings': warnings, 'errors': errors}
 
 
+def parse_diagnosis(text):
+    """Parse the structured failure diagnosis; raise on anything malformed"""
+    t = text.strip()
+    if t.startswith('```'):
+        t = t.split('\n', 1)[1] if '\n' in t else ''
+        if t.rstrip().endswith('```'):
+            t = t.rstrip()[:-3]
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        start, end = t.find('{'), t.rfind('}')
+        if start == -1 or end <= start:
+            raise Exception(
+                f'No JSON object in diagnosis response: {text[:200]}')
+        obj = json.loads(t[start:end + 1])
+    if not isinstance(obj, dict):
+        raise Exception(f'Invalid diagnosis response: {text[:200]}')
+    fault = obj.get('fault')
+    if fault not in ('implementation', 'test'):
+        raise Exception(f'Invalid diagnosis response: {text[:200]}')
+    reason = obj.get('reason', '')
+    if not isinstance(reason, str):
+        raise Exception(f'Invalid diagnosis response: {text[:200]}')
+    return {'fault': fault, 'reason': reason}
+
+
 async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
     # Reasoning models need a larger budget for their chain of thought
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
@@ -95,7 +135,71 @@ async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
         raise
 
 
-async def gpt_func_to_python(meta: MarshaMeta, n_results: int, retries: int = 3, debug: bool = False):
+async def gpt_test_suite(meta: MarshaMeta, retries: int = 3, debug: bool = False):
+    # Generate the oracle (the test suite) first, anchored to the spec. This is the
+    # authoritative artifact the implementation will be judged against.
+    void_function_names = list(
+        map(lambda f: extract_func_name(f), meta.void_funcs))
+    void_note = ''
+    if len(void_function_names) > 0:
+        void_note = f'Do not create any tests for the void functions: {", ".join(void_function_names)}.'
+    gpt_gen_test = get_mapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
+The assignment is written in markdown format.
+The test suite is the *oracle* used to judge generated implementations, so it must be trustworthy.
+The unit tests created should exactly match the example cases provided for each function.
+You have to create a TestCase per function provided.
+{void_note}
+The filename should exactly match the name `{meta.filename}_test.py`.
+Unknown imports might come from the file where the function is defined, or from the standard library.
+If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
+Make sure to follow PEP8 guidelines.
+Make sure to include all needed standard Python libraries imports.
+The tests must be faithful to the assignment:
+- Every test must correspond to an example of expected behavior in the assignment, or to behavior its description explicitly states.
+- Do not assert behavior the assignment does not state. Do not test implementation details, internal structure, or the exact wording of error messages or output formats unless the assignment pins them down.
+- Do not invent edge cases, inputs, or expected outputs that are not grounded in the assignment.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{meta.filename}_test.py`.
+The content of the first section must be a python code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {meta.filename}_test.py
+
+```py
+<generated code>
+```
+
+''', n_results=1, stats_stage='first_stage')
+    marsha_for_test_llm = format_marsha_for_llm(meta)
+    if debug:
+        print(f'''marsha_for_llm =
+    ---- start ----
+{marsha_for_test_llm}
+    ---- end ----''')
+    try:
+        doc = await gpt_gen_test.run(marsha_for_test_llm)
+        if not validate_second_stage_markdown(doc, f'{meta.filename}_test.py'):
+            if debug:
+                print(f'''[Oracle] Invalid doc:
+{doc}''')
+            raise Exception('Invalid output format')
+        return doc
+    except Exception:
+        if debug:
+            print(
+                f'Failed to generate test suite. Retries left = {retries}. Retrying...')
+        if retries > 0:
+            return await gpt_test_suite(meta, retries - 1, debug)
+        else:
+            raise Exception('Failed to generate test suite', meta.filename)
+
+
+async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, retries: int = 3, debug: bool = False):
+    # Generate implementations against the (already generated) oracle. The implementation
+    # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     marsha_for_code_llm = format_marsha_for_llm(meta)
     gpt_gen_code = get_mapper(f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
@@ -106,6 +210,7 @@ Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
 Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
+A unit test suite has already been written from this same assignment and is provided to you. Your implementation must satisfy the assignment AND pass this test suite. If anything in the test suite ever appears to conflict with the assignment, the assignment is authoritative.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
@@ -129,65 +234,27 @@ The desired response must look like the following:
 ```
 
 ''', n_results=n_results, stats_stage='first_stage')
-    marsha_for_test_llm = format_marsha_for_llm(meta)
-    gpt_gen_test = get_mapper(f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
-The assignment is written in markdown format.
-The unit tests created should exactly match the example cases provided for each function.
-You have to create a TestCase per function provided.
-The filename should exactly match the name `{meta.filename}_test.py`.
-Unknown imports might come from the file where the function is defined, or from the standard library.
-If you are working with files, make sure to mock the file system since the tests will be run in a sandboxed environment.
-Make sure to follow PEP8 guidelines.
-Make sure to include all needed standard Python libraries imports.
-Your response must not comment on what you changed.
-Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
-Your response must be a markdown file.
-The first section header must be the filename `{meta.filename}_test.py`.
-The content of the first section must be a python code block with the generated code.
-The file should end with the code block, nothing else should be added to the file.
-The desired response must look like the following:
+    user_request = f'''{marsha_for_code_llm}
 
-# {meta.filename}_test.py
+## The unit test suite your implementation must pass
 
-```py
-<generated code>
-```
-
-''', n_results=n_results, stats_stage='first_stage')
+{oracle_md}'''
     if debug:
         print(f'''marsha_for_llm =
     ---- start ----
 {marsha_for_code_llm}
     ---- end ----''')
-
-    reses = await asyncio.gather(gpt_gen_code.run(marsha_for_code_llm), gpt_gen_test.run(marsha_for_test_llm))
-    # The output should be a valid list of Markdown documents. Parse each one and return the list of parsed doc, on failure
-    # do not add it to the list. If the list to return is empty try again (or fully error out, for now)
+    reses = await gpt_gen_code.run(user_request)
+    # The output should be a valid list of implementation Markdown documents (code + optional
+    # requirements). Parse each one and keep the valid docs; if none are valid, retry.
     try:
         mds = list()
-        for i in range(n_results):
-            # TODO: This unfairly reduces the success probability of the separate GPT calls, requiring both in the same run
-            # to pass. It should instead try to use the same pass if possible, but otherwise use a different pairing so bad
-            # dice rolls don't compound each other.
-            doc = reses[0][i] + '\n\n' + reses[1][i]
-            # Some validation that the generated file matches the expected format of:
-            # # function_name.py
-            # ```py
-            # <insert code here>
-            # ```
-            # # requirements.txt
-            # ```text
-            # <dependency>
-            # ```
-            # # function_name_test.py
-            # ```py
-            # <insert code here>
-            # ```
-            if validate_first_stage_markdown(doc, meta.filename):
+        for doc in reses:
+            if validate_impl_markdown(doc, meta.filename):
                 mds.append(doc)
             else:
                 if debug:
-                    print(f'''[First stage] Invalid doc:
+                    print(f'''[Implementation] Invalid doc:
 {doc}''')
         if len(mds) == 0:
             raise Exception('Invalid output format')
@@ -195,9 +262,10 @@ The desired response must look like the following:
     except Exception:
         if debug:
             print(
-                f'Failed to parse doc. Retries left = {retries}. Retrying...')
+                f'Failed to generate implementation. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_func_to_python(meta, n_results, retries - 1, debug)
+            return await gpt_implementation(
+                meta, oracle_md, n_results, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', meta.filename)
 
@@ -369,8 +437,169 @@ async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, s
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
 
 
+async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str, retries: int = 2):
+    # Read-only: decide whether the implementation or a test is at fault. Uses the standard
+    # (cheap) model, since the safety property is enforced structurally, not by this call.
+    gpt_diag = get_mapper(DIAGNOSE_PROMPT, n_results=1,
+                          stats_stage='third_stage')
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# {meta.filename}.py
+
+```py
+{code}
+```
+
+# {meta.filename}_test.py
+
+```py
+{tests}
+```
+
+# Test Results
+
+{results}'''
+    try:
+        return parse_diagnosis(await gpt_diag.run(user_request))
+    except Exception:
+        if retries > 0:
+            return await diagnose_failure(meta, code, tests, results, retries - 1)
+        # If diagnosis keeps failing, fall back to the common case (fix the implementation)
+        return {'fault': 'implementation', 'reason': 'diagnosis unavailable; defaulting to fixing the implementation'}
+
+
+async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False):
+    # Edit ONLY the implementation. The oracle is provided as fixed context and is never
+    # part of the editable output, so this path structurally cannot touch the test suite.
+    gpt_fix = get_mapper(f'''You are a senior software engineer fixing a Python 3 implementation that is failing its unit tests.
+You are given the assignment, the implementation, the unit test suite (the oracle), and the test results.
+The unit test suite is authoritative and must NOT be modified.
+Fix only the implementation so that it correctly implements the assignment and passes the test suite, making the least changes necessary.
+Make sure to produce working code that passes the unit tests.
+Make sure to follow PEP8 style guidelines.
+Make sure to include all needed standard Python libraries imports.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{meta.filename}.py`.
+The content of the first section must be a python code block with the generated code.
+The second section header must be the filename `requirements.txt`.
+The content of the second section must be a text code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {meta.filename}.py
+
+```py
+<fixed code>
+```
+
+# requirements.txt
+
+```txt
+<dependencies needed>
+```
+
+''', model=resolve_strong_model(), stats_stage='third_stage')
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# {meta.filename}.py
+
+```py
+{code}
+```
+
+# {meta.filename}_test.py
+
+```py
+{tests}
+```
+
+# Test Results
+
+{results}
+
+# Diagnosis
+
+The implementation is at fault: {reason}'''
+    fixed_code = await gpt_fix.run(user_request)
+    try:
+        if not validate_impl_markdown(fixed_code, meta.filename):
+            if debug:
+                print(f'''[Fix implementation] Invalid doc:
+{fixed_code}''')
+            raise Exception('Invalid output format')
+        return fixed_code
+    except Exception:
+        if retries > 0:
+            return await fix_implementation(meta, code, tests, results, reason, retries - 1, debug)
+        else:
+            raise Exception('Failed to fix implementation', meta.filename)
+
+
+async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False):
+    # The "punt back": the only path that may edit the oracle, and only spec-anchored. It must
+    # justify every change by the assignment and must never weaken a test that is actually
+    # correct (so a misrouted diagnosis degrades to a no-op rather than a bent test).
+    gpt_fix = get_mapper(f'''You are a senior software engineer correcting a faulty unit test.
+You are given the assignment, the implementation, the unit test suite, and the test results.
+A diagnosis has determined that a TEST (not the implementation) is at fault: it asserts behavior the assignment does not actually require — for example it is over-strict, it contradicts the assignment, it tests an implementation detail, or it pins down an exact error-message wording or output format that the assignment leaves open.
+Correct ONLY the faulty test(s) so that the test suite faithfully tests the assignment. Every change you make must be justified by the assignment: reference the part of the assignment that makes the current test wrong.
+You must NOT weaken a test that is actually correct: if a failing assertion is genuinely required by the assignment, leave that test unchanged.
+You must NOT modify the implementation, and you must not write new tests beyond correcting the faulty ones.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{meta.filename}_test.py`.
+The content of the first section must be a python code block with the corrected test code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {meta.filename}_test.py
+
+```py
+<corrected code>
+```
+
+''', model=resolve_strong_model(), stats_stage='third_stage')
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# {meta.filename}.py
+
+```py
+{code}
+```
+
+# {meta.filename}_test.py
+
+```py
+{tests}
+```
+
+# Test Results
+
+{results}
+
+# Diagnosis
+
+A test is at fault: {reason}'''
+    fixed_test = await gpt_fix.run(user_request)
+    try:
+        if not validate_second_stage_markdown(fixed_test, f'{meta.filename}_test.py'):
+            if debug:
+                print(f'''[Correct test] Invalid doc:
+{fixed_test}''')
+            raise Exception('Invalid output format')
+        return fixed_test
+    except Exception:
+        if retries > 0:
+            return await correct_test(meta, code, tests, results, reason, retries - 1, debug)
+        else:
+            raise Exception('Failed to correct test', meta.filename)
+
+
 async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False):
-    break_line = '\n'
     if retries == 0:
         raise Exception('Failed to fix code', meta.filename)
     # There should only be two files, the test file and the code file
@@ -427,106 +656,29 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
     # Recursively work on fixing the files while the test suite fails, return when complete
     if test_results is not None and ("FAILED" in test_results or "Traceback" in test_results):
         if debug:
-            print('Test failed, trying to fix code')
+            print('Test failed, diagnosing the root cause')
             print(test_results)
         test = read_file(test_file)
         code = read_file(code_file)
-        requirements = read_file(req_file) if req_file is not None else None
-        void_function_names = list(
-            map(lambda f: extract_func_name(f), meta.void_funcs))
-        gpt_fix = get_mapper(f'''You are a senior software engineer helping a junior engineer fix some code that is failing.
-You are given the documentation of the functions they were assigned to write, followed by the functions they wrote, the unit tests they wrote, and the unit test results.
-Focus on just fixing the mistakes in the code and unit tests as necessary, trying to do the less number of changes.
-Do not write new unit tests, just fix the existing ones.
-{f"Do not make any reference to the functions {', '.join(void_function_names)} in `{meta.filename}_test.py`." if len(void_function_names) > 0 else ""}
-Make sure to produce working code that passes the unit tests.
-Make sure to follow PEP8 style guidelines.
-Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
-Your response must not comment on what you changed.
-Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
-Your response must be a markdown file.
-The first section header must be the filename `{meta.filename}.py`.
-The content of the first section must be a python code block with the generated code.
-The second section header must be the filename `requirements.txt`.
-The content of the second section must be a text code block with the generated code.
-The third section header must be the filename `{meta.filename}_test.py`.
-The content of the third section must be a python code block with the generated code.
-The file should end with the code block, nothing else should be added to the file.
-The desired response must look like the following:
-
-# {meta.filename}.py
-
-```py
-<fixed code>
-```
-
-# requirements.txt
-
-```txt
-<dependencies needed>
-```
-
-# {meta.filename}_test.py
-
-```py
-<fixed code>
-```
-
-''', model=resolve_strong_model(), stats_stage='third_stage')
-        fixed_code = await gpt_fix.run(f'''{format_marsha_for_llm(meta)}
-
-{f"""## Do not test the following functions:
-
-{break_line.join(map(lambda f: f"- {f}", void_function_names))}""" if len(void_function_names) > 0 else ""}
-
-# {code_file}
-
-```py
-{code}
-```
-
-# requirements.txt
-
-```txt
-{requirements if requirements is not None else ''}
-```
-
-# {test_file}
-
-```py
-{test}
-```
-
-# Test Results
-
-{test_results}''')
-        # The output should be a valid Markdown document. Parse it and return the parsed doc, on failure
-        # try again (or fully error out, for now)
-        try:
-            # Some validation that the generated file matches the expected format of:
-            # # function_name.py
-            # ```py
-            # <insert code here>
-            # ```
-            # # requirements.txt
-            # ```txt
-            # <dependency>
-            # ```
-            # # function_name_test.py
-            # ```py
-            # <insert code here>
-            # ```
-            if not validate_first_stage_markdown(fixed_code, meta.filename):
-                raise Exception('Invalid output format')
-            subdir = '/'.join(code_file.split('/')[:-1])
-            files = write_files_from_markdown(fixed_code, subdir=subdir)
-        except Exception:
-            if retries == 0:
-                raise Exception('Failed to fix code', meta.filename)
-
-        # We figure out if this pass has succeeded by re-running the tests recursively, where it
-        # ejects from the iteration if the tests pass
+        # Diagnose whether the implementation or a test is at fault, then route to the matching
+        # fix. Only one artifact is ever edited per pass: the implementation fix structurally
+        # cannot touch the oracle, and the (spec-anchored) test correction is the only path that may.
+        verdict = await diagnose_failure(meta, code, test, test_results)
+        subdir = '/'.join(code_file.split('/')[:-1])
+        if verdict['fault'] == 'test':
+            if debug:
+                print(f'Punting back to the test layer: {verdict["reason"]}')
+            fixed = await correct_test(
+                meta, code, test, test_results, verdict['reason'], debug=debug)
+            write_files_from_markdown(fixed, subdir=subdir)
+        else:
+            if debug:
+                print(f'Fixing the implementation: {verdict["reason"]}')
+            fixed = await fix_implementation(
+                meta, code, test, test_results, verdict['reason'], debug=debug)
+            write_files_from_markdown(fixed, subdir=subdir)
+        # Re-run the tests recursively; the recursion ejects when they pass. The file paths are
+        # stable across passes (same directory), so pass the original file list down unchanged.
         return await test_and_fix_files(meta, files, retries - 1, debug)
     elif test_results is None:  # If the test suite failed to run, we try again
         return await test_and_fix_files(meta, files, retries - 1, debug)
@@ -546,7 +698,18 @@ async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bo
                 print_diagnostic('error', error)
             if not check['compilable']:
                 sys.exit(1)
-        mds = await gpt_func_to_python(meta, n_results, debug=debug)
+        # Oracle-first: generate the spec-anchored test suite, then generate implementations
+        # against it. Each candidate keeps the standard (code, requirements, test) shape, but the
+        # test section is the shared oracle, so the implementation is written to a fixed oracle.
+        oracle = await gpt_test_suite(meta, debug=debug)
+        impls = await gpt_implementation(meta, oracle, n_results, debug=debug)
+        mds = []
+        for impl in impls:
+            doc = impl + '\n\n' + oracle
+            if validate_first_stage_markdown(doc, meta.filename):
+                mds.append(doc)
+        if len(mds) == 0:
+            raise Exception('No valid implementation candidates')
     except Exception as e:
         print('First stage failure')
         print(e)

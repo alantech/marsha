@@ -116,6 +116,27 @@ def validate_first_stage_markdown(md, marsha_filename):
     return True
 
 
+def validate_impl_markdown(md, marsha_filename):
+    # An implementation-only document: the code file, optionally followed by requirements.txt
+    ast = ast_renderer.get_ast(Document(md))
+    if len(ast['children']) != 2 and len(ast['children']) != 4:
+        return False
+    if ast['children'][0]['type'] != 'Heading':
+        return False
+    if ast['children'][1]['type'] != 'CodeFence':
+        return False
+    if ast['children'][0]['children'][0]['content'].strip() != f'{marsha_filename}.py':
+        return False
+    if len(ast['children']) == 4:
+        if ast['children'][2]['type'] != 'Heading':
+            return False
+        if ast['children'][3]['type'] != 'CodeFence':
+            return False
+        if ast['children'][2]['children'][0]['content'].strip() != 'requirements.txt':
+            return False
+    return True
+
+
 def validate_second_stage_markdown(md, filename):
     ast = ast_renderer.get_ast(Document(md))
     if len(ast['children']) != 2:
