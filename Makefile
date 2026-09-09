@@ -25,6 +25,10 @@ uninstall:
 format:
 	./venv/bin/autopep8 -i marsha/*.py
 
+.PHONY: test
+test: ./venv
+	./venv/bin/python -m pytest tests/
+
 .PHONY: time
 time: ./venv .time.py
 	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs) --provider $(provider) --runs $(runs)

@@ -3,6 +3,7 @@ from asyncio.subprocess import Process
 import json
 import os
 import platform
+import re
 import time
 import traceback
 import shutil
@@ -16,7 +17,7 @@ from marsha.meta import MarshaMeta
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, validate_impl_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name
 from marsha.stats import stats
 from marsha.term import print_diagnostic
-from marsha.utils import read_file, autoformat_files, prettify_time_delta
+from marsha.utils import read_file, write_file, autoformat_files, prettify_time_delta
 from marsha.mappers import get_mapper
 from marsha.mappers.chatgpt import uses_completion_tokens
 
@@ -58,6 +59,88 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 or
 {"fault": "test", "reason": "..."}
 Do not wrap the JSON object in code fences.
+'''
+
+OPTIMIZE_TEST_SUITE_PROMPT = '''You are a senior software engineer reviewing a unit test suite (the oracle) for Python 3 functions.
+You are given the assignment and the current test suite.
+The test suite must stay faithful to the assignment. Your job is to double-check its work:
+- Completeness: every piece of testable behavior the assignment states — each example, and each behavior its description explicitly states — must be covered by a test. Add a test for any such behavior that is missing.
+- Fidelity: every test must correspond to behavior the assignment states. Remove any test that asserts behavior the assignment does not state, that invents inputs or expected outputs, or that tests implementation details or the exact wording of error messages or output formats the assignment leaves open.
+- You must NOT weaken or loosen any existing test that is actually faithful to the assignment.
+{void_note}
+If the suite is already complete and faithful, return it unchanged.
+Make sure to follow PEP8 guidelines and include all needed standard library imports.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{filename}_test.py`.
+The content of the first section must be a python code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {filename}_test.py
+
+```py
+<generated code>
+```
+
+'''
+
+OPTIMIZE_IMPLEMENTATION_PROMPT = '''You are a senior software engineer improving a Python 3 implementation that already passes its unit tests.
+You are given the assignment, the implementation, and the unit test suite (the oracle) it currently passes.
+Improve the implementation for:
+- Performance: algorithmic and structural efficiency, without changing observable behavior.
+- Safety and robustness: sensible handling of bad, edge, or adversarial inputs, and clear, appropriate errors where the assignment calls for them.
+- Code quality: readability, structure, and PEP8 style. Keep it minimal — do not bloat the code with over-explanatory comments.
+You must NOT change the observable behavior in a way that violates the assignment or makes the test suite fail. Do not remove required functionality.
+Make sure to include all needed standard Python libraries imports.
+Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
+If the implementation is already as good as it can be, return it unchanged.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{filename}.py`.
+The content of the first section must be a python code block with the generated code.
+The second section header must be the filename `requirements.txt`.
+The content of the second section must be a text code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {filename}.py
+
+```py
+<generated code>
+```
+
+# requirements.txt
+
+```txt
+<dependencies needed>
+```
+
+'''
+
+VALIDATE_TEST_CORRECTION_PROMPT = '''You are a senior software engineer validating a correction to a unit test suite (the oracle).
+You are given the assignment, the implementation, the original test suite, the corrected test suite, and the diagnosis that justified correcting the tests.
+A diagnosis concluded that a TEST (not the implementation) was at fault, and a corrected test suite was produced. Validate the correction against the assignment:
+- Reasoning: does the diagnosis's claim that the original test was at fault actually match the assignment? If a failing assertion is genuinely required by the assignment, the correction is unsound.
+- Fidelity: does every test in the corrected suite faithfully test the assignment, asserting only behavior the assignment states?
+- Necessity: are the changes the minimum required — was any test that was actually correct weakened, loosened, or removed?
+If the correction is unsound or weakens a correct test, produce a revised corrected suite that is faithful to the assignment. If it is sound and minimal, return it unchanged.
+Your response must not comment on what you changed.
+Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
+Your response must be a markdown file.
+The first section header must be the filename `{filename}_test.py`.
+The content of the first section must be a python code block with the generated code.
+The file should end with the code block, nothing else should be added to the file.
+The desired response must look like the following:
+
+# {filename}_test.py
+
+```py
+<generated code>
+```
+
 '''
 
 
@@ -197,6 +280,57 @@ The desired response must look like the following:
             raise Exception('Failed to generate test suite', meta.filename)
 
 
+async def gpt_optimize_test_suite(meta: MarshaMeta, oracle_md: str, retries: int = 2, debug: bool = False):
+    # One review iteration of the oracle: verify it covers every testable behavior the assignment
+    # states and invents nothing, then return the finalized suite. Spec-anchored, like the oracle itself.
+    void_function_names = list(
+        map(lambda f: extract_func_name(f), meta.void_funcs))
+    void_note = ''
+    if len(void_function_names) > 0:
+        void_note = f'Do not create any tests for the void functions: {", ".join(void_function_names)}.'
+    gpt_review = get_mapper(OPTIMIZE_TEST_SUITE_PROMPT.format(
+        filename=meta.filename, void_note=void_note), n_results=1, stats_stage='first_stage')
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# The current test suite (oracle)
+
+{oracle_md}'''
+    try:
+        doc = await gpt_review.run(user_request)
+        if not validate_second_stage_markdown(doc, f'{meta.filename}_test.py'):
+            if debug:
+                print(f'''[Optimize oracle] Invalid doc:
+{doc}''')
+            raise Exception('Invalid output format')
+        return doc
+    except Exception:
+        if retries > 0:
+            return await gpt_optimize_test_suite(
+                meta, oracle_md, retries - 1, debug)
+        return None
+
+
+async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, level: int, debug: bool = False) -> str:
+    # Per-phase inner loop for the oracle: repeatedly verify the suite is complete (covers every
+    # stated behavior) and faithful (invents nothing), until it stabilizes or the level is reached.
+    for i in range(level):
+        improved = await gpt_optimize_test_suite(meta, oracle_md, debug=debug)
+        if improved is None:
+            if debug:
+                print(
+                    f'[Optimize oracle] iteration {i + 1}: invalid review, stopping')
+            break
+        if improved.strip() == oracle_md.strip():
+            if debug:
+                print(
+                    f'[Optimize oracle] iteration {i + 1}: suite unchanged, converged')
+            break
+        if debug:
+            print(f'[Optimize oracle] iteration {i + 1}: suite updated')
+        oracle_md = improved
+    return oracle_md
+
+
 async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, retries: int = 3, debug: bool = False):
     # Generate implementations against the (already generated) oracle. The implementation
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
@@ -268,6 +402,126 @@ The desired response must look like the following:
                 meta, oracle_md, n_results, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', meta.filename)
+
+
+async def run_test_suite(code_file: str, test_file: str, req_file: str, debug: bool = False):
+    # Set up the venv (if needed), install requirements, and run the test suite.
+    # Returns (passed, results): passed is None if the suite could not be run at all,
+    # False if it ran but failed, and True if it passed.
+    code_file_dir = os.path.dirname(os.path.abspath(code_file))
+    venv_path = f'{code_file_dir}/venv'
+    if req_file and os.path.exists(req_file):
+        if not os.path.exists(venv_path):
+            print('Creating virtual environment...')
+            try:
+                create_venv_stream = await asyncio.create_subprocess_exec(
+                    python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                await run_subprocess(create_venv_stream)
+            except Exception as e:
+                if debug:
+                    print('Failed to create virtual environment', e)
+        print('Installing requirements...')
+        try:
+            pip_exe = f'{venv_path}/Scripts/pip.exe' if platform.system(
+            ) == 'Windows' else f'{venv_path}/bin/pip'
+            pip_stream = await asyncio.create_subprocess_exec(
+                pip_exe, 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            await run_subprocess(pip_stream, 120)
+        except Exception as e:
+            if debug:
+                print('Failed to install requirements', e)
+    if not os.path.exists(venv_path):
+        python_exe = python
+    else:
+        python_exe = f'{venv_path}/Scripts/python.exe' if platform.system(
+        ) == 'Windows' else f'{venv_path}/bin/python'
+    try:
+        test_stream = await asyncio.create_subprocess_exec(
+            python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await run_subprocess(test_stream)
+        results = f'''{stdout}{stderr}'''
+    except Exception as e:
+        print('Failed to run test suite...', e)
+        return (None, '')
+    passed = ('FAILED' not in results) and ('Traceback' not in results)
+    return (passed, results)
+
+
+async def gpt_optimize_implementation(meta: MarshaMeta, oracle_md: str, code: str, retries: int = 2, debug: bool = False):
+    # One optimization iteration of the implementation: improve performance, safety, error handling,
+    # and code quality while preserving the behavior the spec and oracle require.
+    gpt_opt = get_mapper(OPTIMIZE_IMPLEMENTATION_PROMPT.format(
+        filename=meta.filename), model=resolve_strong_model(), stats_stage='third_stage')
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# The unit test suite (oracle) the implementation must keep passing
+
+{oracle_md}
+
+# The current implementation
+
+```py
+{code}
+```'''
+    try:
+        doc = await gpt_opt.run(user_request)
+        if not validate_impl_markdown(doc, meta.filename):
+            if debug:
+                print(f'''[Optimize impl] Invalid doc:
+{doc}''')
+            raise Exception('Invalid output format')
+        return doc
+    except Exception:
+        if retries > 0:
+            return await gpt_optimize_implementation(
+                meta, oracle_md, code, retries - 1, debug)
+        return None
+
+
+async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debug: bool = False):
+    # Per-phase inner loop for the implementation, run after the candidate already passes the
+    # oracle. Each iteration proposes an improvement; the guardrail re-runs the oracle and reverts
+    # any change that regresses, so the loop can never ship a broken implementation.
+    level = args.optimize
+    if level <= 0:
+        return
+    code_file = [file for file in files if file.endswith(
+        f'{meta.filename}.py')][0]
+    test_file = [file for file in files if file.endswith(
+        f'{meta.filename}_test.py')][0]
+    req_files = [file for file in files if file.endswith('requirements.txt')]
+    req_file = req_files[0] if len(req_files) > 0 else None
+    subdir = os.path.dirname(os.path.abspath(code_file))
+    oracle = read_file(test_file)
+    for i in range(level):
+        current_code = read_file(code_file)
+        candidate = await gpt_optimize_implementation(meta, oracle, current_code, debug=debug)
+        if candidate is None:
+            if debug:
+                print(
+                    f'[Optimize impl] iteration {i + 1}: invalid review, stopping')
+            break
+        backup_code = current_code
+        backup_req = read_file(req_file) if (
+            req_file and os.path.exists(req_file)) else None
+        write_files_from_markdown(candidate, subdir=subdir)
+        if read_file(code_file) == backup_code:
+            if debug:
+                print(
+                    f'[Optimize impl] iteration {i + 1}: unchanged, converged')
+            break
+        passed, _ = await run_test_suite(code_file, test_file, req_file, debug)
+        if passed:
+            if debug:
+                print(f'[Optimize impl] iteration {i + 1}: improvement kept')
+        else:
+            write_file(code_file, backup_code)
+            if backup_req is not None:
+                write_file(req_file, backup_req)
+            if debug:
+                print(
+                    f'[Optimize impl] iteration {i + 1}: regressed, reverted')
+    return
 
 
 async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
@@ -599,7 +853,80 @@ A test is at fault: {reason}'''
             raise Exception('Failed to correct test', meta.filename)
 
 
-async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False):
+def _code_from_test_md(md: str) -> str:
+    # Extract the python code from a single-file test markdown document
+    m = re.search(r'```[^\n]*\n(.*?)\n```', md, re.DOTALL)
+    return m.group(1) if m else md
+
+
+async def gpt_validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, retries: int = 2, debug: bool = False):
+    # One validation iteration of a test correction: check the "test at fault" reasoning against the
+    # assignment, that the corrected suite is faithful, and that no correct test was weakened.
+    gpt_review = get_mapper(VALIDATE_TEST_CORRECTION_PROMPT.format(
+        filename=meta.filename), model=resolve_strong_model(), stats_stage='third_stage')
+    corrected_code = _code_from_test_md(corrected_md)
+    user_request = f'''{format_marsha_for_llm(meta)}
+
+# {meta.filename}.py
+
+```py
+{code}
+```
+
+# Original test suite
+
+```py
+{orig_test}
+```
+
+# Corrected test suite
+
+```py
+{corrected_code}
+```
+
+# Diagnosis
+
+A test is at fault: {reason}'''
+    try:
+        doc = await gpt_review.run(user_request)
+        if not validate_second_stage_markdown(doc, f'{meta.filename}_test.py'):
+            if debug:
+                print(f'''[Validate correction] Invalid doc:
+{doc}''')
+            raise Exception('Invalid output format')
+        return doc
+    except Exception:
+        if retries > 0:
+            return await gpt_validate_test_correction(
+                meta, code, orig_test, corrected_md, reason, retries - 1, debug)
+        return None
+
+
+async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, level: int, debug: bool = False) -> str:
+    # Third per-phase loop: review the test correction's reasoning and spec-alignment before it is
+    # written, so the only path that can bend the oracle is itself spec-anchored and double-checked.
+    for i in range(level):
+        reviewed = await gpt_validate_test_correction(
+            meta, code, orig_test, corrected_md, reason, debug=debug)
+        if reviewed is None:
+            if debug:
+                print(
+                    f'[Validate correction] iteration {i + 1}: invalid review, keeping current correction')
+            break
+        if reviewed.strip() == corrected_md.strip():
+            if debug:
+                print(
+                    f'[Validate correction] iteration {i + 1}: correction validated, unchanged')
+            break
+        if debug:
+            print(
+                f'[Validate correction] iteration {i + 1}: correction revised')
+        corrected_md = reviewed
+    return corrected_md
+
+
+async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False, optimize: int = 0):
     if retries == 0:
         raise Exception('Failed to fix code', meta.filename)
     # There should only be two files, the test file and the code file
@@ -608,53 +935,11 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
     code_file = [file for file in files if file.endswith(
         f'{meta.filename}.py')][0]
     req_files = [file for file in files if file.endswith('requirements.txt')]
-    # Define virtual environment path
-    code_file_abspath = os.path.abspath(code_file)
-    code_file_dir = os.path.dirname(code_file_abspath)
-    venv_path = f'{code_file_dir}/venv'
-    # Install requirements if needed
-    req_file = None
-    if len(req_files) > 0:
-        req_file = req_files[0]
-        if not os.path.exists(venv_path):
-            print('Creating virtual environment...')
-            try:
-                create_venv_stream = await asyncio.create_subprocess_exec(
-                    python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                await run_subprocess(create_venv_stream)
-            except Exception as e:
-                if debug:
-                    print('Failed to create virtual environment', e)
-        print('Installing requirements...')
-        try:
-            # define pip executable based on os
-            pip_exe = f'{venv_path}/Scripts/pip.exe' if platform.system(
-            ) == 'Windows' else f'{venv_path}/bin/pip'
-            pip_stream = await asyncio.create_subprocess_exec(
-                pip_exe, 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await run_subprocess(pip_stream, 120)
-        except Exception as e:
-            if debug:
-                print('Failed to install requirements', e)
-
-    # Run the test suite
-    if not os.path.exists(venv_path):
-        python_exe = python
-    else:
-        # define python executable based on os
-        python_exe = f'{venv_path}/Scripts/python.exe' if platform.system(
-        ) == 'Windows' else f'{venv_path}/bin/python'
-    try:
-        test_stream = await asyncio.create_subprocess_exec(
-            python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = await run_subprocess(test_stream)
-        test_results = f'''{stdout}{stderr}'''
-    except Exception as e:
-        print('Failed to run test suite...', e)
-        test_results = None
-
-    # Recursively work on fixing the files while the test suite fails, return when complete
-    if test_results is not None and ("FAILED" in test_results or "Traceback" in test_results):
+    req_file = req_files[0] if len(req_files) > 0 else None
+    passed, test_results = await run_test_suite(code_file, test_file, req_file, debug)
+    if passed is None:  # If the test suite failed to run, we try again
+        return await test_and_fix_files(meta, files, retries - 1, debug, optimize)
+    if not passed:
         if debug:
             print('Test failed, diagnosing the root cause')
             print(test_results)
@@ -662,7 +947,8 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
         code = read_file(code_file)
         # Diagnose whether the implementation or a test is at fault, then route to the matching
         # fix. Only one artifact is ever edited per pass: the implementation fix structurally
-        # cannot touch the oracle, and the (spec-anchored) test correction is the only path that may.
+        # cannot touch the oracle, and the (spec-anchored, double-checked) test correction is the
+        # only path that may.
         verdict = await diagnose_failure(meta, code, test, test_results)
         subdir = '/'.join(code_file.split('/')[:-1])
         if verdict['fault'] == 'test':
@@ -670,6 +956,9 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
                 print(f'Punting back to the test layer: {verdict["reason"]}')
             fixed = await correct_test(
                 meta, code, test, test_results, verdict['reason'], debug=debug)
+            if optimize > 0:
+                fixed = await validate_test_correction(
+                    meta, code, test, fixed, verdict['reason'], optimize, debug=debug)
             write_files_from_markdown(fixed, subdir=subdir)
         else:
             if debug:
@@ -679,9 +968,7 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
             write_files_from_markdown(fixed, subdir=subdir)
         # Re-run the tests recursively; the recursion ejects when they pass. The file paths are
         # stable across passes (same directory), so pass the original file list down unchanged.
-        return await test_and_fix_files(meta, files, retries - 1, debug)
-    elif test_results is None:  # If the test suite failed to run, we try again
-        return await test_and_fix_files(meta, files, retries - 1, debug)
+        return await test_and_fix_files(meta, files, retries - 1, debug, optimize)
 
 
 async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> list[str]:
@@ -702,6 +989,9 @@ async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bo
         # against it. Each candidate keeps the standard (code, requirements, test) shape, but the
         # test section is the shared oracle, so the implementation is written to a fixed oracle.
         oracle = await gpt_test_suite(meta, debug=debug)
+        if args.optimize > 0 and not args.quick_and_dirty:
+            print('Verifying test suite coverage and fidelity...')
+            oracle = await optimize_test_suite(meta, oracle, args.optimize, debug)
         impls = await gpt_implementation(meta, oracle, n_results, debug=debug)
         mds = []
         for impl in impls:
@@ -743,7 +1033,7 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     try:
-        await test_and_fix_files(meta, files, debug=debug)
+        await test_and_fix_files(meta, files, debug=debug, optimize=args.optimize)
     except Exception as e:
         print('Third stage failure')
         print(e)
@@ -752,6 +1042,9 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
         t_tsii = time.time()
         stats.third_stage.total_time = prettify_time_delta(
             t_tsii - t_tsi)
+    if args.optimize > 0:
+        print('Optimizing implementation...')
+        await optimize_implementation(args, meta, files, debug)
     if args.debug:
         for file in files:
             print(f'# {file}\n{read_file(file)}\n')

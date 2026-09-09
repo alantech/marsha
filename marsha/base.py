@@ -31,6 +31,8 @@ parser.add_argument('--exclude-sanity-check', action='store_true',
                     help='Skips an initial sanity check that the definition is self-consistent')
 parser.add_argument('--no-warn', action='store_true',
                     help='Do not display warnings about ambiguous areas of the definition from the sanity check')
+parser.add_argument('--optimize', type=int, default=0,
+                    help='Optimization level: number of per-phase LLM review iterations (test-suite coverage/fidelity, implementation quality, and test-correction validation). 0 (default) disables the optimization loops.')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 parser.add_argument('--api-base',

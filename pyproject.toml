@@ -19,6 +19,7 @@ dependencies = [
     "pydocstyle",
     "pyflakes",
     "pylama",
+    "pytest",
     "rich",
     "setuptools<81",
 ]
@@ -37,3 +38,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["marsha*"]
+
+[tool.pytest.ini_options]
+# pylama ships a pytest plugin whose hook signature predates the current pytest; disable it.
+addopts = "-p no:pylama"
