@@ -8,5 +8,6 @@ pycodestyle
 pydocstyle
 pyflakes
 pylama
+pytest
 rich
 setuptools<81
