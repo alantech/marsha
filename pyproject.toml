@@ -39,6 +39,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["marsha*"]
 
+[tool.setuptools.package-data]
+marsha = ["personas/*.md", "personas/*.txt"]
+
 [tool.pytest.ini_options]
 # pylama ships a pytest plugin whose hook signature predates the current pytest; disable it.
 addopts = "-p no:pylama"

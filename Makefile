@@ -23,7 +23,7 @@ uninstall:
 
 .PHONY: format
 format:
-	./venv/bin/autopep8 -i marsha/*.py
+	./venv/bin/autopep8 -i marsha/*.py marsha/personas/*.py
 
 .PHONY: test
 test: ./venv

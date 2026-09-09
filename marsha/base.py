@@ -33,6 +33,14 @@ parser.add_argument('--no-warn', action='store_true',
                     help='Do not display warnings about ambiguous areas of the definition from the sanity check')
 parser.add_argument('--optimize', type=int, default=0,
                     help='Optimization level: number of per-phase LLM review iterations (test-suite coverage/fidelity, implementation quality, and test-correction validation). 0 (default) disables the optimization loops.')
+parser.add_argument('--test-personas',
+                    help='Comma-separated reviewer personas for the test-suite (oracle) loop. Each entry is a built-in name (e.g. ada) or a path to a custom persona file (e.g. ./sharona.md). Default: all built-in oracle reviewers.')
+parser.add_argument('--impl-personas',
+                    help='Comma-separated reviewer personas for the implementation loop. Each entry is a built-in name (e.g. sage) or a path to a custom persona file. Default: all built-in impl reviewers.')
+parser.add_argument('--fix-personas',
+                    help='Comma-separated reviewer personas for the test-correction (oracle-fix) loop. Each entry is a built-in name (e.g. sol) or a path to a custom persona file. Default: all built-in correction reviewers.')
+parser.add_argument('--optimize-severity', default='major,minor,nit',
+                    help='Comma-separated finding severities to act on during --optimize (major,minor,nit). Default: all three.')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 parser.add_argument('--api-base',

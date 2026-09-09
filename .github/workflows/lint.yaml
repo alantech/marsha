@@ -21,12 +21,12 @@ jobs:
         run: |
           uv venv venv
           uv pip install --python ./venv/bin/python -r requirements.txt
-          PEP8_LINT_RESULTS=`./venv/bin/autopep8 -d marsha/*.py`
+          PEP8_LINT_RESULTS=`./venv/bin/autopep8 -d marsha/*.py marsha/personas/*.py`
           if [ "$PEP8_LINT_RESULTS" != '' ]; then
             echo $PEP8_LINT_RESULTS
             exit 1
           fi
-          FLAKE8_LINT_RESULTS=`./venv/bin/flake8 marsha/*.py`
+          FLAKE8_LINT_RESULTS=`./venv/bin/flake8 marsha/*.py marsha/personas/*.py`
           if [ "$FLAKE8_LINT_RESULTS" != '' ]; then
             echo $FLAKE8_LINT_RESULTS
             exit 1

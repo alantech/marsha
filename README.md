@@ -111,6 +111,14 @@ The compiler then generates a test suite for the definition — the *oracle* —
 
 An optional `--optimize <level>` flag spends additional LLM iterations refining the result, one inner loop per phase. A higher level runs more review iterations: the test suite is double-checked for coverage and fidelity against the definition (every stated behavior is tested and nothing is invented), the implementation is iterated for performance, safety, and code quality — with each change re-run against the oracle and reverted if it regresses — and any test correction is re-validated against the definition before it is applied. The default level is 0, which disables these loops and changes neither behavior nor cost.
 
+Each review loop is driven by a panel of named review **personas**. In every iteration the loop's reviewers run independently and in parallel, each reporting `MAJOR` / `MINOR` / `NIT` findings; a per-phase implementor (the *editor*) then addresses those findings and returns a reasoning preamble plus the revised artifact. The built-in personas live in [`marsha/personas/`](./marsha/personas/) — one file per reviewer plus one editor per phase. The reviewer set for each loop is selectable with:
+
+* `--test-personas` — reviewers for the test-suite (oracle) loop
+* `--impl-personas` — reviewers for the implementation loop
+* `--fix-personas` — reviewers for the test-correction (oracle-fix) loop
+
+Each flag takes a comma-separated list whose entries are either a built-in persona name (e.g. `sage`) or a path to a custom persona file (e.g. `./sharona.md`); omit a flag to run that loop's default set. `--optimize-severity major,minor,nit` (default all three) chooses which finding severities the editor acts on.
+
 In order to use the compiler, Marsha needs to know which LLM to send requests to. By default it uses the OpenAI API, which requires the following environment variables to be set:
 
 * `OPENAI_ORG`
