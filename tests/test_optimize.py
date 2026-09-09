@@ -152,6 +152,19 @@ def test_impl_converges_with_no_findings():
     assert read_file(files[0]) == GOOD
 
 
+def test_impl_generation_normalizes_single_result_for_n1():
+    # run() returns a bare string for a single result; gpt_implementation must treat it as one doc.
+    async def scenario():
+        class FakeMapper:
+            async def run(self, req):
+                return '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
+        with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
+            return await llm.gpt_implementation(make_meta(), 'ORACLE', n_results=1, debug=False)
+    mds = asyncio.run(scenario())
+    assert isinstance(mds, list)
+    assert len(mds) == 1
+
+
 # --- Correction phase: validate_test_correction ----------------------------
 
 def test_correction_converges_with_no_findings():

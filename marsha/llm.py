@@ -357,6 +357,9 @@ The desired response must look like the following:
 {marsha_for_code_llm}
     ---- end ----''')
     reses = await gpt_gen_code.run(user_request)
+    if isinstance(reses, str):
+        # run() returns a bare string for a single result; normalize to a list so -n 1 works.
+        reses = [reses]
     # The output should be a valid list of implementation Markdown documents (code + optional
     # requirements). Parse each one and keep the valid docs; if none are valid, retry.
     try:
