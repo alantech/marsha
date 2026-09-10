@@ -10,18 +10,23 @@ import shutil
 import subprocess
 import sys
 
-from pylama.main import parse_options, check_paths, DEFAULT_FORMAT
+import pycodestyle
+import pyflakes.api
 
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
+from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
 from marsha.meta import MarshaMeta
+from marsha.log import log
 from marsha.parse import validate_first_stage_markdown, validate_second_stage_markdown, validate_impl_markdown, write_files_from_markdown, format_marsha_for_llm, extract_func_name, split_preamble
 from marsha.personas import (
     build_registry, resolve_loop_reviewers, load_editor, run_personas,
     actionable_findings, format_findings, prior_round_block, parse_severities,
+    parse_compacted_findings,
 )
 from marsha.stats import stats
 from marsha.term import print_diagnostic
 from marsha.utils import read_file, write_file, autoformat_files, prettify_time_delta
+from marsha.llm_client import get_client
 from marsha.mappers import get_mapper
 from marsha.mappers.chatgpt import uses_completion_tokens
 
@@ -130,7 +135,7 @@ async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
         # Local OpenAI-compatible servers: leave the output budget to the server
         answer = {}
     gpt_check = get_mapper(SPEC_CHECK_PROMPT, n_results=1,
-                           stats_stage='first_stage', **answer)
+                           stats_stage='first_stage', label='spec-check', **answer)
     marsha_for_code_llm = format_marsha_for_llm(meta)
     try:
         return parse_spec_check(await gpt_check.run(marsha_for_code_llm))
@@ -177,7 +182,7 @@ The desired response must look like the following:
 <generated code>
 ```
 
-''', n_results=1, stats_stage='first_stage')
+''', n_results=1, stats_stage='first_stage', label='oracle-gen')
     marsha_for_test_llm = format_marsha_for_llm(meta)
     if debug:
         print(f'''marsha_for_llm =
@@ -229,7 +234,7 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
     for attempt in range(retries):
         try:
             mapper = get_mapper(system, n_results=1,
-                                stats_stage=stats_stage, model=model)
+                                stats_stage=stats_stage, model=model, label=f'{loop}-editor')
             doc = await mapper.run(user_message)
             preamble, artifact = split_preamble(doc, first_header)
             if not validate(artifact):
@@ -243,6 +248,85 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
             if attempt == retries - 1:
                 return None, ''
     return None, ''
+
+
+_COMPACT_PROMPT = '''You are consolidating a list of code-review findings so it fits within a smaller context budget.
+You are given findings, one per line, each referenced by a [Name-Label]. Different reviewers (the names) may have raised the same point, and some findings may already be resolved or no longer needed.
+Reduce the list by doing BOTH of the following:
+1. Drop any finding that is already resolved, superseded, or no longer needs to be acted on.
+2. When two or more findings make the same point, keep ONLY the single most detailed one and drop the rest. Preserve the exact [Name-Label] of the most detailed one.
+You MUST preserve each kept finding's [Name-Label] exactly as it was given: do not rename, renumber, or invent labels. The reduced list may therefore skip some letter/number combinations.
+Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
+- [Name-Label] SEVERITY <location> - <description>
+Output no prose, no numbering, no code fences, and no finding that was not in the input. If no findings should be kept, respond with exactly: NO FINDINGS
+'''
+
+
+def _trim_findings_to_budget(findings, fits_check):
+    # Deterministic last-resort reduction: drop findings from lowest to highest severity until
+    # fits_check passes (or nothing is left). Guarantees the editor never receives an over-budget
+    # prompt unless even the highest-severity findings alone exceed it.
+    order = {'NIT': 0, 'MINOR': 1, 'MAJOR': 2}
+    current = list(findings)
+    while not fits_check(current) and current:
+        worst = min(current, key=lambda f: order.get(f['severity'], 1))
+        current.remove(worst)
+    return current
+
+
+async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
+    # A dedicated LLM pass that shrinks the findings list to fit the context budget: drop
+    # resolved/redundant findings and merge cross-reviewer duplicates (keeping the more detailed
+    # [Name-Label]). Survivors keep their original labels so cross-references stay valid. Returns
+    # the original list unchanged unless the LLM produced a strictly smaller, well-formed list.
+    gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
+                     stats_stage='third_stage', model=model, label='compact')
+    user = f'''{format_marsha_for_llm(meta)}
+{prior_context}
+# Review findings to reduce
+
+{format_findings(findings)}'''
+    for attempt in range(retries):
+        try:
+            text = await gpt.run(user)
+            compacted = parse_compacted_findings(text)
+            if 0 < len(compacted) < len(findings):
+                return compacted
+            return findings
+        except Exception:
+            if debug:
+                print(f'[Compact] attempt {attempt + 1} failed')
+            if attempt == retries - 1:
+                return findings
+    return findings
+
+
+async def _budgeted_findings(meta, findings, build, model, args, debug=False):
+    # Ensure the editor prompt build(findings) fits the context budget. If not, compact the
+    # findings (LLM), then deterministically trim by severity, so the editor never receives an
+    # over-budget prompt. If the budget cannot be determined (e.g. no client in a test harness),
+    # skip budgeting and send the findings as-is. Returns the (possibly reduced) findings.
+    override = getattr(args, 'context_window', None)
+    cap = getattr(args, 'context_cap', 0.5)
+    try:
+        client = get_client()
+        ctx = await resolve_context_window(model=model, client=client, override=override)
+    except Exception:
+        return findings
+
+    def fits_check(current):
+        return fits(build(current), ctx, cap)
+    if fits_check(findings):
+        log(f'editor prompt ~{estimate_tokens(build(findings))} tokens, within budget '
+            f'{budget_tokens(ctx, cap)}; no compaction needed')
+        return findings
+    log(f'editor prompt ~{estimate_tokens(build(findings))} tokens exceeds budget '
+        f'{budget_tokens(ctx, cap)}; compacting {len(findings)} findings')
+    reduced = await compact_findings(meta, findings, model, debug=debug)
+    if fits_check(reduced):
+        return reduced
+    log('compaction insufficient; trimming lowest-severity findings to fit')
+    return _trim_findings_to_budget(reduced, fits_check)
 
 
 def _oracle_review_message(meta, oracle_md):
@@ -278,16 +362,21 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     severities = parse_severities(args.optimize_severity)
     prior_findings, prior_preamble = [], ''
     for i in range(level):
+        log(f'oracle loop iteration {i + 1}/{level}: running reviewers')
         user_message = _oracle_review_message(meta, oracle_md)
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
-        findings = await run_personas(reviewers, user_message, model, 'first_stage', debug)
+        findings = await run_personas(reviewers, user_message, model, 'first_stage', debug, loop='oracle')
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
                 print(
                     f'[Optimize oracle] iteration {i + 1}: no actionable findings, converged')
             break
+        actionable = await _budgeted_findings(
+            meta, actionable,
+            lambda fs: _oracle_editor_message(meta, oracle_md, fs),
+            model, args, debug)
         artifact, preamble = await _run_editor(
             'oracle', meta, _oracle_editor_message(
                 meta, oracle_md, actionable),
@@ -345,7 +434,7 @@ The desired response must look like the following:
 <dependencies needed>
 ```
 
-''', n_results=n_results, stats_stage='first_stage')
+''', n_results=n_results, stats_stage='first_stage', label='impl-gen')
     user_request = f'''{marsha_for_code_llm}
 
 ## The unit test suite your implementation must pass
@@ -481,17 +570,22 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     severities = parse_severities(args.optimize_severity)
     prior_findings, prior_preamble = [], ''
     for i in range(level):
+        log(f'impl loop iteration {i + 1}/{level}: running reviewers')
         current_code = read_file(code_file)
         user_message = _impl_review_message(meta, oracle, current_code)
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
-        findings = await run_personas(reviewers, user_message, model, 'third_stage', debug)
+        findings = await run_personas(reviewers, user_message, model, 'third_stage', debug, loop='impl')
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
                 print(
                     f'[Optimize impl] iteration {i + 1}: no actionable findings, converged')
             break
+        actionable = await _budgeted_findings(
+            meta, actionable,
+            lambda fs: _impl_editor_message(meta, oracle, current_code, fs),
+            model, args, debug)
         artifact, preamble = await _run_editor(
             'impl', meta, _impl_editor_message(
                 meta, oracle, current_code, actionable),
@@ -545,7 +639,7 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-''', stats_stage='second_stage')
+''', stats_stage='second_stage', label='lint-fix')
     fixed_code = await gpt_fix.run(f'''# {filename}
 
 ```py
@@ -573,29 +667,83 @@ The desired response must look like the following:
             raise Exception('Failed to generate code', lint_text)
 
 
+class _StyleReport(pycodestyle.BaseReport):
+    """Collect pycodestyle findings as (line, col, code, message) tuples, honouring the ignore set."""
+
+    def __init__(self, options):
+        super().__init__(options)
+        self.errors = []
+
+    def error(self, line_number, offset, text, check):
+        code = super().error(line_number, offset, text, check)
+        if code:
+            self.errors.append((line_number, offset + 1, code, text[5:]))
+        return code
+
+    def get_file_results(self):
+        return len(self.errors)
+
+
+class _FlakeReport:
+    """Collect pyflakes findings (undefined names, syntax errors, ...) as preformatted strings."""
+
+    def __init__(self):
+        self.errors = []
+
+    def flake(self, message):
+        self.errors.append(str(message))
+
+    def syntaxError(self, filename, msg, lineno, offset, text):
+        if offset is not None:
+            self.errors.append(f'{filename}:{lineno}:{max(offset, 1)}: {msg}')
+        else:
+            self.errors.append(f'{filename}:{lineno}: {msg}')
+
+    def unexpectedError(self, filename, msg):
+        self.errors.append(f'{filename}: {msg}')
+
+
+# pyflakes findings that are style noise (the linter previously suppressed them); everything else
+# (e.g. undefined names) is a real problem worth showing the LLM.
+_PYFLAKES_NOISE = ('imported but unused',
+                   'is assigned to but never used', 'is defined but unused')
+
+
+def _lint_files(files, ignore):
+    """Run pycodestyle (style/syntax) and pyflakes (semantics) over the given files and return a
+    mapping of filename -> list of '<file>:<line>:<col>: <code> <message>' strings. Replaces the
+    former pylama call, whose plugin discovery imports the deprecated pkg_resources API."""
+    findings = {f: [] for f in files}
+    style_options = pycodestyle.StyleGuide(
+        quiet=True, ignore=list(ignore)).options
+    for file in files:
+        path = os.path.abspath(f'./{file}')
+        if not os.path.exists(path):
+            continue
+        style = _StyleReport(style_options)
+        pycodestyle.Checker(path, options=style_options,
+                            report=style).check_all()
+        findings[file].extend(f'{file}:{line}:{col}: {code} {msg}'
+                              for line, col, code, msg in style.errors)
+        with open(path, encoding='utf-8') as fh:
+            source = fh.read()
+        flakes = _FlakeReport()
+        pyflakes.api.check(source, file, flakes)
+        for entry in flakes.errors:
+            if any(noise in entry for noise in _PYFLAKES_NOISE):
+                continue
+            findings[file].append(entry)
+    return findings
+
+
 async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False):
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
-    options = parse_options()
-
-    # Disabling pydocstyle and mccabe as they only do style checks, no compile-like checks
-    options.linters = ['pycodestyle', 'pyflakes']
-    options.paths = [os.path.abspath(f'./{file}') for file in files]
-
-    # options.select = {
-    #     'E112',  # expected an indented block
-    #     'E113',  # unexpected indentation
-    #     'E901',  # SyntaxError or IndentationError
-    #     'E902',  # IOError
-    #     'E0602', # undefined variable
-    #     'E1122',  # unexpected keyword argument in function call
-    #     'W0401', # wildcard import; unable to detect undefined names
-    # }
-
-    # We're using the linter as a way to catch coarse errors like missing imports. We don't actually
-    # want the LLM to fix the linting issues, we'll just run the output through Python Black at the
-    # end, so we have a significant number of warnings and "errors" from the linter we ignore
-    options.ignore = {
+    # pycodestyle (style/syntax) + pyflakes (semantics), run directly: pylama was dropped because
+    # it imports the deprecated pkg_resources API. We lint to catch coarse errors like undefined
+    # names; we do not want the LLM fixing every style nit — the output goes through Black anyway —
+    # so a large set of cosmetic rules is ignored below.
+    _lint_ignore = {
         'E111',  # indentation is not multiple of 4
         'E117',  # over-indented
         'E126',  # continuation line over-indented for hanging indent
@@ -656,16 +804,14 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: 
         'W0612',  # unused variable
     }
 
-    lints = check_paths(
-        [os.path.abspath(f'./{file}') for file in files], options=options, rootdir='.')
+    lints_by_file = _lint_files(files, _lint_ignore)
 
-    if len(lints) == 0:
+    if all(len(v) == 0 for v in lints_by_file.values()):
         return
 
     jobs = []
     for file in files:
-        file_lints = [e.format(DEFAULT_FORMAT)
-                      for e in lints if e.filename == file]
+        file_lints = lints_by_file.get(file, [])
         if len(file_lints) > 0:
             lint_text = '\n'.join(file_lints)
             jobs.append(fix_file(marsha_filename, file,
@@ -696,7 +842,7 @@ async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str
     # Read-only: decide whether the implementation or a test is at fault. Uses the standard
     # (cheap) model, since the safety property is enforced structurally, not by this call.
     gpt_diag = get_mapper(DIAGNOSE_PROMPT, n_results=1,
-                          stats_stage='third_stage')
+                          stats_stage='third_stage', label='diagnose')
     user_request = f'''{format_marsha_for_llm(meta)}
 
 # {meta.filename}.py
@@ -756,7 +902,7 @@ The desired response must look like the following:
 <dependencies needed>
 ```
 
-''', model=resolve_strong_model(), stats_stage='third_stage')
+''', model=resolve_strong_model(), stats_stage='third_stage', label='impl-fix')
     user_request = f'''{format_marsha_for_llm(meta)}
 
 # {meta.filename}.py
@@ -817,7 +963,7 @@ The desired response must look like the following:
 <corrected code>
 ```
 
-''', model=resolve_strong_model(), stats_stage='third_stage')
+''', model=resolve_strong_model(), stats_stage='third_stage', label='test-correct')
     user_request = f'''{format_marsha_for_llm(meta)}
 
 # {meta.filename}.py
@@ -909,18 +1055,24 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
     severities = parse_severities(args.optimize_severity)
     prior_findings, prior_preamble = [], ''
     for i in range(level):
+        log(f'correction loop iteration {i + 1}/{level}: running reviewers')
         corrected_code = _code_from_test_md(corrected_md)
         user_message = _correction_review_message(
             meta, code, orig_test, corrected_code, reason)
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
-        findings = await run_personas(reviewers, user_message, model, 'third_stage', debug)
+        findings = await run_personas(reviewers, user_message, model, 'third_stage', debug, loop='correction')
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
                 print(
                     f'[Validate correction] iteration {i + 1}: no actionable findings, validated')
             break
+        actionable = await _budgeted_findings(
+            meta, actionable,
+            lambda fs: _correction_editor_message(
+                meta, code, orig_test, corrected_code, reason, fs),
+            model, args, debug)
         artifact, preamble = await _run_editor(
             'correction', meta,
             _correction_editor_message(
@@ -956,7 +1108,9 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
     req_file = req_files[0] if len(req_files) > 0 else None
     passed, test_results = await run_test_suite(code_file, test_file, req_file, debug)
     if passed is None:  # If the test suite failed to run, we try again
+        log('test suite failed to run; retrying')
         return await test_and_fix_files(meta, files, retries - 1, debug, args)
+    log(f'test suite: {"passed" if passed else "FAILED"} (retries left={retries})')
     if not passed:
         if debug:
             print('Test failed, diagnosing the root cause')
@@ -968,6 +1122,7 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
         # cannot touch the oracle, and the (spec-anchored, double-checked) test correction is the
         # only path that may.
         verdict = await diagnose_failure(meta, code, test, test_results)
+        log(f'diagnosis: fault={verdict["fault"]} - {verdict["reason"]}')
         subdir = '/'.join(code_file.split('/')[:-1])
         if verdict['fault'] == 'test':
             if debug:
@@ -992,9 +1147,11 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
 async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> list[str]:
     t1 = time.time()
     print('Generating Python code...')
+    log(f'first stage: {meta.filename} (n={n_results})')
     mds = None
     try:
         if not args.exclude_sanity_check:
+            log('spec sanity check')
             check = await gpt_check_spec(meta)
             if not args.no_warn:
                 for warning in check['warnings']:
@@ -1007,9 +1164,12 @@ async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bo
         # against it. Each candidate keeps the standard (code, requirements, test) shape, but the
         # test section is the shared oracle, so the implementation is written to a fixed oracle.
         oracle = await gpt_test_suite(meta, debug=debug)
+        log(f'oracle test suite generated ({len(oracle)} chars)')
         if args.optimize > 0 and not args.quick_and_dirty:
             print('Verifying test suite coverage and fidelity...')
+            log(f'oracle optimize loop: {args.optimize} iteration(s)')
             oracle = await optimize_test_suite(meta, oracle, args, debug)
+        log(f'generating {n_results} implementation(s)')
         impls = await gpt_implementation(meta, oracle, n_results, debug=debug)
         mds = []
         for impl in impls:
@@ -1035,6 +1195,7 @@ async def generate_python_code(args, meta: MarshaMeta, n_results: int, debug: bo
 async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool = False):
     t_ssi = time.time()
     print('Parsing generated code...')
+    log(f'second stage: {meta.filename} (lint & fix)')
     try:
         await lint_and_fix_files(meta.filename, files, debug=debug)
     except Exception as e:
@@ -1045,11 +1206,12 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
         t_ssii = time.time()
         stats.second_stage.total_time = prettify_time_delta(
             t_ssii - t_ssi)
-    if args.debug:
+    if debug:
         for file in files:
             print(f'# {file}\n{read_file(file)}\n')
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
+    log('third stage: verify & correct')
     try:
         await test_and_fix_files(meta, files, debug=debug, args=args)
     except Exception as e:
@@ -1062,12 +1224,14 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
             t_tsii - t_tsi)
     if args.optimize > 0:
         print('Optimizing implementation...')
+        log(f'impl optimize loop: {args.optimize} iteration(s)')
         await optimize_implementation(args, meta, files, debug)
-    if args.debug:
+    if debug:
         for file in files:
             print(f'# {file}\n{read_file(file)}\n')
     print('Formatting code...')
+    log('formatting')
     autoformat_files(files)
-    if args.debug:
+    if debug:
         for file in files:
             print(f'# {file}\n{read_file(file)}\n')

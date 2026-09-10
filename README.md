@@ -151,8 +151,13 @@ There are also a few flags on how to use Marsha:
 
 ```sh
 $ marsha --help
-usage: marsha [-h] [-d] [-q] [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS]
-              [--exclude-main-helper] [--exclude-sanity-check] [--no-warn]
+usage: marsha [-h] [-d] [--trace] [--trace-full] [-q] [-a ATTEMPTS]
+              [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
+              [--exclude-sanity-check] [--no-warn] [--optimize OPTIMIZE]
+              [--test-personas TEST_PERSONAS] [--impl-personas IMPL_PERSONAS]
+              [--fix-personas FIX_PERSONAS]
+              [--optimize-severity OPTIMIZE_SEVERITY]
+              [--context-window CONTEXT_WINDOW] [--context-cap CONTEXT_CAP]
               [-s] [--api-base API_BASE] [--model MODEL]
               [--provider {openai,anthropic}]
               source
@@ -165,10 +170,19 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   -d, --debug           Turn on debug logging
+  --trace               Also write a live, timestamped progress trace to
+                        stderr (each phase and every LLM request, with its
+                        label and duration). Implies -d. Useful for watching a
+                        slow run in real time, e.g. against a local llama.cpp
+                        server.
+  --trace-full          As --trace, but also dump the full input prompt and
+                        output of every LLM call to stderr. Implies --trace
+                        (and -d). Use for debugging exact prompts and
+                        responses.
   -q, --quick-and-dirty
                         Code generation with no correction stages run
-  -a ATTEMPTS, --attempts ATTEMPTS
-  -n N_PARALLEL_EXECUTIONS, --n-parallel-executions N_PARALLEL_EXECUTIONS
+  -a, --attempts ATTEMPTS
+  -n, --n-parallel-executions N_PARALLEL_EXECUTIONS
   --exclude-main-helper
                         Skips addition of helper code for running as a script
   --exclude-sanity-check
@@ -176,6 +190,38 @@ options:
                         self-consistent
   --no-warn             Do not display warnings about ambiguous areas of the
                         definition from the sanity check
+  --optimize OPTIMIZE   Optimization level: number of per-phase LLM review
+                        iterations (test-suite coverage/fidelity,
+                        implementation quality, and test-correction
+                        validation). 0 (default) disables the optimization
+                        loops.
+  --test-personas TEST_PERSONAS
+                        Comma-separated reviewer personas for the test-suite
+                        (oracle) loop. Each entry is a built-in name (e.g.
+                        ada) or a path to a custom persona file (e.g.
+                        ./sharona.md). Default: all built-in oracle reviewers.
+  --impl-personas IMPL_PERSONAS
+                        Comma-separated reviewer personas for the
+                        implementation loop. Each entry is a built-in name
+                        (e.g. sage) or a path to a custom persona file.
+                        Default: all built-in impl reviewers.
+  --fix-personas FIX_PERSONAS
+                        Comma-separated reviewer personas for the test-
+                        correction (oracle-fix) loop. Each entry is a built-in
+                        name (e.g. sol) or a path to a custom persona file.
+                        Default: all built-in correction reviewers.
+  --optimize-severity OPTIMIZE_SEVERITY
+                        Comma-separated finding severities to act on during
+                        --optimize (major,minor,nit). Default: all three.
+  --context-window CONTEXT_WINDOW
+                        Override the context window (in tokens) used to size
+                        review/editor prompts. Auto-detected from the service
+                        when possible, else documented defaults. Set it if
+                        your backend mis-reports its window.
+  --context-cap CONTEXT_CAP
+                        Fraction of the context window a single prompt may
+                        occupy before its findings are compacted (default
+                        0.5).
   -s, --stats           Save stats and write them to a file
   --api-base API_BASE   Base URL of an OpenAI-compatible API to use for LLM
                         requests, e.g. a local llama.cpp server. Overrides the
@@ -189,14 +235,19 @@ options:
 ```
 
 * `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
-* `-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
+* `--trace` (implies `-d`) writes a live, timestamped progress trace to `stderr`: each phase transition and every LLM request with its label and duration. It is flushed immediately, so it stays visible in real time even when `stdout` is piped to a file and block-buffered — useful for watching a slow run, e.g. against a local `llama.cpp` server. Watch it with `marsha --trace your.mrsh 2>trace.log &` then `tail -f trace.log`.
+ * `--trace-full` (implies `--trace`) is the same live trace, but it also dumps the full input prompt and output of every LLM call to `stderr` — bracketed by `=== <label>: request ===` / `=== <label>: response ===` markers. Use it to debug the exact prompts and responses, e.g. `marsha --trace-full your.mrsh 2>trace.log &`.
+ * `-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
 * `-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
 * `-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.
 * `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
+* `--exclude-sanity-check` Skips the initial sanity check that the definition is self-consistent.
 * `--no-warn` Suppresses the warnings the sanity check prints about significant ambiguities in the definition. The check itself still runs, and still fails the compile when the definition contradicts itself.
 * `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
 * `--model` Overrides the model used for code generation (default `gpt-5-mini`, `claude-sonnet-5` with the anthropic provider), eg to use a different model or the name of a locally served model.
+* `--context-window` Overrides the context window (in tokens) used to size review/editor prompts. It is auto-detected from the service when possible (eg a llama.cpp server's `n_ctx`), else a documented default is used; set it if your backend mis-reports its window.
+* `--context-cap` The fraction of the context window a single prompt may occupy before its findings are compacted (default `0.5`).
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).
 
 ## Using compiled Marsha code

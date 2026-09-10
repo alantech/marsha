@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 
+from marsha.config import is_local_backend
+from marsha.log import log
 from marsha.mappers import get_mapper
 
 # Per-loop reviewer filename prefix and the (fixed-per-loop) editor/implementor file.
@@ -185,6 +187,35 @@ def parse_findings(text, name, review_number):
     return findings
 
 
+_COMPACTED_LINE = re.compile(
+    r'^\s*-\s*\[([^\]]+)\]\s*(MAJOR|MINOR|NIT|NITPICK)\b\s*(.*)$', re.IGNORECASE)
+
+
+def parse_compacted_findings(text):
+    # Parse the output of the findings-compaction job. Each surviving line keeps its original
+    # [Name-Label] (never renumbered), so references from other reviewers stay valid; the
+    # sequence simply has gaps where findings were dropped.
+    findings = []
+    for line in (text or '').split('\n'):
+        m = _COMPACTED_LINE.match(line)
+        if not m:
+            continue
+        ref = m.group(1).strip()
+        severity = m.group(2).upper()
+        if severity == 'NITPICK':
+            severity = 'NIT'
+        location, description = _split_location(m.group(3).strip())
+        name, label = ref.split('-', 1) if '-' in ref else (ref, '')
+        findings.append({
+            'name': name,
+            'label': label,
+            'severity': severity,
+            'location': location,
+            'desc': description,
+        })
+    return findings
+
+
 def dedup_findings(findings):
     seen = set()
     out = []
@@ -224,19 +255,26 @@ def prior_round_block(findings, preamble):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False):
-    # Run every reviewer independently and in parallel; return the flattened labeled findings.
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None):
+    # Run every reviewer independently; return the flattened labeled findings. On a local
+    # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
+    # they run concurrently.
     async def one(spec):
         name, body, review_number = spec
         system = body + FINDINGS_CONTRACT.format(review_number=review_number)
+        label = f'{loop}:{name}' if loop else name
         try:
             mapper = get_mapper(
-                system, n_results=1, stats_stage=stats_stage, model=model)
+                system, n_results=1, stats_stage=stats_stage, model=model, label=label)
             text = await mapper.run(user_message)
         except Exception as e:
             if debug:
                 print(f'[Personas] {name} failed: {e}')
+            log(f'personas: {label} failed: {e}')
             return []
         return parse_findings(text, name, review_number)
-    results = await asyncio.gather(*[one(s) for s in reviewers])
+    if is_local_backend():
+        results = [await one(s) for s in reviewers]
+    else:
+        results = await asyncio.gather(*[one(s) for s in reviewers])
     return [f for sub in results for f in sub]

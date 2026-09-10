@@ -13,7 +13,9 @@ ANTHROPIC_DEFAULT_STRONG_MODEL = 'claude-opus-5'
 PROVIDERS = ('openai', 'anthropic')
 
 _cli_model = None
+_cli_strong_model = None
 _cli_provider = None
+_cli_api_base = None
 
 
 def get_config_dir():
@@ -55,9 +57,19 @@ def set_cli_model(model):
     _cli_model = model
 
 
+def set_cli_strong_model(model):
+    global _cli_strong_model
+    _cli_strong_model = model
+
+
 def set_cli_provider(provider):
     global _cli_provider
     _cli_provider = provider
+
+
+def set_cli_api_base(base):
+    global _cli_api_base
+    _cli_api_base = base
 
 
 def resolve_provider():
@@ -74,6 +86,8 @@ def resolve_provider():
 def resolve_api_base(cli_value=None):
     if cli_value:
         return cli_value
+    if _cli_api_base:
+        return _cli_api_base
     env_value = os.getenv('OPENAI_BASE_URL')
     if env_value:
         return env_value
@@ -81,6 +95,14 @@ def resolve_api_base(cli_value=None):
     if file_value:
         return file_value
     return DEFAULT_API_BASE
+
+
+def is_local_backend():
+    # True when the OpenAI provider is pointed at a non-default base (a local or
+    # OpenAI-compatible server such as llama.cpp). Such servers serialize requests and are
+    # slow, so callers use this to run reviewers one at a time and relax the client timeout.
+    # Real OpenAI and Anthropic handle concurrent requests fine.
+    return resolve_provider() == 'openai' and resolve_api_base() != DEFAULT_API_BASE
 
 
 def resolve_api_key(provider=None):
@@ -109,9 +131,34 @@ def resolve_model():
 
 
 def resolve_strong_model():
+    if _cli_strong_model:
+        return _cli_strong_model
     file_value = load_config_file().get('model_strong')
     if file_value:
         return file_value
     if resolve_provider() == 'anthropic':
         return ANTHROPIC_DEFAULT_STRONG_MODEL
     return DEFAULT_STRONG_MODEL
+
+
+def apply_available_models(available):
+    """Given the models actually served by an (OpenAI-compatible, e.g. local) backend, remap the
+    standard and strong models to an available one when the configured model isn't served. A local
+    server runs whatever is loaded and ignores the requested model name, so this makes marsha log
+    and send the model that will actually be used. Returns a list of human-readable notes for each
+    remap (empty if nothing changed)."""
+    if not available:
+        return []
+    notes = []
+
+    def _remap(name, resolver, setter):
+        current = resolver()
+        if current not in available:
+            chosen = available[0]
+            setter(chosen)
+            notes.append(
+                f'{name} {current!r} is not served by the backend; using {chosen!r}')
+
+    _remap('model', resolve_model, set_cli_model)
+    _remap('strong model', resolve_strong_model, set_cli_strong_model)
+    return notes
