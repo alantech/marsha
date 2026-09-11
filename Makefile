@@ -5,7 +5,6 @@ PREFIX ?= $(HOME)/.local
 
 ./venv:
 	uv venv venv
-	uv pip install --python ./venv/bin/python -r requirements.txt
 	uv pip install --python ./venv/bin/python --upgrade .
 
 .PHONY: clean
@@ -23,7 +22,7 @@ uninstall:
 
 .PHONY: format
 format:
-	./venv/bin/autopep8 -i marsha/*.py
+	./venv/bin/autopep8 -i marsha/*.py marsha/personas/*.py
 
 .PHONY: test
 test: ./venv

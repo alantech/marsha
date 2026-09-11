@@ -12,7 +12,6 @@ where uv >nul 2>nul || (
     exit /b 1
 )
 if not exist venv\Scripts\python.exe uv venv venv || goto :error
-uv pip install --python venv\Scripts\python.exe -r requirements.txt || goto :error
 uv pip install --python venv\Scripts\python.exe --upgrade . || goto :error
 venv\Scripts\python.exe make_launcher.py "%PREFIX%\bin" "%CD%\venv" || goto :error
 exit /b 0

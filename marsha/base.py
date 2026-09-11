@@ -5,7 +5,10 @@ import tempfile
 import time
 import traceback
 
-from marsha.config import resolve_model, resolve_provider, set_cli_model, set_cli_provider
+from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
+                           set_cli_api_base, set_cli_model, set_cli_provider, apply_available_models)
+from marsha.context import discover_models
+from marsha import log
 from marsha.llm import generate_python_code, review_and_fix
 from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
@@ -21,6 +24,10 @@ parser = argparse.ArgumentParser(
 parser.add_argument('source')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
+parser.add_argument('--trace', action='store_true',
+                    help='Also write a live, timestamped progress trace to stderr (each phase and every LLM request, with its label and duration). Implies -d. Useful for watching a slow run in real time, e.g. against a local llama.cpp server.')
+parser.add_argument('--trace-full', action='store_true',
+                    help='As --trace, but also dump the full input prompt and output of every LLM call to stderr. Implies --trace (and -d). Use for debugging exact prompts and responses.')
 parser.add_argument('-q', '--quick-and-dirty', action='store_true',
                     help='Code generation with no correction stages run')
 parser.add_argument('-a', '--attempts', type=int, default=1)
@@ -33,6 +40,18 @@ parser.add_argument('--no-warn', action='store_true',
                     help='Do not display warnings about ambiguous areas of the definition from the sanity check')
 parser.add_argument('--optimize', type=int, default=0,
                     help='Optimization level: number of per-phase LLM review iterations (test-suite coverage/fidelity, implementation quality, and test-correction validation). 0 (default) disables the optimization loops.')
+parser.add_argument('--test-personas',
+                    help='Comma-separated reviewer personas for the test-suite (oracle) loop. Each entry is a built-in name (e.g. ada) or a path to a custom persona file (e.g. ./sharona.md). Default: all built-in oracle reviewers.')
+parser.add_argument('--impl-personas',
+                    help='Comma-separated reviewer personas for the implementation loop. Each entry is a built-in name (e.g. sage) or a path to a custom persona file. Default: all built-in impl reviewers.')
+parser.add_argument('--fix-personas',
+                    help='Comma-separated reviewer personas for the test-correction (oracle-fix) loop. Each entry is a built-in name (e.g. sol) or a path to a custom persona file. Default: all built-in correction reviewers.')
+parser.add_argument('--optimize-severity', default='major,minor,nit',
+                    help='Comma-separated finding severities to act on during --optimize (major,minor,nit). Default: all three.')
+parser.add_argument('--context-window', type=int, default=None,
+                    help='Override the context window (in tokens) used to size review/editor prompts. Auto-detected from the service when possible, else documented defaults. Set it if your backend mis-reports its window.')
+parser.add_argument('--context-cap', type=float, default=0.5,
+                    help='Fraction of the context window a single prompt may occupy before its findings are compacted (default 0.5).')
 parser.add_argument('-s', '--stats', action='store_true',
                     help='Save stats and write them to a file')
 parser.add_argument('--api-base',
@@ -45,12 +64,29 @@ parser.add_argument('--provider',
 
 args = parser.parse_args()
 
+# --trace routes a live, flushed progress trace to stderr so a run can be watched in real time,
+# even when stdout is piped to a file and block-buffered. --trace-full adds full request/response
+# transcripts on top of the summary.
+if args.trace_full:
+    log.set_level(log.TRACE_FULL)
+elif args.trace:
+    log.set_level(log.TRACE_SUMMARY)
+else:
+    log.set_level(log.TRACE_OFF)
+
 # Set up the shared LLM client
 set_cli_model(args.model)
 set_cli_provider(args.provider)
+set_cli_api_base(args.api_base)
 client = create_client(args.api_base)
 set_client(client)
-if args.debug:
+# On a local/OpenAI-compatible server the requested model name is ignored and whatever is loaded
+# is served. Detect what is actually served and remap the standard/strong models to it so marsha
+# logs and sends the model that will really be used. Real OpenAI (default endpoint) is untouched.
+if is_local_backend():
+    for note in apply_available_models(discover_models(resolve_api_base())):
+        print(f'Note: {note}')
+if args.debug or args.trace or args.trace_full:
     print(f'Using LLM provider: {resolve_provider()}')
     print(f'Using LLM endpoint: {client.base_url}')
     print(f'Using LLM model: {resolve_model()}')
@@ -63,11 +99,12 @@ async def main():
     meta = await MarshaMeta(input_file).populate()
     print(f'Compiling functions for {meta.filename}...')
     quick_and_dirty = args.quick_and_dirty
-    debug = args.debug
+    # --trace (and --trace-full) imply -d, so they get both the stdout debug detail and the stderr trace.
+    debug = args.debug or args.trace or args.trace_full
     should_write_stats = args.stats
     attempts = args.attempts
     n_results = args.n_parallel_executions
-    if args.debug:
+    if debug:
         print(f'Number of attempts: {attempts}')
         print(f'Number of parallel executions: {n_results}')
     while attempts:
@@ -95,7 +132,7 @@ async def main():
             file_groups = file_groups + \
                 [write_files_from_markdown(
                     md, subdir=tmpdir.name)]
-        if args.debug:
+        if debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
         # Create tasks to run in parallel using asyncio
@@ -120,7 +157,7 @@ async def main():
         except Exception as e:
             print('Failed to generate working code.')
             print(e)
-            if args.debug:
+            if debug:
                 traceback.print_tb(e.__traceback__)
                 # Copy the temporary directories to a new directory for debugging
                 for tmpdir in tmp_directories:

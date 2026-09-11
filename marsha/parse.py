@@ -6,6 +6,17 @@ from marsha.meta import MarshaMeta, to_markdown
 from marsha.utils import write_file
 
 
+def split_preamble(doc, header):
+    # An editor response is a markdown preamble followed by the fenced artifact. Slice off the
+    # preamble at the artifact's first header so the existing validators run on the artifact alone.
+    marker = f'# {header}\n'
+    idx = doc.find(marker)
+    if idx == -1:
+        raise Exception(
+            f'Artifact header "# {header}" not found in editor response')
+    return doc[:idx].strip(), doc[idx:]
+
+
 def format_marsha_for_llm(meta: MarshaMeta):
     break_line = '\n'
     res = [f'# Requirements for file `{meta.filename}`']

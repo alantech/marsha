@@ -51,11 +51,11 @@ jobs:
         id: run
         run: |
           if ${{ github.event.client_payload.test != '' }}; then
-            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} n_jobs=${{github.event.client_payload.n_jobs || 5}} provider=openai time
+            make attempts=${{github.event.client_payload.attempts}} test=${{github.event.client_payload.test}} stats=True n_parallel_executions=${{github.event.client_payload.parallel_runs}} n_jobs=${{github.event.client_payload.n_jobs || 10}} provider=openai time
           elif ${{ github.event.inputs.test != '' }}; then
-            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} n_jobs=${{github.event.inputs.n_jobs || 5}} provider=openai time
+            make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} n_jobs=${{github.event.inputs.n_jobs || 10}} provider=openai time
           else
-            make attempts=1 test=examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 n_jobs=5 provider=openai time
+            make attempts=1 test=examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 n_jobs=10 provider=openai time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
