@@ -622,7 +622,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
 async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
     code = read_file(filename)
     gpt_fix = get_mapper(f'''You are a senior software engineer working with Python 3.
-You are using the `pylama` linting tool to find obvious errors and then fixing them. The linting tool uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
+You are using a Python linter to find obvious errors and then fixing them. The linter uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
 All of the lint errors require fixing.
 You should only fix the lint errors and not change anything else.
 Your response must not comment on what you changed.
@@ -646,7 +646,7 @@ The desired response must look like the following:
 {code}
 ```
 
-# pylama results
+# lint results
 
 ```
 {lint_text}

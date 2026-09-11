@@ -20,7 +20,7 @@ jobs:
       - name: Lint project
         run: |
           uv venv venv
-          uv pip install --python ./venv/bin/python -r requirements.txt
+          uv pip install --python ./venv/bin/python .
           PEP8_LINT_RESULTS=`./venv/bin/autopep8 -d marsha/*.py marsha/personas/*.py`
           if [ "$PEP8_LINT_RESULTS" != '' ]; then
             echo $PEP8_LINT_RESULTS
