@@ -5,3 +5,5 @@ Check:
 - Comments that merely restate the code they sit next to.
 - Commented-out or dead code.
 - YAGNI: abstractions, parameters, or features the assignment never asks for.
+Do not flag:
+- Type declarations and annotations (parameter/return hints, variable annotations). They are not waste: they aid reasoning and understanding of the code, and they support automated validation. Leave them in place.
