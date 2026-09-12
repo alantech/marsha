@@ -15,8 +15,10 @@ with `uv sync` or `pip install .`.
 import asyncio
 import os
 import platform
+import re
 import shutil
 import subprocess
+import sys
 import tomllib
 
 import autopep8
@@ -140,8 +142,21 @@ class PythonBackend(LanguageBackend):
     aliases = ('py',)
     code_fence_lang = 'py'
 
-    def __init__(self):
+    def __init__(self, target_version=None):
         self._toolchain = None
+        self.target_version = self.resolve_target_version(target_version)
+
+    def resolve_target_version(self, requested):
+        # The minimum Python version the generated project declares (its pyproject.toml
+        # requires-python). Defaults to the interpreter running Marsha: the generated code
+        # is only ever verified against that interpreter, so it is the only floor we can
+        # actually stand behind.
+        if requested is None:
+            return f'{sys.version_info.major}.{sys.version_info.minor}'
+        if not re.fullmatch(r'\d+(\.\d+)?', requested):
+            raise Exception(
+                f'Invalid target version: {requested!r} (expected a Python version, e.g. 3.12)')
+        return requested
 
     # --- naming / contract ---------------------------------------------------
 
@@ -249,7 +264,7 @@ The desired response must look like the following:
 [project]
 name = "{meta.filename}"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">={self.target_version}"
 dependencies = []
 
 [build-system]
@@ -308,7 +323,7 @@ The desired response must look like the following:
 [project]
 name = "{meta.filename}"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">={self.target_version}"
 dependencies = []
 
 [build-system]

@@ -134,7 +134,8 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
     # response into (preamble, artifact). Returns (artifact, preamble), or (None, '') on failure.
     b = backends.current()
     _, system = load_editor(loop)
-    system = system.format(filename=meta.filename, void_note=void_note(meta))
+    system = system.format(filename=meta.filename, void_note=void_note(meta),
+                           target_version=b.target_version)
     if loop == 'impl':
         first_header = b.source_name(meta.filename)
 

@@ -153,8 +153,9 @@ There are also a few flags on how to use Marsha:
 
 ```sh
 $ marsha --help
-usage: marsha [-h] [-t TARGET] [-d] [--trace] [--trace-full] [-q]
-              [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
+usage: marsha [-h] [-t TARGET] [--target-version TARGET_VERSION] [-d]
+              [--trace] [--trace-full] [-q] [-a ATTEMPTS]
+              [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
               [--exclude-sanity-check] [--no-warn] [--optimize OPTIMIZE]
               [--test-personas TEST_PERSONAS] [--impl-personas IMPL_PERSONAS]
               [--fix-personas FIX_PERSONAS]
@@ -174,6 +175,11 @@ options:
   -t, --target TARGET   Target language for the generated code, by backend id
                         or alias (default: python). Only `python` is wired
                         today; the registry is ready for more.
+  --target-version TARGET_VERSION
+                        Version of the target language the generated code
+                        should target, eg 3.12 for Python (where it becomes
+                        the project requires-python). Default: the interpreter
+                        running Marsha.
   -d, --debug           Turn on debug logging
   --trace               Also write a live, timestamped progress trace to
                         stderr (each phase and every LLM request, with its
@@ -255,6 +261,7 @@ options:
 * `--context-cap` The fraction of the context window a single prompt may occupy before its findings are compacted (default `0.5`).
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).
 * `--target` Selects the target language for the generated code, by backend id or alias (`python`, default). The compiler's language-specific steps — prompts, artifact layout, validation, linting, formatting, test execution, and the runnable-CLI helper — are delegated to a language backend; only `python` is wired today, and the registry is ready for more.
+* `--target-version` The version of the target language the generated code should target (eg `3.12` for Python, where it becomes the project's `requires-python`). Defaults to the interpreter running Marsha — the only one the generated code is verified against.
 
 ## Using compiled Marsha code
 

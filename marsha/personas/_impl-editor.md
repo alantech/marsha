@@ -20,7 +20,7 @@ Your response must be a markdown file. The first section header must be `{filena
 [project]
 name = "{filename}"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">={target_version}"
 dependencies = []
 
 [build-system]
