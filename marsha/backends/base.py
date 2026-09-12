@@ -5,6 +5,7 @@ orchestrates the TDD methodology (oracle-first generation, diagnose -> fix,
 revert-on-regression guardrail, --optimize persona loops) and delegates every
 language-specific leaf to a LanguageBackend:
 
+- target version resolution (the --target-version CLI value, per-target default)
 - naming / artifact contract (source, test, manifest, fence language, layout)
 - generation and review prompts (full templates, owned per backend)
 - validation of LLM markdown output
@@ -24,6 +25,14 @@ class LanguageBackend:
     id = ''
     aliases = ()
     code_fence_lang = ''
+
+    def resolve_target_version(self, requested):
+        """Validate a --target-version value for this target and return its normalized
+        form; a requested value of None means 'use this target's default'. The resolved
+        value lives on the backend instance as target_version (set in the constructor
+        and rebound by the CLI when the flag is given), and the backend's prompts
+        render it into the generated artifacts."""
+        raise NotImplementedError
 
     # --- naming / contract ---------------------------------------------------
 

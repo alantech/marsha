@@ -31,7 +31,7 @@ Each flag takes a comma-separated list. An entry is either a **built-in name** (
 
 ## Language-specific conventions
 
-Reviewer bodies are deliberately language-agnostic ("an assignment", "an implementation") so one shared set serves every target language. Per-language and per-project conventions (for the Python backend: type hints, PEP8, autopep8, `requirements.txt`) are supplied by the target backend's `persona_guidance()` and injected into every reviewer run — the backend is selected with `--target` (see the top-level README).
+Reviewer bodies are deliberately language-agnostic ("an assignment", "an implementation") so one shared set serves every target language. Per-language and per-project conventions (for the Python backend: type hints, PEP8, autopep8, `pyproject.toml` manifests) are supplied by the target backend's `persona_guidance()` and injected into every reviewer run — the backend is selected with `--target` (see the top-level README).
 
 ## Finding labels
 

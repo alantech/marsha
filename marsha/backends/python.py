@@ -2,16 +2,26 @@
 
 Reproduces the historical, Python-hardcoded behavior of the generation pipeline
 exactly: prompts, venv + pip test execution, pycodestyle/pyflakes linting,
-autopep8 formatting, the `.py` / `_test.py` / `requirements.txt` artifact
+autopep8 formatting, the `.py` / `_test.py` / `pyproject.toml` artifact
 contract, the runnable-`main` reflection helper, and `python`/`python3`
 toolchain detection. See issue #204.
+
+Dependency manifests are PEP 621 `pyproject.toml` files (issue #206), the same
+style as Marsha's own project file: the LLM is asked for a `[project]` table
+plus a setuptools build configuration, so a generated project can be installed
+with `uv sync` or `pip install .`. That structure is fixed by the artifact
+contract (a flat single module beside its test file), so the markdown
+validator enforces it rather than leaving it to the model.
 """
 
 import asyncio
 import os
 import platform
+import re
 import shutil
 import subprocess
+import sys
+import tomllib
 
 import autopep8
 import pycodestyle
@@ -92,6 +102,20 @@ _LINT_IGNORE = {
     'W0612',  # unused variable
 }
 
+# PEP 508 distribution names: alphanumeric runs separated by runs of - _ .
+_PEP508_NAME_RE = re.compile(r'(?i)^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$')
+
+
+def _normalize_name(name):
+    # PEP 508 name normalization: runs of dashes, underscores, and dots are equivalent.
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def _requirement_name(requirement):
+    # The distribution name of a PEP 508 requirement (everything before any specifier or extras).
+    match = re.match(r'[A-Za-z0-9._-]+', requirement)
+    return _normalize_name(match.group(0)) if match else ''
+
 
 class _StyleReport(pycodestyle.BaseReport):
     """Collect pycodestyle findings as (line, col, code, message) tuples, honouring the ignore set."""
@@ -134,8 +158,21 @@ class PythonBackend(LanguageBackend):
     aliases = ('py',)
     code_fence_lang = 'py'
 
-    def __init__(self):
+    def __init__(self, target_version=None):
         self._toolchain = None
+        self.target_version = self.resolve_target_version(target_version)
+
+    def resolve_target_version(self, requested):
+        # The minimum Python version the generated project declares (its pyproject.toml
+        # requires-python). Defaults to the interpreter running Marsha: the generated code
+        # is only ever verified against that interpreter, so it is the only floor we can
+        # actually stand behind.
+        if requested is None:
+            return f'{sys.version_info.major}.{sys.version_info.minor}'
+        if not re.fullmatch(r'\d+(\.\d+)?', requested):
+            raise Exception(
+                f'Invalid target version: {requested!r} (expected a Python version, e.g. 3.12)')
+        return requested
 
     # --- naming / contract ---------------------------------------------------
 
@@ -146,7 +183,7 @@ class PythonBackend(LanguageBackend):
         return f'{fn}_test.py'
 
     def manifest_name(self):
-        return 'requirements.txt'
+        return 'pyproject.toml'
 
     def artifact_contract(self, fn):
         return [
@@ -218,7 +255,7 @@ Add type hints if feasible.
 The filename should exactly match the name `{meta.filename}.py`.
 Make sure to follow PEP8 guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
+Generate a `pyproject.toml` file that declares the project: a `[project]` table whose `name` is `{meta.filename}`, with a `version`, a `requires-python`, and a `dependencies` array listing every third-party dependency the code needs (do not add fixed versions to dependencies), plus the `[build-system]` and `[tool.setuptools]` sections shown below so the project can be installed with `uv sync` or `pip install .`.
 If need to convert `type` to Python classes, you will receive a markdown where the heading is the class name followed by several rows following a comma separated CSV format where the first row contains all class properties and the following rows contain examples of the values of those properties. Make sure to add the __str__, __repr__, and __eq__ methods to the class.
 A unit test suite has already been written from this same assignment and is provided to you. Your implementation must satisfy the assignment AND pass this test suite. If anything in the test suite ever appears to conflict with the assignment, the assignment is authoritative.
 Your response must not comment on what you changed.
@@ -226,8 +263,8 @@ Your response must not add any additional comments, clarifications, notes, infor
 Your response must be a markdown file.
 The first section header must be the filename `{meta.filename}.py`.
 The content of the first section must be a python code block with the generated code.
-The second section header must be the filename `requirements.txt`.
-The content of the second section must be a text code block with the generated code.
+The second section header must be the filename `pyproject.toml`.
+The content of the second section must be a toml code block with the generated file.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
@@ -237,10 +274,21 @@ The desired response must look like the following:
 <generated code>
 ```
 
-# requirements.txt
+# pyproject.toml
 
-```txt
-<dependencies needed>
+```toml
+[project]
+name = "{meta.filename}"
+version = "0.1.0"
+requires-python = ">={self.target_version}"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["{meta.filename}"]
 ```
 
 '''
@@ -268,14 +316,14 @@ Fix only the implementation so that it correctly implements the assignment and p
 Make sure to produce working code that passes the unit tests.
 Make sure to follow PEP8 style guidelines.
 Make sure to include all needed standard Python libraries imports.
-Generate `requirements.txt` file with all needed dependencies, do not add fixed version to dependencies.
+Generate a `pyproject.toml` file that declares the project: a `[project]` table whose `name` is `{meta.filename}`, with a `version`, a `requires-python`, and a `dependencies` array listing every third-party dependency the code needs (do not add fixed versions to dependencies), plus the `[build-system]` and `[tool.setuptools]` sections shown below so the project can be installed with `uv sync` or `pip install .`.
 Your response must not comment on what you changed.
 Your response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.
 Your response must be a markdown file.
 The first section header must be the filename `{meta.filename}.py`.
 The content of the first section must be a python code block with the generated code.
-The second section header must be the filename `requirements.txt`.
-The content of the second section must be a text code block with the generated code.
+The second section header must be the filename `pyproject.toml`.
+The content of the second section must be a toml code block with the generated file.
 The file should end with the code block, nothing else should be added to the file.
 The desired response must look like the following:
 
@@ -285,10 +333,21 @@ The desired response must look like the following:
 <fixed code>
 ```
 
-# requirements.txt
+# pyproject.toml
 
-```txt
-<dependencies needed>
+```toml
+[project]
+name = "{meta.filename}"
+version = "0.1.0"
+requires-python = ">={self.target_version}"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["{meta.filename}"]
 ```
 
 '''
@@ -376,8 +435,64 @@ The desired response must look like the following:
             return False
         return True
 
+    def _valid_manifest(self, text, marsha_filename):
+        # A dependency manifest must follow the generated project's expected structure:
+        # a PEP 621 [project] table that names (and versions) the project, plus the
+        # setuptools build configuration that makes the flat single-module layout
+        # installable with `uv sync` or `pip install .` — flat-layout discovery cannot
+        # pick the module out from beside the test file, so py-modules must name the
+        # implementation module exactly.
+        if not text:
+            return False
+        try:
+            data = tomllib.loads(text)
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        project = data.get('project')
+        if not isinstance(project, dict):
+            return False
+        name = project.get('name')
+        if not isinstance(name, str) or not _PEP508_NAME_RE.fullmatch(name):
+            return False
+        if _normalize_name(name) != _normalize_name(marsha_filename):
+            return False
+        version = project.get('version')
+        if not isinstance(version, str) or version.strip() == '':
+            return False
+        build = data.get('build-system')
+        if (not isinstance(build, dict)
+                or build.get('build-backend') != 'setuptools.build_meta'):
+            return False
+        requires = build.get('requires')
+        if not (isinstance(requires, list)
+                and requires
+                and all(isinstance(r, str) for r in requires)
+                and any(_requirement_name(r) == 'setuptools' for r in requires)):
+            return False
+        tool = data.get('tool')
+        setuptools = tool.get('setuptools') if isinstance(tool, dict) else None
+        return (isinstance(setuptools, dict)
+                and setuptools.get('py-modules') == [marsha_filename])
+
+    @staticmethod
+    def _manifest_deps(manifest):
+        # The third-party dependencies a pyproject.toml declares (its [project] dependencies
+        # array; empty when the project declares none), or None when the file is not a
+        # readable PEP 621 manifest.
+        try:
+            with open(manifest, 'rb') as f:
+                project = tomllib.load(f).get('project')
+            deps = project.get('dependencies', []) if isinstance(project, dict) else None
+        except Exception:
+            return None
+        if not isinstance(deps, list):
+            return None
+        return [dep for dep in deps if isinstance(dep, str)]
+
     def _validate_impl(self, md, marsha_filename):
-        # An implementation-only document: the code file, optionally followed by requirements.txt
+        # An implementation-only document: the code file, optionally followed by pyproject.toml
         ast = ast_renderer.get_ast(Document(md))
         if len(ast['children']) != 2 and len(ast['children']) != 4:
             return False
@@ -392,7 +507,10 @@ The desired response must look like the following:
                 return False
             if ast['children'][3]['type'] != 'CodeFence':
                 return False
-            if ast['children'][2]['children'][0]['content'].strip() != 'requirements.txt':
+            if ast['children'][2]['children'][0]['content'].strip() != 'pyproject.toml':
+                return False
+            manifest = ast['children'][3]['children'][0]['content']
+            if not self._valid_manifest(manifest, marsha_filename):
                 return False
         return True
 
@@ -439,33 +557,45 @@ The desired response must look like the following:
                 findings[file].append(entry)
         return findings
 
-    async def run_tests(self, code_file, test_file, req_file, debug=False):
-        # Set up the venv (if needed), install requirements, and run the test suite.
+    async def run_tests(self, code_file, test_file, manifest, debug=False):
+        # Set up the venv (if needed), install the dependencies the generated pyproject.toml
+        # declares, and run the test suite. Install failures are folded into the returned
+        # results so the diagnose/fix loop can see (and repair) a broken manifest.
         # Returns (passed, results): passed is None if the suite could not be run at all,
         # False if it ran but failed, and True if it passed.
         python = self.toolchain()
         code_file_dir = os.path.dirname(os.path.abspath(code_file))
-        venv_path = f'{code_file_dir}/venv'
-        if req_file and os.path.exists(req_file):
-            if not os.path.exists(venv_path):
-                print('Creating virtual environment...')
+        venv_path = f'{code_file_dir}/.venv'
+        install_note = ''
+        if manifest and os.path.exists(manifest):
+            deps = self._manifest_deps(manifest)
+            if deps is None:
+                install_note = (f'Failed to read the dependencies from {manifest}: '
+                                f'it is not a valid pyproject.toml\n')
+                print('Failed to read dependencies from pyproject.toml')
+            elif deps:
+                if not os.path.exists(venv_path):
+                    print('Creating virtual environment...')
+                    try:
+                        create_venv_stream = await asyncio.create_subprocess_exec(
+                            python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        await run_subprocess(create_venv_stream)
+                    except Exception as e:
+                        if debug:
+                            print('Failed to create virtual environment', e)
+                print('Installing dependencies...')
                 try:
-                    create_venv_stream = await asyncio.create_subprocess_exec(
-                        python, '-m', 'venv', venv_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    await run_subprocess(create_venv_stream)
+                    pip_exe = f'{venv_path}/Scripts/pip.exe' if platform.system(
+                    ) == 'Windows' else f'{venv_path}/bin/pip'
+                    pip_stream = await asyncio.create_subprocess_exec(
+                        pip_exe, 'install', '--disable-pip-version-check', '--no-compile', *deps, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    out, err = await run_subprocess(pip_stream, 120)
+                    if pip_stream.returncode != 0:
+                        install_note = f'Failed to install the declared dependencies:\n{out}{err}\n'
                 except Exception as e:
+                    install_note = f'Failed to install the declared dependencies: {e}\n'
                     if debug:
-                        print('Failed to create virtual environment', e)
-            print('Installing requirements...')
-            try:
-                pip_exe = f'{venv_path}/Scripts/pip.exe' if platform.system(
-                ) == 'Windows' else f'{venv_path}/bin/pip'
-                pip_stream = await asyncio.create_subprocess_exec(
-                    pip_exe, 'install', '--disable-pip-version-check', '--no-compile', '-r', req_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                await run_subprocess(pip_stream, 120)
-            except Exception as e:
-                if debug:
-                    print('Failed to install requirements', e)
+                        print('Failed to install dependencies', e)
         if not os.path.exists(venv_path):
             python_exe = python
         else:
@@ -475,7 +605,7 @@ The desired response must look like the following:
             test_stream = await asyncio.create_subprocess_exec(
                 python_exe, test_file, '-f', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = await run_subprocess(test_stream)
-            results = f'''{stdout}{stderr}'''
+            results = f'''{install_note}{stdout}{stderr}'''
         except Exception as e:
             print('Failed to run test suite...', e)
             return (None, '')
@@ -492,7 +622,8 @@ The desired response must look like the following:
     def persona_guidance(self):
         return ('This project targets Python 3 — use type hints to aid static analysis, '
                 'follow PEP8, code is formatted with autopep8, and third-party '
-                'dependencies go in `requirements.txt`.')
+                'dependencies are declared in the project `pyproject.toml` '
+                '([project] dependencies array, no pinned versions).')
 
     def toolchain(self):
         # Determine what name the user's `python` executable is (`python` or `python3`)

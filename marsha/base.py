@@ -23,6 +23,8 @@ parser = argparse.ArgumentParser(
 parser.add_argument('source')
 parser.add_argument('-t', '--target', default='python',
                     help='Target language for the generated code, by backend id or alias (default: python). Only `python` is wired today; the registry is ready for more.')
+parser.add_argument('--target-version',
+                    help='Version of the target language the generated code should target, eg 3.12 for Python (where it becomes the project requires-python). Default: the interpreter running Marsha.')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
 parser.add_argument('--trace', action='store_true',
@@ -91,8 +93,12 @@ if is_local_backend():
 target = backends.select(args.target)
 if not target.toolchain_ok():
     raise Exception(f'{args.target} toolchain not found')
+# Resolve the target version (--target-version) against the bound backend's rules.
+if args.target_version is not None:
+    target.target_version = target.resolve_target_version(args.target_version)
 if args.debug or args.trace or args.trace_full:
     print(f'Using target language: {target.id}')
+    print(f'Using target version: {target.target_version}')
     print(f'Using LLM provider: {resolve_provider()}')
     print(f'Using LLM endpoint: {client.base_url}')
     print(f'Using LLM model: {resolve_model()}')
