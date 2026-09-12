@@ -1,20 +1,19 @@
 import argparse
 import asyncio
-import os
 import tempfile
 import time
 import traceback
 
+from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
                            set_cli_api_base, set_cli_model, set_cli_provider, apply_available_models)
 from marsha.context import discover_models
 from marsha import log
-from marsha.llm import generate_python_code, review_and_fix
+from marsha.llm import generate_code, review_and_fix
 from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
-from marsha.parse import write_files_from_markdown
 from marsha.stats import stats
-from marsha.utils import read_file, copy_file, add_helper, copy_tree, prettify_time_delta
+from marsha.utils import read_file, copy_file, copy_tree, prettify_time_delta, write_composed
 
 # Parse the input arguments
 parser = argparse.ArgumentParser(
@@ -22,6 +21,8 @@ parser = argparse.ArgumentParser(
     description='Marsha AI Compiler',
 )
 parser.add_argument('source')
+parser.add_argument('-t', '--target', default='python',
+                    help='Target language for the generated code, by backend id or alias (default: python). Only `python` is wired today; the registry is ready for more.')
 parser.add_argument('-d', '--debug', action='store_true',
                     help='Turn on debug logging')
 parser.add_argument('--trace', action='store_true',
@@ -86,7 +87,12 @@ set_client(client)
 if is_local_backend():
     for note in apply_available_models(discover_models(resolve_api_base())):
         print(f'Note: {note}')
+# Bind the target-language backend (--target) and verify its toolchain is available.
+target = backends.select(args.target)
+if not target.toolchain_ok():
+    raise Exception(f'{args.target} toolchain not found')
 if args.debug or args.trace or args.trace_full:
+    print(f'Using target language: {target.id}')
     print(f'Using LLM provider: {resolve_provider()}')
     print(f'Using LLM endpoint: {client.base_url}')
     print(f'Using LLM model: {resolve_model()}')
@@ -107,31 +113,32 @@ async def main():
     if debug:
         print(f'Number of attempts: {attempts}')
         print(f'Number of parallel executions: {n_results}')
+    backend = backends.current()
     while attempts:
         attempts = attempts - 1
         # First stage: generate code for functions and classes
         try:
-            mds = await generate_python_code(args, meta, n_results, debug)
+            cands = await generate_code(args, meta, n_results, debug)
         except Exception:
             continue
         # Early exit if quick and dirty
         if quick_and_dirty:
             print('Writing generated code to files...')
-            for md in mds[:2]:
-                write_files_from_markdown(md)
+            for impl, oracle in cands[:2]:
+                write_composed(backend.compose(impl, oracle))
             attempts = attempts + 1
             break
         # Writing generated code to temporary files in preparation for next stages
         file_groups = list()
         tmp_directories = []
-        for idx, md in enumerate(mds):
+        for idx, (impl, oracle) in enumerate(cands):
             print('Writing generated code to temporary files...')
             tmpdir = tempfile.TemporaryDirectory(
                 suffix=f'_-_{meta.filename}_{idx}')
             tmp_directories.append(tmpdir)
             file_groups = file_groups + \
-                [write_files_from_markdown(
-                    md, subdir=tmpdir.name)]
+                [write_composed(
+                    backend.compose(impl, oracle), subdir=tmpdir.name)]
         if debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
                 print(f'# {filename}\n{read_file(filename)}\n')
@@ -143,17 +150,18 @@ async def main():
         try:
             done_task_name = await run_parallel_tasks(tasks)
             print('Writing generated code to files...')
-            filename = done_task_name
-            copy_file(filename, f'{meta.filename}.py')
+            group = [g for g in file_groups if g[0] == done_task_name][0]
+            source_dest = backend.source_name(meta.filename)
+            copy_file(done_task_name, source_dest)
             if not args.exclude_main_helper:
-                add_helper(f'{meta.filename}.py')
-            test_filename = filename.replace('.py', '_test.py')
-            copy_file(test_filename, f'{meta.filename}_test.py')
-            directory = os.path.dirname(filename)
-            requirements_filename = os.path.join(
-                directory, 'requirements.txt')
-            if os.path.exists(requirements_filename):
-                copy_file(requirements_filename, 'requirements.txt')
+                backend.make_executable(source_dest)
+            test_file = [f for f in group if f.endswith(
+                backend.test_name(meta.filename))][0]
+            copy_file(test_file, backend.test_name(meta.filename))
+            manifests = [f for f in group if f.endswith(
+                backend.manifest_name())]
+            if len(manifests) > 0:
+                copy_file(manifests[0], backend.manifest_name())
         except Exception as e:
             print('Failed to generate working code.')
             print(e)

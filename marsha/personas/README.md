@@ -29,6 +29,10 @@ The built-in registry is discovered by scanning this directory for `*.md` (exclu
 
 Each flag takes a comma-separated list. An entry is either a **built-in name** (e.g. `eli,max`) or a **path** to a custom file (detected by a leading `/`, `.`, or `~`, e.g. `./sharona.md`). Mixing is allowed: `--impl-personas eli,max,./sharona.md`. Omit a flag to run that loop's default set (all built-ins for the loop, name-sorted). A custom file must also start with `name: <name>`.
 
+## Language-specific conventions
+
+Reviewer bodies are deliberately language-agnostic ("an assignment", "an implementation") so one shared set serves every target language. Per-language and per-project conventions (for the Python backend: type hints, PEP8, autopep8, `requirements.txt`) are supplied by the target backend's `persona_guidance()` and injected into every reviewer run — the backend is selected with `--target` (see the top-level README).
+
 ## Finding labels
 
 Each finding is labeled `<letter><N>` — the letter is the finding's position (A, B, C, ...) and `N` is the reviewer's 1-based position in the resolved list. References use `[Name-Label]` (e.g. `[Ada-A1]`), so in a later round a reviewer can recognize its own label in the implementor's push-back.

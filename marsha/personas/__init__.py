@@ -255,13 +255,17 @@ def prior_round_block(findings, preamble):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance=''):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
-    # they run concurrently.
+    # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
+    # per-language conventions the (language-agnostic) reviewer bodies leave out.
     async def one(spec):
         name, body, review_number = spec
-        system = body + FINDINGS_CONTRACT.format(review_number=review_number)
+        system = body
+        if guidance:
+            system += f'\n\n{guidance}'
+        system += FINDINGS_CONTRACT.format(review_number=review_number)
         label = f'{loop}:{name}' if loop else name
         try:
             mapper = get_mapper(

@@ -109,6 +109,8 @@ Before generating any code, the compiler runs a sanity check that the definition
 
 The compiler then generates a test suite for the definition — the *oracle* — anchored to the description and examples in the `.mrsh` file, and only then generates the implementation to satisfy it. The implementation is written against this fixed oracle rather than the two being generated independently and reconciled afterwards. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
 
+The TDD methodology above (sanity check, oracle-first generation, diagnose→fix routing, persona review loops) is target-language-agnostic: the language-specific steps — prompts, artifact naming and layout, output validation, linting, formatting, test execution, and the runnable-CLI step — are delegated to a **language backend** in [`marsha/backends/`](./marsha/backends/), selected with `--target`. Only the Python backend is wired today; the registry and dispatch are ready for additional targets.
+
 An optional `--optimize <level>` flag spends additional LLM iterations refining the result, one inner loop per phase. A higher level runs more review iterations: the test suite is double-checked for coverage and fidelity against the definition (every stated behavior is tested and nothing is invented), the implementation is iterated for performance, safety, and code quality — with each change re-run against the oracle and reverted if it regresses — and any test correction is re-validated against the definition before it is applied. The default level is 0, which disables these loops and changes neither behavior nor cost.
 
 Each review loop is driven by a panel of named review **personas**. In every iteration the loop's reviewers run independently and in parallel, each reporting `MAJOR` / `MINOR` / `NIT` findings; a per-phase implementor (the *editor*) then addresses those findings and returns a reasoning preamble plus the revised artifact. The built-in personas live in [`marsha/personas/`](./marsha/personas/) — one file per reviewer plus one editor per phase. The reviewer set for each loop is selectable with:
@@ -151,8 +153,8 @@ There are also a few flags on how to use Marsha:
 
 ```sh
 $ marsha --help
-usage: marsha [-h] [-d] [--trace] [--trace-full] [-q] [-a ATTEMPTS]
-              [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
+usage: marsha [-h] [-t TARGET] [-d] [--trace] [--trace-full] [-q]
+              [-a ATTEMPTS] [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
               [--exclude-sanity-check] [--no-warn] [--optimize OPTIMIZE]
               [--test-personas TEST_PERSONAS] [--impl-personas IMPL_PERSONAS]
               [--fix-personas FIX_PERSONAS]
@@ -169,6 +171,9 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+  -t, --target TARGET   Target language for the generated code, by backend id
+                        or alias (default: python). Only `python` is wired
+                        today; the registry is ready for more.
   -d, --debug           Turn on debug logging
   --trace               Also write a live, timestamped progress trace to
                         stderr (each phase and every LLM request, with its
@@ -249,6 +254,7 @@ options:
 * `--context-window` Overrides the context window (in tokens) used to size review/editor prompts. It is auto-detected from the service when possible (eg a llama.cpp server's `n_ctx`), else a documented default is used; set it if your backend mis-reports its window.
 * `--context-cap` The fraction of the context window a single prompt may occupy before its findings are compacted (default `0.5`).
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).
+* `--target` Selects the target language for the generated code, by backend id or alias (`python`, default). The compiler's language-specific steps — prompts, artifact layout, validation, linting, formatting, test execution, and the runnable-CLI helper — are delegated to a language backend; only `python` is wired today, and the registry is ready for more.
 
 ## Using compiled Marsha code
 

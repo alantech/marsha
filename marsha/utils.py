@@ -1,5 +1,5 @@
-from inspect import getsourcefile
-import autopep8
+import asyncio
+from asyncio.subprocess import Process
 import os
 import shutil
 
@@ -39,11 +39,16 @@ def write_file(filename: str, content: str, mode: str = 'w'):
         f.write(content)
 
 
-def autoformat_files(files: list[str]):
-    for file in files:
-        before = read_file(file)
-        after = autopep8.fix_code(before)
-        write_file(file, after)
+def write_composed(files: dict, subdir: str = None) -> list[str]:
+    # Write a composed on-disk layout ({path: content}) and return the written paths.
+    paths = []
+    for name, content in files.items():
+        path = f'{subdir}/{name}' if subdir is not None else name
+        if subdir is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_file(path, content)
+        paths.append(path)
+    return paths
 
 
 def copy_file(src: str, dest: str):
@@ -58,8 +63,18 @@ def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def add_helper(filename: str):
-    helper = os.path.join(os.path.dirname(
-        os.path.abspath(getsourcefile(lambda: 0))), 'helper.py')
-    with open(filename, 'a') as o, open(helper, 'r') as i:
-        o.write(i.read())
+async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, str]:
+    stdout = ''
+    stderr = ''
+    try:
+        stdout, stderr = await asyncio.wait_for(stream.communicate(), timeout)
+    except asyncio.exceptions.TimeoutError:
+        try:
+            stream.kill()
+        except OSError:
+            # Ignore 'no such process' error
+            pass
+        raise Exception('run_subprocess timeout...')
+    except Exception as e:
+        raise e
+    return (stdout.decode('utf-8'), stderr.decode('utf-8'))

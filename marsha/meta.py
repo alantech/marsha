@@ -197,6 +197,24 @@ def extract_type_filename(md):
     return header.split(' ')[2]
 
 
+def extract_func_name(type) -> str:
+    ast = ast_renderer.get_ast(Document(type))
+    if ast['children'][0]['type'] != 'Heading':
+        raise Exception('Invalid Marsha function')
+    header = ast['children'][0]['children'][0]['content']
+    return header.split('(')[0].split('func')[1].strip()
+
+
+def void_note(meta: MarshaMeta) -> str:
+    # The note telling oracle-related prompts not to test the void functions (grammar-level,
+    # target-language-agnostic). Empty when the assignment has no void functions.
+    void_function_names = list(
+        map(lambda f: extract_func_name(f), meta.void_funcs))
+    if len(void_function_names) == 0:
+        return ''
+    return f'Do not create any tests for the void functions: {", ".join(void_function_names)}.'
+
+
 class MarshaMeta():
     def __init__(self, input_file):
         self.input_file = input_file
