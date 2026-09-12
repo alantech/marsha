@@ -87,80 +87,6 @@ def format_marsha_for_llm(meta: MarshaMeta):
     return break_line.join(res)
 
 
-# TODO: Potentially re-org this so the stages are together?
-def validate_first_stage_markdown(md, marsha_filename):
-    ast = ast_renderer.get_ast(Document(md))
-    if len(ast['children']) != 4 and len(ast['children']) != 6:
-        return False
-    if len(ast['children']) == 4:
-        if ast['children'][0]['type'] != 'Heading':
-            return False
-        if ast['children'][2]['type'] != 'Heading':
-            return False
-        if ast['children'][1]['type'] != 'CodeFence':
-            return False
-        if ast['children'][3]['type'] != 'CodeFence':
-            return False
-        if ast['children'][0]['children'][0]['content'].strip() != f'{marsha_filename}.py':
-            return False
-        if ast['children'][2]['children'][0]['content'].strip() != f'{marsha_filename}_test.py':
-            return False
-    else:
-        if ast['children'][0]['type'] != 'Heading':
-            return False
-        if ast['children'][2]['type'] != 'Heading':
-            return False
-        if ast['children'][4]['type'] != 'Heading':
-            return False
-        if ast['children'][1]['type'] != 'CodeFence':
-            return False
-        if ast['children'][3]['type'] != 'CodeFence':
-            return False
-        if ast['children'][5]['type'] != 'CodeFence':
-            return False
-        if ast['children'][0]['children'][0]['content'].strip() != f'{marsha_filename}.py':
-            return False
-        if ast['children'][2]['children'][0]['content'].strip() != 'requirements.txt':
-            return False
-        if ast['children'][4]['children'][0]['content'].strip() != f'{marsha_filename}_test.py':
-            return False
-    return True
-
-
-def validate_impl_markdown(md, marsha_filename):
-    # An implementation-only document: the code file, optionally followed by requirements.txt
-    ast = ast_renderer.get_ast(Document(md))
-    if len(ast['children']) != 2 and len(ast['children']) != 4:
-        return False
-    if ast['children'][0]['type'] != 'Heading':
-        return False
-    if ast['children'][1]['type'] != 'CodeFence':
-        return False
-    if ast['children'][0]['children'][0]['content'].strip() != f'{marsha_filename}.py':
-        return False
-    if len(ast['children']) == 4:
-        if ast['children'][2]['type'] != 'Heading':
-            return False
-        if ast['children'][3]['type'] != 'CodeFence':
-            return False
-        if ast['children'][2]['children'][0]['content'].strip() != 'requirements.txt':
-            return False
-    return True
-
-
-def validate_second_stage_markdown(md, filename):
-    ast = ast_renderer.get_ast(Document(md))
-    if len(ast['children']) != 2:
-        return False
-    if ast['children'][0]['type'] != 'Heading':
-        return False
-    if ast['children'][1]['type'] != 'CodeFence':
-        return False
-    if ast['children'][0]['children'][0]['content'].strip() != filename:
-        return False
-    return True
-
-
 def write_files_from_markdown(md: str, subdir=None) -> list[str]:
     ast = ast_renderer.get_ast(Document(md))
     filenames = []
@@ -182,11 +108,3 @@ def write_files_from_markdown(md: str, subdir=None) -> list[str]:
                 os.makedirs(os.path.dirname(filename), exist_ok=True)
             write_file(filename, filedata)
     return filenames
-
-
-def extract_func_name(type) -> str:
-    ast = ast_renderer.get_ast(Document(type))
-    if ast['children'][0]['type'] != 'Heading':
-        raise Exception('Invalid Marsha function')
-    header = ast['children'][0]['children'][0]['content']
-    return header.split('(')[0].split('func')[1].strip()

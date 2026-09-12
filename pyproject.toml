@@ -7,7 +7,7 @@ authors = [
     { name = "Alan Technologies Maintainers", email = "hello@alantechnologies.com" },
 ]
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 dependencies = [
     "anthropic",
     "autopep8",
@@ -27,7 +27,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.14",
 ]
 urls = { repository = "https://github.com/alantech/marsha" }
 
