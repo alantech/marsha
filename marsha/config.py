@@ -141,24 +141,13 @@ def resolve_strong_model():
     return DEFAULT_STRONG_MODEL
 
 
-def apply_available_models(available):
-    """Given the models actually served by an (OpenAI-compatible, e.g. local) backend, remap the
-    standard and strong models to an available one when the configured model isn't served. A local
-    server runs whatever is loaded and ignores the requested model name, so this makes marsha log
-    and send the model that will actually be used. Returns a list of human-readable notes for each
-    remap (empty if nothing changed)."""
-    if not available:
-        return []
-    notes = []
+def model_is_pinned():
+    # True when the standard model was explicitly chosen (--model or the config file) rather than
+    # falling back to the default. Pinned models are never remapped by model auto-matching.
+    return _cli_model is not None or bool(load_config_file().get('model'))
 
-    def _remap(name, resolver, setter):
-        current = resolver()
-        if current not in available:
-            chosen = available[0]
-            setter(chosen)
-            notes.append(
-                f'{name} {current!r} is not served by the backend; using {chosen!r}')
 
-    _remap('model', resolve_model, set_cli_model)
-    _remap('strong model', resolve_strong_model, set_cli_strong_model)
-    return notes
+def strong_model_is_pinned():
+    # As model_is_pinned, for the strong model (the model_strong config key).
+    return _cli_strong_model is not None or bool(
+        load_config_file().get('model_strong'))

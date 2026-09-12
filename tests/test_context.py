@@ -95,62 +95,43 @@ def test_query_llama_context_error_is_none():
         assert context._query_llama_context('http://x/v1') is None
 
 
-# --- local-backend model discovery + honest remap --------------------------
+def test_query_llama_context_by_model():
+    # On a multi-model backend the context of the requested model wins over the first entry.
+    payload = {"data": [
+        {"id": "small", "meta": {"n_ctx": 4096}},
+        {"id": "large", "meta": {"n_ctx": 131072}},
+    ]}
+    with _mock_urlopen(payload):
+        assert context._query_llama_context(
+            'http://x/v1', model='large') == 131072
+        # Unknown model falls back to the first entry that reports a context.
+        assert context._query_llama_context(
+            'http://x/v1', model='missing') == 4096
 
-def test_discover_models_ids():
-    with _mock_urlopen({"data": [{"id": "a"}, {"id": "b", "meta": {"n_ctx": 1000}}]}):
-        assert context.discover_models('http://x/v1') == ['a', 'b']
+
+# --- local-backend model discovery (descriptors with context) --------------
+
+def test_discover_models_descriptors():
+    with _mock_urlopen({"data": [
+        {"id": "a"},
+        {"id": "b", "meta": {"n_ctx": 1000}},
+        {"id": "c", "details": {"n_ctx": 2000}},
+        {"id": "d", "context_window": 3000},
+    ]}):
+        assert context.discover_models('http://x/v1') == [
+            {'id': 'a', 'context': None},
+            {'id': 'b', 'context': 1000},
+            {'id': 'c', 'context': 2000},
+            {'id': 'd', 'context': 3000},
+        ]
 
 
 def test_discover_models_name_fallback_and_error():
     with _mock_urlopen({"models": [{"name": "only"}]}):
-        assert context.discover_models('http://y/v1') == ['only']
+        assert context.discover_models(
+            'http://y/v1') == [{'id': 'only', 'context': None}]
     with patch.object(context.urllib.request, 'urlopen', side_effect=Exception('boom')):
         assert context.discover_models('http://z/v1') is None
-
-
-def test_apply_available_models_remaps_missing():
-    import marsha.config as cfg
-    cfg.set_cli_model(None)
-    cfg.set_cli_strong_model(None)
-    try:
-        notes = cfg.apply_available_models(['_probe-model'])
-        assert cfg.resolve_model() == '_probe-model'
-        assert cfg.resolve_strong_model() == '_probe-model'
-        assert len(notes) == 2
-        assert all('_probe-model' in n for n in notes)
-    finally:
-        cfg.set_cli_model(None)
-        cfg.set_cli_strong_model(None)
-
-
-def test_apply_available_models_keeps_present_models():
-    import marsha.config as cfg
-    cfg.set_cli_model(None)
-    cfg.set_cli_strong_model(None)
-    try:
-        current = [cfg.resolve_model(), cfg.resolve_strong_model()]
-        notes = cfg.apply_available_models(current)
-        assert cfg.resolve_model() == current[0]
-        assert cfg.resolve_strong_model() == current[1]
-        assert notes == []
-    finally:
-        cfg.set_cli_model(None)
-        cfg.set_cli_strong_model(None)
-
-
-def test_apply_available_models_empty_noop():
-    import marsha.config as cfg
-    cfg.set_cli_model(None)
-    cfg.set_cli_strong_model(None)
-    try:
-        before = [cfg.resolve_model(), cfg.resolve_strong_model()]
-        assert cfg.apply_available_models([]) == []
-        assert cfg.resolve_model() == before[0]
-        assert cfg.resolve_strong_model() == before[1]
-    finally:
-        cfg.set_cli_model(None)
-        cfg.set_cli_strong_model(None)
 
 
 # --- label-preserving compaction parser ------------------------------------
