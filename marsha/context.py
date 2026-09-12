@@ -42,7 +42,7 @@ def fits(prompt_text, context_window, cap=DEFAULT_CONTEXT_CAP):
     return estimate_tokens(prompt_text) <= budget_tokens(context_window, cap)
 
 
-def _known_context(model):
+def known_context(model):
     for prefix, window in sorted(_KNOWN_CONTEXT.items(), key=lambda kv: -len(kv[0])):
         if model.startswith(prefix):
             return window
@@ -152,7 +152,7 @@ async def resolve_context_window(model=None, provider=None, api_base=None, clien
         if window is None and client is not None:
             window = await _query_openai_context(client, model)
     if window is None:
-        window = _known_context(model)
+        window = known_context(model)
     _cache[key] = int(window)
     return _cache[key]
 

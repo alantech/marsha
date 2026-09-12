@@ -15,24 +15,24 @@ from marsha.config import (
     model_is_pinned,
     strong_model_is_pinned,
 )
+from marsha.context import DEFAULT_CONTEXT_WINDOW, known_context
 from marsha.stats import price_for, price_known
 
-# Smallest context window (tokens) the standard role considers "still fits". The standard
-# role lands on the cheapest, smallest model that clears this bar; below it marsha still
-# works but compacts prompts more aggressively.
-STANDARD_TARGET_CONTEXT = 65_536
-
 # Per-role target profiles for the ranker:
-#   strategy: 'smallest-fitting' -> the smallest context that is still >= target_context
+#   strategy: 'smallest-fitting' -> the smallest context that is still >= the target
 #             (the cheapest, smallest model that still fits); 'largest' -> the largest
 #             context, i.e. the most capable model.
-#   target_context: the context floor for 'smallest-fitting' roles (ignored by 'largest').
+#   target_context: the context floor for 'smallest-fitting' roles (ignored by 'largest'):
+#             an explicit token count, or None to match the context window the role would
+#             otherwise get from its configured model (e.g. 400k for gpt-5-mini) — a local or
+#             third-party backend should offer a model at least as capable as the default it
+#             replaces, not merely one that technically works.
 #   price_weight: 0 disables the price tie-break; any positive value enables it. Context is
 #             the primary signal; price is a tiebreaker at best.
 ROLE_PROFILES = {
     'model': {
         'strategy': 'smallest-fitting',
-        'target_context': STANDARD_TARGET_CONTEXT,
+        'target_context': None,
         'price_weight': 1.0,
     },
     'model_strong': {
@@ -74,20 +74,32 @@ def _price_key(model_id, price_weight):
     return (1, 0.0)
 
 
-def rank_models(models, role, profile=None):
+def _target_context(profile, current):
+    # The context floor for a 'smallest-fitting' role: the profile's explicit value, or the
+    # context window the role would otherwise get from its configured model, so a backend is
+    # asked for a model at least as capable as the default it replaces.
+    target = profile.get('target_context')
+    if target is not None:
+        return target
+    return known_context(current) if current else DEFAULT_CONTEXT_WINDOW
+
+
+def rank_models(models, role, current=None, profile=None):
     """Pick the closest match for `role` from a list of discovered model descriptors
-    ({'id': <name>, 'context': <tokens or None>}). Returns the winning model id, or None
-    if there is nothing to pick. Context size drives the choice per the role's profile
-    (ROLE_PROFILES, or an explicit `profile`); a known price only breaks ties."""
+    ({'id': <name>, 'context': <tokens or None>}). `current` is the model the role would
+    otherwise use; its documented context window sets the default target. Returns the
+    winning model id, or None if there is nothing to pick. Context size drives the choice
+    per the role's profile (ROLE_PROFILES, or an explicit `profile`); a known price only
+    breaks ties."""
     profile = profile or ROLE_PROFILES.get(role)
     if not models or profile is None:
         return None
     weight = profile.get('price_weight', 0)
     if profile.get('strategy') == 'smallest-fitting':
-        target = profile.get('target_context')
+        target = _target_context(profile, current)
         fitting = [
             m for m in models
-            if target is None or (m.get('context') or 0) >= target
+            if (m.get('context') or 0) >= target
         ]
         if fitting:
             # The smallest context that still fits the target wins.
@@ -144,7 +156,7 @@ def apply_available_models(models):
             continue
         if current in available:
             continue
-        chosen = rank_models(models, role['role'])
+        chosen = rank_models(models, role['role'], current=current)
         if chosen:
             role['setter'](chosen)
             notes.append(

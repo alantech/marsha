@@ -29,24 +29,57 @@ def _isolate_config():
 
 # --- the per-role ranker ----------------------------------------------------
 
+def _profile(**overrides):
+    profile = dict(model_match.ROLE_PROFILES['model'])
+    profile.update(overrides)
+    return profile
+
+
 def test_rank_standard_smallest_fitting():
+    # The target follows the configured model: gpt-5-mini documents a 400k window, so the
+    # standard role wants a model at least as capable.
+    models = [_m('small', 131072), _m('mid', 400000), _m('big', 1048576)]
+    assert model_match.rank_models(
+        models, 'model', current='gpt-5-mini') == 'mid'
+
+
+def test_rank_standard_target_follows_configured_model():
+    models = [_m('small', 200000), _m('big', 400000)]
+    # claude-sonnet-5 documents 200k, so the 200k model fits; gpt-5-mini documents 400k,
+    # so only the 400k model does.
+    assert model_match.rank_models(
+        models, 'model', current='claude-sonnet-5') == 'small'
+    assert model_match.rank_models(
+        models, 'model', current='gpt-5-mini') == 'big'
+
+
+def test_rank_standard_no_current_defaults_to_default_window():
+    models = [_m('small', 200000), _m('big', 400000)]
+    assert model_match.rank_models(models, 'model') == 'small'
+
+
+def test_rank_standard_explicit_target_overrides():
     models = [_m('tiny', 8192), _m('mid', 131072), _m('big', 262144)]
-    assert model_match.rank_models(models, 'model') == 'mid'
+    assert model_match.rank_models(
+        models, 'model', profile=_profile(target_context=65536)) == 'mid'
 
 
 def test_rank_standard_exact_target_fits():
     models = [_m('just-below', 65535), _m('exact', 65536)]
-    assert model_match.rank_models(models, 'model') == 'exact'
+    assert model_match.rank_models(
+        models, 'model', profile=_profile(target_context=65536)) == 'exact'
 
 
 def test_rank_standard_best_effort_largest_when_none_fit():
     models = [_m('tiny', 8192), _m('mid', 32768)]
-    assert model_match.rank_models(models, 'model') == 'mid'
+    assert model_match.rank_models(
+        models, 'model', current='gpt-5-mini') == 'mid'
 
 
 def test_rank_standard_unknown_context_sorts_last():
-    models = [_m('mystery'), _m('mid', 131072)]
-    assert model_match.rank_models(models, 'model') == 'mid'
+    models = [_m('mystery'), _m('mid', 400000)]
+    assert model_match.rank_models(
+        models, 'model', current='gpt-5-mini') == 'mid'
 
 
 def test_rank_strong_largest():
@@ -66,20 +99,23 @@ def test_rank_no_signal_falls_back_to_list_order():
 
 
 def test_rank_price_breaks_context_ties():
-    # Both clear the target with the same context; the known-cheaper one wins.
+    # Both clear the 400k target with the same context; the known-cheaper one wins.
     models = [_m('gpt-5', 400000), _m('gpt-5-mini', 400000)]
-    assert model_match.rank_models(models, 'model') == 'gpt-5-mini'
-    assert model_match.rank_models(models, 'model_strong') == 'gpt-5-mini'
+    assert model_match.rank_models(
+        models, 'model', current='gpt-5-mini') == 'gpt-5-mini'
+    assert model_match.rank_models(
+        models, 'model_strong', current='gpt-5') == 'gpt-5-mini'
 
 
 def test_rank_unknown_price_never_beats_known():
     models = [_m('mystery', 131072), _m('gpt-5-mini', 131072)]
-    assert model_match.rank_models(models, 'model') == 'gpt-5-mini'
+    assert model_match.rank_models(
+        models, 'model', profile=_profile(target_context=65536)) == 'gpt-5-mini'
 
 
 def test_rank_price_weight_zero_ignores_price():
     models = [_m('gpt-5', 131072), _m('gpt-5-mini', 131072)]
-    profile = dict(model_match.ROLE_PROFILES['model'], price_weight=0)
+    profile = _profile(target_context=65536, price_weight=0)
     assert model_match.rank_models(models, 'model', profile=profile) == 'gpt-5'
 
 
@@ -97,12 +133,21 @@ def test_rank_empty_or_unknown_role():
 # --- per-role remap against a multi-model backend ---------------------------
 
 def test_apply_remaps_each_role_to_its_closest_match():
-    models = [_m('small', 8192), _m('medium', 131072), _m('large', 262144)]
+    # gpt-5-mini documents a 400k window, so the standard role wants >= 400k: 'medium' is
+    # the smallest that fits; the strong role takes the largest.
+    models = [_m('small', 131072), _m('medium', 400000), _m('large', 1048576)]
     notes = model_match.apply_available_models(models)
     assert cfg.resolve_model() == 'medium'
     assert cfg.resolve_strong_model() == 'large'
     assert len(notes) == 2
     assert 'medium' in notes[0] and 'large' in notes[1]
+
+
+def test_apply_no_fitting_model_both_roles_take_largest():
+    models = [_m('small', 8192), _m('medium', 131072)]
+    model_match.apply_available_models(models)
+    assert cfg.resolve_model() == 'medium'
+    assert cfg.resolve_strong_model() == 'medium'
 
 
 def test_apply_single_model_remapped_to_it():

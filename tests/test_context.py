@@ -47,9 +47,9 @@ def test_budget_tokens_and_fits():
 
 
 def test_known_context_fallback():
-    assert context._known_context('claude-opus-5') == 200000
-    assert context._known_context('gpt-5-mini') == 400000
-    assert context._known_context(
+    assert context.known_context('claude-opus-5') == 200000
+    assert context.known_context('gpt-5-mini') == 400000
+    assert context.known_context(
         'mystery-model') == context.DEFAULT_CONTEXT_WINDOW
 
 
