@@ -21,6 +21,12 @@ def price_for(model):
     return PRICING_MODEL[best] if best else (0.0, 0.0)
 
 
+def price_known(model):
+    # True when the model matches a price-table entry (by prefix). For other models the price
+    # is unknown, which consumers must treat as neutral (not as free).
+    return any(model.startswith(prefix) for prefix in PRICING_MODEL)
+
+
 class ModelStats:
     def __init__(self, name, input_tokens, output_tokens, input_cost, output_cost, total_cost):
         self.name = name

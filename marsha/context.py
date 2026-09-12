@@ -42,7 +42,7 @@ def fits(prompt_text, context_window, cap=DEFAULT_CONTEXT_CAP):
     return estimate_tokens(prompt_text) <= budget_tokens(context_window, cap)
 
 
-def _known_context(model):
+def known_context(model):
     for prefix, window in sorted(_KNOWN_CONTEXT.items(), key=lambda kv: -len(kv[0])):
         if model.startswith(prefix):
             return window
@@ -73,27 +73,51 @@ def _model_id(m):
     return m.get('id') or m.get('name')
 
 
+def _model_context(m):
+    # The context size (in tokens) a /models entry exposes, or None. llama.cpp nests it under
+    # meta.n_ctx; some servers use details.n_ctx; newer OpenAI-style APIs expose context_window.
+    nctx = (m.get('meta') or {}).get('n_ctx') or (
+        m.get('details') or {}).get('n_ctx')
+    if nctx:
+        return int(nctx)
+    cw = m.get('context_window')
+    return int(cw) if cw else None
+
+
 def discover_models(api_base):
-    """Return the list of model ids served by an OpenAI-compatible backend, or None if the
-    endpoint is unavailable. Used to log (and, on local servers, remap to) the model that will
-    actually be used, since a local server serves whatever is loaded rather than a named model."""
+    """Return the models served by an OpenAI-compatible backend as a list of descriptors
+    {'id': <name>, 'context': <context window in tokens, or None>}, or None if the endpoint is
+    unavailable. Used to log (and, on local servers, remap to) the model that will actually be
+    used, since a local server serves whatever is loaded rather than a named model."""
     data = _fetch_models_data(api_base)
     if not data:
         return None
-    return [mid for mid in (_model_id(m) for m in data) if mid]
+    models = []
+    for m in data:
+        mid = _model_id(m)
+        if mid:
+            models.append({'id': mid, 'context': _model_context(m)})
+    return models
 
 
-def _query_llama_context(api_base):
+def _query_llama_context(api_base, model=None):
     # llama.cpp (and most OpenAI-compatible servers) expose the context size at /models.
     # llama.cpp nests it under data[].meta.n_ctx; other servers may use data[].details.n_ctx.
+    # With a model name, look it up by id (multi-model backends); otherwise fall back to the
+    # first entry that reports one (the single-model case).
     data = _fetch_models_data(api_base)
     if not data:
         return None
+    if model is not None:
+        for m in data:
+            if _model_id(m) == model:
+                ctx = _model_context(m)
+                if ctx:
+                    return ctx
     for m in data:
-        nctx = (m.get('meta') or {}).get('n_ctx') or (
-            m.get('details') or {}).get('n_ctx')
-        if nctx:
-            return int(nctx)
+        ctx = _model_context(m)
+        if ctx:
+            return ctx
     return None
 
 
@@ -124,11 +148,11 @@ async def resolve_context_window(model=None, provider=None, api_base=None, clien
     window = None
     if provider == 'openai':
         if api_base != DEFAULT_API_BASE:
-            window = _query_llama_context(api_base)
+            window = _query_llama_context(api_base, model)
         if window is None and client is not None:
             window = await _query_openai_context(client, model)
     if window is None:
-        window = _known_context(model)
+        window = known_context(model)
     _cache[key] = int(window)
     return _cache[key]
 

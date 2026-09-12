@@ -6,8 +6,9 @@ import traceback
 
 from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
-                           set_cli_api_base, set_cli_model, set_cli_provider, apply_available_models)
+                           set_cli_api_base, set_cli_model, set_cli_provider)
 from marsha.context import discover_models
+from marsha.model_match import apply_available_models
 from marsha import log
 from marsha.llm import generate_code, review_and_fix
 from marsha.llm_client import create_client, set_client
@@ -84,8 +85,10 @@ set_cli_api_base(args.api_base)
 client = create_client(args.api_base)
 set_client(client)
 # On a local/OpenAI-compatible server the requested model name is ignored and whatever is loaded
-# is served. Detect what is actually served and remap the standard/strong models to it so marsha
-# logs and sends the model that will really be used. Real OpenAI (default endpoint) is untouched.
+# is served. Detect what is actually served and remap the standard/strong models to the closest
+# match for each role (smallest-fitting vs. most capable, by context size with price as a
+# tiebreaker) so marsha logs and sends the models that will really be used. Explicitly pinned
+# models are left alone. Real OpenAI (default endpoint) is untouched.
 if is_local_backend():
     for note in apply_available_models(discover_models(resolve_api_base())):
         print(f'Note: {note}')
