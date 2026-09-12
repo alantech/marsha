@@ -335,7 +335,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, r
         # run() returns a bare string for a single result; normalize to a list so -n 1 works.
         reses = [reses]
     # The output should be a valid list of implementation Markdown documents (code + optional
-    # requirements). Parse each one and keep the valid docs; if none are valid, retry.
+    # manifest). Parse each one and keep the valid docs; if none are valid, retry.
     try:
         mds = list()
         for doc in reses:

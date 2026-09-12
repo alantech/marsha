@@ -2,10 +2,12 @@ __pycache__/
 build/
 dist/
 venv/
+.venv/
 marsha.egg-info/
 workers/
 .env
 examples/**/*.py
+examples/**/pyproject.toml
 examples/**/requirements.txt
 *.ipynb
 results.md
