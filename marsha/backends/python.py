@@ -9,7 +9,9 @@ toolchain detection. See issue #204.
 Dependency manifests are PEP 621 `pyproject.toml` files (issue #206), the same
 style as Marsha's own project file: the LLM is asked for a `[project]` table
 plus a setuptools build configuration, so a generated project can be installed
-with `uv sync` or `pip install .`.
+with `uv sync` or `pip install .`. That structure is fixed by the artifact
+contract (a flat single module beside its test file), so the markdown
+validator enforces it rather than leaving it to the model.
 """
 
 import asyncio
@@ -99,6 +101,20 @@ _LINT_IGNORE = {
     'W0611',  # unused import
     'W0612',  # unused variable
 }
+
+# PEP 508 distribution names: alphanumeric runs separated by runs of - _ .
+_PEP508_NAME_RE = re.compile(r'(?i)^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$')
+
+
+def _normalize_name(name):
+    # PEP 508 name normalization: runs of dashes, underscores, and dots are equivalent.
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def _requirement_name(requirement):
+    # The distribution name of a PEP 508 requirement (everything before any specifier or extras).
+    match = re.match(r'[A-Za-z0-9._-]+', requirement)
+    return _normalize_name(match.group(0)) if match else ''
 
 
 class _StyleReport(pycodestyle.BaseReport):
@@ -419,20 +435,46 @@ The desired response must look like the following:
             return False
         return True
 
-    @staticmethod
-    def _valid_manifest(text):
-        # A dependency manifest is a PEP 621 pyproject.toml: parseable TOML with a [project]
-        # table that names the project.
+    def _valid_manifest(self, text, marsha_filename):
+        # A dependency manifest must follow the generated project's expected structure:
+        # a PEP 621 [project] table that names (and versions) the project, plus the
+        # setuptools build configuration that makes the flat single-module layout
+        # installable with `uv sync` or `pip install .` — flat-layout discovery cannot
+        # pick the module out from beside the test file, so py-modules must name the
+        # implementation module exactly.
         if not text:
             return False
         try:
             data = tomllib.loads(text)
         except Exception:
             return False
-        project = data.get('project') if isinstance(data, dict) else None
-        return (isinstance(project, dict)
-                and isinstance(project.get('name'), str)
-                and project['name'].strip() != '')
+        if not isinstance(data, dict):
+            return False
+        project = data.get('project')
+        if not isinstance(project, dict):
+            return False
+        name = project.get('name')
+        if not isinstance(name, str) or not _PEP508_NAME_RE.fullmatch(name):
+            return False
+        if _normalize_name(name) != _normalize_name(marsha_filename):
+            return False
+        version = project.get('version')
+        if not isinstance(version, str) or version.strip() == '':
+            return False
+        build = data.get('build-system')
+        if (not isinstance(build, dict)
+                or build.get('build-backend') != 'setuptools.build_meta'):
+            return False
+        requires = build.get('requires')
+        if not (isinstance(requires, list)
+                and requires
+                and all(isinstance(r, str) for r in requires)
+                and any(_requirement_name(r) == 'setuptools' for r in requires)):
+            return False
+        tool = data.get('tool')
+        setuptools = tool.get('setuptools') if isinstance(tool, dict) else None
+        return (isinstance(setuptools, dict)
+                and setuptools.get('py-modules') == [marsha_filename])
 
     @staticmethod
     def _manifest_deps(manifest):
@@ -468,7 +510,7 @@ The desired response must look like the following:
             if ast['children'][2]['children'][0]['content'].strip() != 'pyproject.toml':
                 return False
             manifest = ast['children'][3]['children'][0]['content']
-            if not self._valid_manifest(manifest):
+            if not self._valid_manifest(manifest, marsha_filename):
                 return False
         return True
 

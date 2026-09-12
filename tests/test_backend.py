@@ -139,11 +139,18 @@ def test_compose_skips_empty_fences():
 
 # --- validators -----------------------------------------------------------------
 
+# The expected manifest structure the prompts render and the validator enforces.
+SKELETON = ('[project]\nname = "example"\nversion = "0.1.0"\n'
+            'requires-python = ">=3.12"\ndependencies = []\n\n'
+            '[build-system]\nrequires = ["setuptools>=61"]\n'
+            'build-backend = "setuptools.build_meta"\n\n'
+            '[tool.setuptools]\npy-modules = ["example"]\n')
+
+
 def test_validate_impl():
     b = PythonBackend()
     ok = '# example.py\n\n```py\nx\n```\n'
-    ok_manifest = (ok + '\n# pyproject.toml\n\n```toml\n'
-                   '[project]\nname = "example"\ndependencies = []\n```\n')
+    ok_manifest = (ok + f'\n# pyproject.toml\n\n```toml\n{SKELETON}```\n')
     assert b.validate_markdown(ok, 'impl', 'example')
     assert b.validate_markdown(ok_manifest, 'impl', 'example')
     assert not b.validate_markdown(ok, 'impl', 'other')
@@ -152,28 +159,24 @@ def test_validate_impl():
     assert not b.validate_markdown('# example.py\n', 'impl', 'example')
 
 
-def test_validate_impl_manifest_must_be_pyproject():
+def test_validate_impl_manifest_must_follow_structure():
     b = PythonBackend()
     code = '# example.py\n\n```py\nx\n```\n'
 
     def with_manifest(toml):
         return code + f'\n# pyproject.toml\n\n```toml\n{toml}```\n'
 
-    # Valid TOML with a [project] table that names the project.
-    assert b.validate_markdown(
-        with_manifest('[project]\nname = "example"\nversion = "0.1.0"\n'), 'impl', 'example')
+    # The full expected structure validates.
+    assert b.validate_markdown(with_manifest(SKELETON), 'impl', 'example')
     # Not valid TOML.
+    assert not b.validate_markdown(with_manifest('not [toml'), 'impl', 'example')
+    # A [project] table alone is not the expected structure (no build configuration).
     assert not b.validate_markdown(
-        with_manifest('[project\nname = "example"\n'), 'impl', 'example')
-    # Valid TOML but no [project] table.
+        with_manifest('[project]\nname = "example"\nversion = "0.1.0"\n'), 'impl', 'example')
+    # py-modules must name the implementation module exactly.
     assert not b.validate_markdown(
-        with_manifest('[tool.setuptools]\npy-modules = ["example"]\n'), 'impl', 'example')
-    # [project] without a name.
-    assert not b.validate_markdown(
-        with_manifest('[project]\nversion = "0.1.0"\n'), 'impl', 'example')
-    # [project] name that is not a string.
-    assert not b.validate_markdown(
-        with_manifest('[project]\nname = 42\n'), 'impl', 'example')
+        with_manifest(SKELETON.replace('py-modules = ["example"]',
+                                       'py-modules = ["example_test"]')), 'impl', 'example')
 
 
 def test_validate_oracle():
@@ -324,16 +327,39 @@ def test_run_tests_pass_and_fail(tmp_path):
 
 # --- pyproject.toml manifests (issue #206) ---------------------------------------
 
-def test_valid_manifest():
+def test_valid_manifest_structure():
     b = PythonBackend()
-    assert b._valid_manifest('[project]\nname = "example"\nversion = "0.1.0"\n')
-    assert b._valid_manifest('[project]\nname = "example"\ndependencies = ["numpy"]\n')
-    assert not b._valid_manifest('')
-    assert not b._valid_manifest(None)
-    assert not b._valid_manifest('[project\nname = "example"\n')
-    assert not b._valid_manifest('[tool.setuptools]\npy-modules = ["example"]\n')
-    assert not b._valid_manifest('[project]\nversion = "0.1.0"\n')
-    assert not b._valid_manifest('[project]\nname = 42\n')
+    assert b._valid_manifest(SKELETON, 'example')
+    # Dependencies do not affect the structure check.
+    assert b._valid_manifest(SKELETON.replace('dependencies = []',
+                                              'dependencies = ["numpy"]'), 'example')
+    # A name PEP 508-equivalent to the filename (dashes/underscores) is accepted.
+    dashed = SKELETON.replace('name = "example"', 'name = "data-mangling"')
+    dashed = dashed.replace('py-modules = ["example"]', 'py-modules = ["data_mangling"]')
+    assert b._valid_manifest(dashed, 'data_mangling')
+
+    def broken(toml):
+        assert not b._valid_manifest(toml, 'example'), toml
+
+    broken('')
+    broken(None)
+    broken('this is not [toml')
+    broken('[tool.setuptools]\npy-modules = ["example"]\n')             # no [project] table
+    broken('[project]\nversion = "0.1.0"\n')                            # no name
+    broken('[project]\nname = 42\nversion = "0.1.0"\n')                 # name not a string
+    broken('[project]\nname = "has spaces"\nversion = "0.1.0"\n')       # invalid PEP 508 name
+    broken('[project]\nname = "other"\nversion = "0.1.0"\n')            # name not the filename
+    broken('[project]\nname = "example"\n')                             # no version
+    broken('[project]\nname = "example"\nversion = ""\n')               # empty version
+    broken('[project]\nname = "example"\nversion = "0.1.0"\n')          # no build-system
+    broken(SKELETON.replace('build-backend = "setuptools.build_meta"',
+                            'build-backend = "hatchling.build"'))       # wrong backend
+    broken(SKELETON.replace('requires = ["setuptools>=61"]', 'requires = []'))
+    broken(SKELETON.replace('requires = ["setuptools>=61"]', 'requires = ["wheel"]'))
+    broken(SKELETON.replace('[tool.setuptools]\npy-modules = ["example"]\n', ''))
+    broken(SKELETON.replace('py-modules = ["example"]', 'py-modules = ["other"]'))
+    broken(SKELETON.replace('py-modules = ["example"]',
+                            'py-modules = ["example", "example_test"]'))
 
 
 def test_manifest_deps(tmp_path):
