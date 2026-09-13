@@ -6,7 +6,7 @@ import time
 import traceback
 import sys
 
-from marsha import backends
+from marsha import backends, tools
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
 from marsha.meta import MarshaMeta, void_note
@@ -99,11 +99,14 @@ async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
         raise
 
 
-async def gpt_test_suite(meta: MarshaMeta, retries: int = 3, debug: bool = False):
+async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int = 3, debug: bool = False):
     # Generate the oracle (the test suite) first, anchored to the spec. This is the
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
-    gpt_gen_test = get_mapper(b.oracle_prompt(meta), n_results=1,
+    system = b.oracle_prompt(meta)
+    if tool_use:
+        system += tools.tool_instructions()
+    gpt_gen_test = get_mapper(system, n_results=1,
                               stats_stage='first_stage', label='oracle-gen')
     marsha_for_test_llm = format_marsha_for_llm(meta)
     if debug:
@@ -112,7 +115,10 @@ async def gpt_test_suite(meta: MarshaMeta, retries: int = 3, debug: bool = False
 {marsha_for_test_llm}
     ---- end ----''')
     try:
-        doc = await gpt_gen_test.run(marsha_for_test_llm)
+        if tool_use:
+            doc = await tools.run_with_tools(gpt_gen_test, marsha_for_test_llm, debug=debug)
+        else:
+            doc = await gpt_gen_test.run(marsha_for_test_llm)
         if not b.validate_markdown(doc, 'oracle', meta.filename):
             if debug:
                 print(f'''[Oracle] Invalid doc:
@@ -124,7 +130,7 @@ async def gpt_test_suite(meta: MarshaMeta, retries: int = 3, debug: bool = False
             print(
                 f'Failed to generate test suite. Retries left = {retries}. Retrying...')
         if retries > 0:
-            return await gpt_test_suite(meta, retries - 1, debug)
+            return await gpt_test_suite(meta, tool_use, retries - 1, debug)
         else:
             raise Exception('Failed to generate test suite', meta.filename)
 
@@ -314,13 +320,14 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     return oracle_md
 
 
-async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, retries: int = 3, debug: bool = False):
+async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, tool_use: bool = True, retries: int = 3, debug: bool = False):
     # Generate implementations against the (already generated) oracle. The implementation
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     b = backends.current()
+    system = b.impl_prompt(meta)
+    if tool_use:
+        system += tools.tool_instructions()
     marsha_for_code_llm = format_marsha_for_llm(meta)
-    gpt_gen_code = get_mapper(b.impl_prompt(meta), n_results=n_results,
-                              stats_stage='first_stage', label='impl-gen')
     user_request = f'''{marsha_for_code_llm}
 
 ## The unit test suite your implementation must pass
@@ -331,10 +338,27 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, r
     ---- start ----
 {marsha_for_code_llm}
     ---- end ----''')
-    reses = await gpt_gen_code.run(user_request)
-    if isinstance(reses, str):
-        # run() returns a bare string for a single result; normalize to a list so -n 1 works.
-        reses = [reses]
+    if tool_use:
+        # One tool-aware conversation per candidate, all in parallel: each candidate
+        # may independently look up the information it needs.
+        async def one_candidate():
+            mapper = get_mapper(system, n_results=1,
+                                stats_stage='first_stage', label='impl-gen')
+            return await tools.run_with_tools(mapper, user_request, debug=debug)
+        tasks = [asyncio.create_task(one_candidate()) for _ in range(n_results)]
+        try:
+            reses = list(await asyncio.gather(*tasks))
+        except Exception:
+            for task in tasks:
+                task.cancel()
+            raise
+    else:
+        gpt_gen_code = get_mapper(system, n_results=n_results,
+                                  stats_stage='first_stage', label='impl-gen')
+        reses = await gpt_gen_code.run(user_request)
+        if isinstance(reses, str):
+            # run() returns a bare string for a single result; normalize to a list so -n 1 works.
+            reses = [reses]
     # The output should be a valid list of implementation Markdown documents (code + optional
     # manifest). Parse each one and keep the valid docs; if none are valid, retry.
     try:
@@ -355,7 +379,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, r
                 f'Failed to generate implementation. Retries left = {retries}. Retrying...')
         if retries > 0:
             return await gpt_implementation(
-                meta, oracle_md, n_results, retries - 1, debug)
+                meta, oracle_md, n_results, tool_use, retries - 1, debug)
         else:
             raise Exception('Failed to generate code', meta.filename)
 
@@ -781,15 +805,17 @@ async def generate_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> 
         # Oracle-first: generate the spec-anchored test suite, then generate implementations
         # against it. Each candidate is (impl, oracle); the oracle is the single canonical string
         # every impl is written against, and the backend composes them into the on-disk layout
-        # at write time, so the impl path can never touch the oracle.
-        oracle = await gpt_test_suite(meta, debug=debug)
+        # at write time, so the impl path can never touch the oracle. With tool use on, both
+        # stages may look external APIs up through the fake terminal instead of guessing.
+        tool_use = not args.no_tool_use
+        oracle = await gpt_test_suite(meta, tool_use, debug=debug)
         log(f'oracle test suite generated ({len(oracle)} chars)')
         if args.optimize > 0 and not args.quick_and_dirty:
             print('Verifying test suite coverage and fidelity...')
             log(f'oracle optimize loop: {args.optimize} iteration(s)')
             oracle = await optimize_test_suite(meta, oracle, args, debug)
         log(f'generating {n_results} implementation(s)')
-        impls = await gpt_implementation(meta, oracle, n_results, debug=debug)
+        impls = await gpt_implementation(meta, oracle, n_results, tool_use, debug=debug)
         cands = [(impl, oracle) for impl in impls]
         if len(cands) == 0:
             raise Exception('No valid implementation candidates')

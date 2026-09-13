@@ -107,7 +107,9 @@ Marsha is compiled by an LLM into tested software that meets the requirements de
 
 Before generating any code, the compiler runs a sanity check that the definition is self-consistent, and prints warnings about significant ambiguities to `stderr` that could result in differently-behaving code between generation runs. Warnings are always shown while compiling, like a conventional compiler's; `--no-warn` suppresses them, but the check itself still runs and still fails the compile when the definition contradicts itself.
 
-The compiler then generates a test suite for the definition — the *oracle* — anchored to the description and examples in the `.mrsh` file, and only then generates the implementation to satisfy it. The implementation is written against this fixed oracle rather than the two being generated independently and reconciled afterwards. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
+The compiler then generates a test suite for the definition — the *oracle* — anchored to the description and examples in the `.mrsh` file, and only then generates the implementation to satisfy it. The implementation is written against this fixed oracle rather than the two being generated independently and reconciled afterwards.
+
+During the code and test generation stages, the LLM has a simple *fake terminal* for looking up information it does not have — typically the current API of a third-party library the program depends on. If the LLM decides it needs more information, it ends its response with one or more command lines beginning with `$` (today: `$ web-search "search terms"` and `$ view-web-page "https://url"`); the compiler executes the command(s) and feeds the results back into a follow-up LLM call, repeating until the LLM produces its final output with no pending command. The command set lives in [`marsha/tools.py`](./marsha/tools.py) and is easy to extend; the MCP standard is deliberately out of scope. `--no-tool-use` disables the interface. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
 
 The TDD methodology above (sanity check, oracle-first generation, diagnose→fix routing, persona review loops) is target-language-agnostic: the language-specific steps — prompts, artifact naming and layout, output validation, linting, formatting, test execution, and the runnable-CLI step — are delegated to a **language backend** in [`marsha/backends/`](./marsha/backends/), selected with `--target`. Only the Python backend is wired today; the registry and dispatch are ready for additional targets.
 
@@ -156,8 +158,9 @@ $ marsha --help
 usage: marsha [-h] [-t TARGET] [--target-version TARGET_VERSION] [-d]
               [--trace] [--trace-full] [-q] [-a ATTEMPTS]
               [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
-              [--exclude-sanity-check] [--no-warn] [--optimize OPTIMIZE]
-              [--test-personas TEST_PERSONAS] [--impl-personas IMPL_PERSONAS]
+              [--exclude-sanity-check] [--no-tool-use] [--no-warn]
+              [--optimize OPTIMIZE] [--test-personas TEST_PERSONAS]
+              [--impl-personas IMPL_PERSONAS]
               [--fix-personas FIX_PERSONAS]
               [--optimize-severity OPTIMIZE_SEVERITY]
               [--context-window CONTEXT_WINDOW] [--context-cap CONTEXT_CAP]
@@ -199,6 +202,10 @@ options:
   --exclude-sanity-check
                         Skips an initial sanity check that the definition is
                         self-consistent
+  --no-tool-use         Disable the LLM tool interface in the code and test
+                        generation stages (the fake terminal where the LLM can
+                        look external APIs up with $ web-search / $ view-web-
+                        page commands). Enabled by default.
   --no-warn             Do not display warnings about ambiguous areas of the
                         definition from the sanity check
   --optimize OPTIMIZE   Optimization level: number of per-phase LLM review
@@ -254,6 +261,7 @@ options:
 * `-s` Save the stats that are printed by default to a file, instead. Probably not useful if you're not working on Marsha itself.
 * `--exclude-main-helper` Turns off the automatically generated code to make using your compiled Marsha code from the CLI easier, which is included by default.
 * `--exclude-sanity-check` Skips the initial sanity check that the definition is self-consistent.
+* `--no-tool-use` Disables the LLM tool interface (the fake terminal with `$ web-search` / `$ view-web-page`) in the code and test generation stages. Enabled by default: the LLM only pays for it when it actually issues a command.
 * `--no-warn` Suppresses the warnings the sanity check prints about significant ambiguities in the definition. The check itself still runs, and still fails the compile when the definition contradicts itself.
 * `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
 * `--model` Overrides the model used for code generation (default `gpt-5-mini`, `claude-sonnet-5` with the anthropic provider), eg to use a different model or the name of a locally served model.

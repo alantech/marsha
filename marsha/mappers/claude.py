@@ -103,12 +103,13 @@ class ClaudeMapper(BaseMapper):
         self.label = label
 
     async def transform(self, user_request):
+        # A bare string is a single user message; a list of {'role', 'content'}
+        # dicts is a whole prior conversation (the tool-use follow-up calls).
+        if isinstance(user_request, str):
+            user_request = [{'role': 'user', 'content': user_request}]
         query_obj = {
             'system': self.system,
-            'messages': [{
-                'role': 'user',
-                'content': user_request,
-            }],
+            'messages': list(user_request),
         }
         if self.max_tokens is not None:
             query_obj['max_tokens'] = self.max_tokens
