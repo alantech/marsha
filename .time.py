@@ -57,7 +57,8 @@ def run_once(i):
     workdir = worker_dir(i)
     print(f'Run {i + 1} / {total_runs}')
     t_1 = time.time()
-    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"} --provider {args.provider}'
+    # --no-tools keeps the benchmark deterministic and free of live-search flakiness.
+    cmd = f'"{venv_python}" -m marsha {source} -a {args.attempts} -n {args.n_parallel_executions} {args.stats and "-s"} --provider {args.provider} --no-tools'
     print(f'Running {cmd}')
     proc = subprocess.run(cmd, shell=True, cwd=workdir)
     t_2 = time.time()

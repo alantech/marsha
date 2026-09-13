@@ -63,11 +63,11 @@ def get_filename_from_path(path: str):
     return os.path.splitext(os.path.basename(path))[0]
 
 
-async def run_subprocess(stream: Process, timeout: float = 60.0) -> tuple[str, str]:
+async def run_subprocess(stream: Process, timeout: float = 60.0, input: bytes = None) -> tuple[str, str]:
     stdout = ''
     stderr = ''
     try:
-        stdout, stderr = await asyncio.wait_for(stream.communicate(), timeout)
+        stdout, stderr = await asyncio.wait_for(stream.communicate(input), timeout)
     except asyncio.exceptions.TimeoutError:
         try:
             stream.kill()

@@ -104,8 +104,9 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
     system = b.oracle_prompt(meta)
+    ctx = tools.ToolContext('gen')
     if tool_use:
-        system += tools.tool_instructions()
+        system += tools.tool_instructions(ctx)
     gpt_gen_test = get_mapper(system, n_results=1,
                               stats_stage='first_stage', label='oracle-gen')
     marsha_for_test_llm = format_marsha_for_llm(meta)
@@ -116,7 +117,8 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
     ---- end ----''')
     try:
         if tool_use:
-            doc = await tools.run_with_tools(gpt_gen_test, marsha_for_test_llm, debug=debug)
+            doc = await tools.run_with_tools(
+                gpt_gen_test, marsha_for_test_llm, ctx, debug=debug)
         else:
             doc = await gpt_gen_test.run(marsha_for_test_llm)
         if not b.validate_markdown(doc, 'oracle', meta.filename):
@@ -135,13 +137,16 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
             raise Exception('Failed to generate test suite', meta.filename)
 
 
-async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False, retries=2):
+async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False, retries=2, tool_ctx=None):
     # One implementor (editor) iteration: load the loop's editor prompt, run it, and split its
     # response into (preamble, artifact). Returns (artifact, preamble), or (None, '') on failure.
+    # `tool_ctx`, when set, enables the fake terminal for the editor (see marsha.tools).
     b = backends.current()
     _, system = load_editor(loop)
     system = system.format(filename=meta.filename, void_note=void_note(meta),
                            target_version=b.target_version)
+    if tool_ctx is not None:
+        system += tools.tool_instructions(tool_ctx)
     if loop == 'impl':
         first_header = b.source_name(meta.filename)
 
@@ -156,7 +161,10 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
         try:
             mapper = get_mapper(system, n_results=1,
                                 stats_stage=stats_stage, model=model, label=f'{loop}-editor')
-            doc = await mapper.run(user_message)
+            if tool_ctx is not None:
+                doc = await tools.run_with_tools(mapper, user_message, tool_ctx, debug=debug)
+            else:
+                doc = await mapper.run(user_message)
             preamble, artifact = split_preamble(doc, first_header)
             if not validate(artifact):
                 if debug:
@@ -277,6 +285,7 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     level = args.optimize
     if level <= 0:
         return oracle_md
+    tool_ctx = None if args.no_tools else tools.ToolContext('oracle-opt')
     registry = build_registry()
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
@@ -288,7 +297,8 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'first_stage', debug,
-                                      loop='oracle', guidance=backends.current().persona_guidance())
+                                      loop='oracle', guidance=backends.current().persona_guidance(),
+                                      tool_ctx=tool_ctx)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
@@ -302,7 +312,7 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
         artifact, preamble = await _run_editor(
             'oracle', meta, _oracle_editor_message(
                 meta, oracle_md, actionable),
-            model, 'first_stage', debug)
+            model, 'first_stage', debug, tool_ctx=tool_ctx)
         if artifact is None:
             if debug:
                 print(
@@ -325,8 +335,9 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     b = backends.current()
     system = b.impl_prompt(meta)
+    ctx = tools.ToolContext('gen')
     if tool_use:
-        system += tools.tool_instructions()
+        system += tools.tool_instructions(ctx)
     marsha_for_code_llm = format_marsha_for_llm(meta)
     user_request = f'''{marsha_for_code_llm}
 
@@ -344,7 +355,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
         async def one_candidate():
             mapper = get_mapper(system, n_results=1,
                                 stats_stage='first_stage', label='impl-gen')
-            return await tools.run_with_tools(mapper, user_request, debug=debug)
+            return await tools.run_with_tools(mapper, user_request, ctx, debug=debug)
         tasks = [asyncio.create_task(one_candidate()) for _ in range(n_results)]
         try:
             reses = list(await asyncio.gather(*tasks))
@@ -430,6 +441,11 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     req_file = req_files[0] if len(req_files) > 0 else None
     subdir = os.path.dirname(os.path.abspath(code_file))
     oracle = read_file(test_file)
+    # The candidate already passed the oracle, so its declared dependencies are installed in a
+    # candidate venv: the installed-env tools can introspect it. Absent a venv, build_commands
+    # drops those tools and the phase degrades to the base set.
+    tool_ctx = None if args.no_tools else tools.ToolContext(
+        'impl-opt', venv_python=tools.venv_python_for(subdir), workdir=subdir)
     registry = build_registry()
     reviewers = resolve_loop_reviewers('impl', args.impl_personas, registry)
     model = resolve_strong_model()
@@ -442,7 +458,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
-                                      loop='impl', guidance=b.persona_guidance())
+                                      loop='impl', guidance=b.persona_guidance(), tool_ctx=tool_ctx)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
@@ -456,7 +472,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
         artifact, preamble = await _run_editor(
             'impl', meta, _impl_editor_message(
                 meta, oracle, current_code, actionable),
-            model, 'third_stage', debug)
+            model, 'third_stage', debug, tool_ctx=tool_ctx)
         if artifact is None:
             if debug:
                 print(
@@ -680,13 +696,17 @@ def _correction_editor_message(meta, code, orig_test, corrected_code, reason, fi
 {format_findings(findings)}'''
 
 
-async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, args, debug: bool = False) -> str:
+async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, args, debug: bool = False, subdir: str = None) -> str:
     # Third per-phase loop: reviewer personas check the test correction's reasoning and
     # spec-alignment before it is written, so the only path that can bend the oracle is itself
     # spec-anchored and double-checked. The editor (Rex) applies the findings.
     level = args.optimize
     if level <= 0:
         return corrected_md
+    tool_ctx = None
+    if not args.no_tools and subdir is not None:
+        tool_ctx = tools.ToolContext(
+            'correction', venv_python=tools.venv_python_for(subdir), workdir=subdir)
     registry = build_registry()
     reviewers = resolve_loop_reviewers(
         'correction', args.fix_personas, registry)
@@ -701,7 +721,8 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
-                                      loop='correction', guidance=backends.current().persona_guidance())
+                                      loop='correction', guidance=backends.current().persona_guidance(),
+                                      tool_ctx=tool_ctx)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
@@ -717,7 +738,7 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
             'correction', meta,
             _correction_editor_message(
                 meta, code, orig_test, corrected_code, reason, actionable),
-            model, 'third_stage', debug)
+            model, 'third_stage', debug, tool_ctx=tool_ctx)
         if artifact is None:
             if debug:
                 print(
@@ -772,7 +793,7 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
                 meta, code, test, test_results, verdict['reason'], debug=debug)
             if args is not None and args.optimize > 0:
                 fixed = await validate_test_correction(
-                    meta, code, test, fixed, verdict['reason'], args, debug=debug)
+                    meta, code, test, fixed, verdict['reason'], args, debug=debug, subdir=subdir)
             write_files_from_markdown(fixed, subdir=subdir)
         else:
             if debug:
@@ -807,7 +828,7 @@ async def generate_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> 
         # every impl is written against, and the backend composes them into the on-disk layout
         # at write time, so the impl path can never touch the oracle. With tool use on, both
         # stages may look external APIs up through the fake terminal instead of guessing.
-        tool_use = not args.no_tool_use
+        tool_use = not args.no_tools
         oracle = await gpt_test_suite(meta, tool_use, debug=debug)
         log(f'oracle test suite generated ({len(oracle)} chars)')
         if args.optimize > 0 and not args.quick_and_dirty:

@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 
+from marsha import tools
 from marsha.config import is_local_backend
 from marsha.log import log
 from marsha.mappers import get_mapper
@@ -255,22 +256,28 @@ def prior_round_block(findings, preamble):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance=''):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
-    # per-language conventions the (language-agnostic) reviewer bodies leave out.
+    # per-language conventions the (language-agnostic) reviewer bodies leave out. `tool_ctx`, when
+    # set, enables the fake terminal for this reviewer (see marsha.tools).
     async def one(spec):
         name, body, review_number = spec
         system = body
         if guidance:
             system += f'\n\n{guidance}'
         system += FINDINGS_CONTRACT.format(review_number=review_number)
+        if tool_ctx is not None:
+            system += tools.tool_instructions(tool_ctx)
         label = f'{loop}:{name}' if loop else name
         try:
             mapper = get_mapper(
                 system, n_results=1, stats_stage=stats_stage, model=model, label=label)
-            text = await mapper.run(user_message)
+            if tool_ctx is not None:
+                text = await tools.run_with_tools(mapper, user_message, tool_ctx, debug=debug)
+            else:
+                text = await mapper.run(user_message)
         except Exception as e:
             if debug:
                 print(f'[Personas] {name} failed: {e}')
