@@ -12,10 +12,15 @@ LLM call — repeating until the model produces final output with no trailing
 command.
 
 MCP is deliberately out of scope: it is more heavyweight and extensible than
-this needs. The tools fall into four categories (registry, general web,
-computation, installed-env); the harness picks the per-language
-implementation by target language — v1 implements Python only, but the seam
-is ready for more (crates.io / npm later).
+this needs.
+
+Tools are split by category and scoped per phase. The **language-agnostic**
+tools (general web + sandboxed computation) are defined once here and shared
+by every target; the **language-specific** tools (the package registry and
+installed-environment introspection) are provided by the target's
+`LanguageBackend.tool_commands()`, which layers them on top of this base set
+— so adding a target means providing its registry and env tools, not
+re-implementing web-search/calc.
 
 Safety: installed-env introspection is local and read-only; `calc` runs in an
 isolated QuickJS subprocess (no network, no filesystem beyond a pre-populated
@@ -67,40 +72,48 @@ USER_AGENT = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
 
 
-# --- phase scoping -------------------------------------------------------------
+# --- tool categories and phase scoping ---------------------------------------
 
-# The base tool set is available in every phase that uses tools; the installed-
-# environment tools are scoped to the loops where a candidate venv exists (the
-# code already passed tests, so its declared dependencies were installed).
-BASE_TOOLS = ['search-dependencies', 'dependency-docs', 'web-search',
-              'view-web-page', 'calc']
-ENV_TOOLS = ['list-dependencies', 'show-dependency', 'list-symbols',
-             'show-symbol']
-PHASE_TOOLS = {
-    'gen': BASE_TOOLS,
-    'oracle-opt': BASE_TOOLS,
-    'impl-opt': BASE_TOOLS + ENV_TOOLS,
-    'correction': BASE_TOOLS + ENV_TOOLS,
+# Categories a tool belongs to. The base categories (registry, web, computation)
+# are available in every phase that uses tools; the installed-environment
+# category is scoped to the loops where a candidate environment exists (the code
+# already passed tests, so its declared dependencies were installed).
+CATEGORY_REGISTRY = 'registry'
+CATEGORY_WEB = 'web'
+CATEGORY_COMPUTATION = 'computation'
+CATEGORY_INSTALLED_ENV = 'installed-env'
+
+_BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB, CATEGORY_COMPUTATION}
+PHASE_CATEGORIES = {
+    'gen': _BASE_CATEGORIES,
+    'oracle-opt': _BASE_CATEGORIES,
+    'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
+    'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
 }
 
 
 @dataclasses.dataclass
 class ToolContext:
-    """What a phase needs to run tools: which phase it is (selects the tool
-    set) and, for the installed-env tools, the candidate venv's python and,
-    for calc, the working directory whose files populate the `files` object."""
+    """What a phase needs to run tools: which phase it is (selects the category
+    set), the candidate's working directory (its files populate calc's `files`
+    object, and the backend derives its installed-environment from it), and the
+    target backend (supplies the language-specific tools and installed-env
+    availability; None in a bare test means only the agnostic tools are
+    available)."""
     phase: str = 'gen'
-    venv_python: str = None
     workdir: str = None
+    backend: object = None
 
 
 @dataclasses.dataclass
 class ToolCommand:
-    """One command of the fake terminal: its name, how it is spelled in a `$`
-    line, a one-line description, and the async handler that executes it
-    (args -> output text). Handlers return errors as `error: ...` text so the
-    model can see what went wrong and adapt."""
+    """One command of the fake terminal: its name, the category it belongs to
+    (for phase scoping), how it is spelled in a `$` line, a one-line
+    description, and the async handler that executes it (args -> output text).
+    Handlers return errors as `error: ...` text so the model can see what went
+    wrong and adapt."""
     name: str
+    category: str
     usage: str
     description: str
     handler: 'callable'
@@ -113,17 +126,6 @@ class PendingCommand:
     name: str
     args: list
     malformed: bool = False
-
-
-def venv_python_for(subdir):
-    # The candidate venv's python (created by the test runner), platform-aware.
-    if os.name == 'nt':
-        return os.path.join(subdir, '.venv', 'Scripts', 'python.exe')
-    return os.path.join(subdir, '.venv', 'bin', 'python')
-
-
-def _venv_usable(venv_python):
-    return bool(venv_python) and os.path.exists(venv_python)
 
 
 # --- small shared helpers -------------------------------------------------------
@@ -144,7 +146,7 @@ def wrap_untrusted(name, content):
     return f'[tool:{name}]\n{content}\n[/tool:{name}]'
 
 
-def _is_blocked_host(hostname):
+def is_blocked_host(hostname):
     # SSRF guard: reject localhost and private/loopback/link-local/reserved
     # addresses so a tool cannot be pointed at the host's own network.
     if not hostname:
@@ -171,18 +173,19 @@ def _is_blocked_host(hostname):
     return False
 
 
-def _assert_public_url(url):
+def assert_public_url(url):
+    # Raise unless `url` is an http(s) URL to a public host (SSRF guard).
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ('http', 'https'):
         raise Exception(f'blocked: only http(s) URLs are allowed (got {parsed.scheme or "?"})')
-    if _is_blocked_host(parsed.hostname):
+    if is_blocked_host(parsed.hostname):
         raise Exception(f'blocked: {parsed.hostname} is not a public host (SSRF guard)')
 
 
-# --- web fetching / parsing ------------------------------------------------------
+# --- web fetching / parsing (shared by the web tools and the registry tools) ----
 
 
-async def _http_get(url, timeout=HTTP_TIMEOUT):
+async def http_get(url, timeout=HTTP_TIMEOUT):
     """GET a URL off the event loop and return (status, content_type, body).
     The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
     memory before the text limits are applied."""
@@ -251,7 +254,7 @@ def _decode_ddg_href(href):
     return href
 
 
-def _parse_ddg_html(doc):
+def parse_ddg_html(doc):
     """Parse the results of DuckDuckGo's HTML search endpoint into
     (title, url, snippet) triples. Returns [] on any markup mismatch so the
     caller can fall back to the instant-answer API."""
@@ -271,14 +274,14 @@ def _parse_ddg_html(doc):
     return results
 
 
-async def _ddg_instant(query):
+async def ddg_instant(query):
     """Fallback search via the DuckDuckGo instant-answer JSON API. Coverage is
     narrower than the HTML endpoint (entity-centric) but the endpoint is
     stable; returns (title, url, snippet) triples."""
     url = ('https://api.duckduckgo.com/?q=' + urllib.parse.quote_plus(query)
            + '&format=json&no_html=1&skip_disambig=1')
     try:
-        _, _, body = await _http_get(url)
+        _, _, body = await http_get(url)
         data = json.loads(body.decode('utf-8', 'replace'))
     except Exception:
         return []
@@ -308,88 +311,7 @@ async def _ddg_instant(query):
     return results
 
 
-# --- registry tools (PyPI) -------------------------------------------------------
-
-
-async def search_dependencies(args, ctx=None):
-    """`search-dependencies "query"` — best-effort registry search. PyPI has no
-    public search API, so this searches the web for PyPI project pages and
-    shapes the hits into `name — url` lines. Results can be coarse; refine with
-    web-search, and use dependency-docs for a specific package."""
-    query = ' '.join(args).strip()
-    if not query:
-        return 'error: search-dependencies needs a query, e.g. $ search-dependencies "http client"'
-    try:
-        _, _, body = await _http_get(
-            'https://html.duckduckgo.com/html/?q='
-            + urllib.parse.quote_plus('site:pypi.org ' + query))
-        results = _parse_ddg_html(body.decode('utf-8', 'replace'))
-    except Exception:
-        results = []
-    seen = {}
-    order = []
-    for _title, url, snippet in results:
-        m = re.search(r'pypi\.org/project/([^/]+)', url)
-        if not m:
-            continue
-        name = m.group(1).lower()
-        if name not in seen:
-            seen[name] = (url, snippet)
-            order.append(name)
-    if not order:
-        return 'error: no matching packages found on PyPI (try web-search for a broader query)'
-    lines = [f'Packages matching "{query}" (from PyPI; search is best-effort):']
-    for name in order[:SEARCH_RESULT_COUNT]:
-        url, snippet = seen[name]
-        lines.append(f'- {name} — {url}')
-        if snippet:
-            lines.append(f'    {snippet[:SNIPPET_CHAR_LIMIT]}')
-    lines.append('Use dependency-docs <name> for full metadata and a docs extract.')
-    return truncate('\n'.join(lines))
-
-
-async def dependency_docs(args, ctx=None):
-    """`dependency-docs <package> [version]` — fetch a package's PyPI metadata
-    (name, version, summary, home/docs URLs) plus a bounded extract of its docs
-    page. The docs fetch keeps the SSRF guard."""
-    if not args:
-        return 'error: dependency-docs needs a package name, e.g. $ dependency-docs requests'
-    name = args[0].strip()
-    ver = args[1].strip() if len(args) > 1 else None
-    api = f'https://pypi.org/pypi/{name}/{urllib.parse.quote(ver)}/json' if ver \
-        else f'https://pypi.org/pypi/{name}/json'
-    try:
-        _status, _ctype, body = await _http_get(api)
-        data = json.loads(body.decode('utf-8', 'replace'))
-    except Exception as e:
-        return f'error: could not fetch metadata for {name}: {e}'
-    info = data.get('info', {}) if isinstance(data, dict) else {}
-    lines = [f'Package: {info.get("name")} {info.get("version")}'.strip()]
-    if info.get('summary'):
-        lines.append(f'Summary: {info["summary"]}')
-    urls = info.get('project_urls') or {}
-    home = info.get('home_page') or urls.get('Home') or urls.get('Homepage') or ''
-    docs_url = (urls.get('Documentation') or urls.get('Docs')
-                or urls.get('Documentation Url') or home)
-    if home and home != docs_url:
-        lines.append(f'Home: {home}')
-    if docs_url:
-        lines.append(f'Docs: {docs_url}')
-        try:
-            _assert_public_url(docs_url)
-            _s, ctype, pbody = await _http_get(docs_url)
-            doc = pbody.decode('utf-8', 'replace')
-            text = html_to_text(doc) if 'html' in (ctype or '').lower() \
-                else re.sub(r'[ \t]+', ' ', doc)
-            if text.strip():
-                lines.append('Docs extract:')
-                lines.append(truncate(text, RESULT_CHAR_LIMIT - 400))
-        except Exception as e:
-            lines.append(f'(docs fetch skipped: {e})')
-    return truncate('\n'.join(lines))
-
-
-# --- general web tools -----------------------------------------------------------
+# --- language-agnostic tools: general web --------------------------------------
 
 
 async def web_search(args, ctx=None):
@@ -400,13 +322,13 @@ async def web_search(args, ctx=None):
         return 'error: web-search needs a query, e.g. $ web-search "pandas read_csv parameters"'
     results = []
     try:
-        _, _, body = await _http_get(
+        _, _, body = await http_get(
             'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote_plus(query))
-        results = _parse_ddg_html(body.decode('utf-8', 'replace'))
+        results = parse_ddg_html(body.decode('utf-8', 'replace'))
     except Exception:
         results = []
     if not results:
-        results = await _ddg_instant(query)
+        results = await ddg_instant(query)
     if not results:
         return f'error: no results for: {query}'
     lines = [f'Search results for: {query}']
@@ -428,11 +350,11 @@ async def view_web_page(args, ctx=None):
     if not re.match(r'^https?://\S+$', url):
         return f'error: not a valid http(s) URL: {url}'
     try:
-        _assert_public_url(url)
+        assert_public_url(url)
     except Exception as e:
         return f'error: {e}'
     try:
-        status, ctype, body = await _http_get(url)
+        status, ctype, body = await http_get(url)
     except Exception as e:
         return f'error: failed to fetch {url}: {e}'
     doc = body.decode('utf-8', 'replace')
@@ -448,7 +370,7 @@ async def view_web_page(args, ctx=None):
     return f'Content of {url} (HTTP {status}):\n\n{text}'
 
 
-# --- computation tool (calc / QuickJS) -------------------------------------------
+# --- language-agnostic tool: sandboxed computation (calc / QuickJS) -------------
 
 
 CALC_BOOTSTRAP_TEMPLATE = '''
@@ -576,167 +498,72 @@ async def calc(args, ctx=None):
     return '(no output — the script produced no value and printed nothing)'
 
 
-# --- installed-environment tools (candidate venv) ---------------------------------
+# --- shared subprocess helper (used by the installed-env tools) -----------------
 
 
-async def _venv_exec(venv_python, argv, timeout=30):
-    """Run a command in the candidate venv's python and return (stdout, err);
-    (None, message) when it could not be run at all."""
+async def run_in_python(python, argv, timeout=30):
+    """Run a command in a python interpreter and return (stdout, err);
+    (None, message) when it could not be run at all. The target backend uses
+    this for its installed-environment introspection tools."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            venv_python, *argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            python, *argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = await run_subprocess(proc, timeout)
     except Exception as e:
         return None, str(e)
     return stdout, stderr
 
 
-_SHOW_DEP_SCRIPT = '''
-import sys, importlib.metadata as md
-name = sys.argv[1]
-try:
-    d = md.distribution(name)
-except Exception:
-    print("not installed: " + name)
-    sys.exit(0)
-print(d.metadata["Name"] + " " + md.version(name))
-s = d.metadata.get("Summary")
-if s: print("Summary: " + s)
-'''
-
-_LIST_SYMBOLS_SCRIPT = '''
-import sys, importlib
-mod = sys.argv[1]
-try:
-    m = importlib.import_module(mod)
-except Exception as e:
-    print("error: could not import " + mod + ": " + str(e))
-    sys.exit(0)
-print("\\n".join(s for s in dir(m) if not s.startswith("_")))
-'''
-
-_SHOW_SYMBOL_SCRIPT = '''
-import sys, importlib, inspect
-mod, sym = sys.argv[1], sys.argv[2]
-try:
-    m = importlib.import_module(mod)
-except Exception as e:
-    print("error: could not import " + mod + ": " + str(e))
-    sys.exit(0)
-if not hasattr(m, sym):
-    print("error: " + mod + " has no attribute " + sym)
-    sys.exit(0)
-obj = getattr(m, sym)
-try:
-    print(sym + str(inspect.signature(obj)))
-except Exception:
-    print(sym)
-doc = inspect.getdoc(obj)
-if doc: print(doc[:3000])
-'''
+# --- the command set: agnostic base, layered per target -------------------------
 
 
-async def list_dependencies(args, ctx=None):
-    """`list-dependencies` — list the packages installed in the candidate
-    environment (name==version, one per line)."""
-    out, err = await _venv_exec(
-        ctx.venv_python, ['-m', 'pip', 'list', '--format=freeze', '--disable-pip-version-check'])
-    if out is None:
-        return f'error: could not list dependencies: {err}'
-    text = (out or '').strip()
-    if not text:
-        return '(no third-party packages installed in the candidate environment)'
-    return truncate(text)
-
-
-async def show_dependency(args, ctx=None):
-    """`show-dependency <package>` — show a package's name, version, and summary
-    from the candidate environment."""
-    if not args:
-        return 'error: show-dependency needs a package name, e.g. $ show-dependency requests'
-    name = args[0].strip()
-    out, err = await _venv_exec(ctx.venv_python, ['-c', _SHOW_DEP_SCRIPT, name])
-    if out is None:
-        return f'error: could not look up {name}: {err}'
-    return truncate((out or err or '').strip())
-
-
-async def list_symbols(args, ctx=None):
-    """`list-symbols <module>` — list the public attributes of an importable
-    module in the candidate environment (the same import the generated code does)."""
-    if not args:
-        return 'error: list-symbols needs a module name, e.g. $ list-symbols requests'
-    mod = args[0].strip()
-    out, err = await _venv_exec(ctx.venv_python, ['-c', _LIST_SYMBOLS_SCRIPT, mod])
-    if out is None:
-        return f'error: could not list symbols for {mod}: {err}'
-    return truncate((out or err or '').strip())
-
-
-async def show_symbol(args, ctx=None):
-    """`show-symbol <module> <symbol>` — show a symbol's signature and docstring
-    in the candidate environment."""
-    if len(args) < 2:
-        return 'error: show-symbol needs a module and a symbol, e.g. $ show-symbol requests get'
-    mod, sym = args[0].strip(), args[1].strip()
-    out, err = await _venv_exec(ctx.venv_python, ['-c', _SHOW_SYMBOL_SCRIPT, mod, sym])
-    if out is None:
-        return f'error: could not look up {mod}.{sym}: {err}'
-    return truncate((out or err or '').strip())
-
-
-# --- the fake terminal -----------------------------------------------------------
-
-
-_COMMAND_SPECS = {
-    'search-dependencies': ('$ search-dependencies "query"',
-                            'search the package registry (PyPI) for a dependency; returns '
-                            'matching package names with a one-line summary (best-effort)'),
-    'dependency-docs': ('$ dependency-docs <package> [version]',
-                        'fetch a package\'s registry metadata (version, summary, docs URL) and '
-                        'a bounded extract of its docs page'),
-    'web-search': ('$ web-search "search terms"',
-                   'search the web; returns the top results as numbered title, URL, and snippet lines'),
-    'view-web-page': ('$ view-web-page "https://url"',
-                      'fetch a web page and return its text content (truncated)'),
-    'calc': ('$ calc "js expression or script"', 'evaluate JavaScript in a sandbox (Math/JSON/Date/String/Array plus a `files` object of the current dir), REPL-style: the value of the final expression is returned (use print()/console.log() for extra lines)'),
-    'list-dependencies': ('$ list-dependencies',
-                          'list the packages installed in the candidate environment (name==version)'),
-    'show-dependency': ('$ show-dependency <package>',
-                        'show a package\'s version and summary from the candidate environment'),
-    'list-symbols': ('$ list-symbols <module>',
-                     'list the public attributes of an importable module in the candidate environment'),
-    'show-symbol': ('$ show-symbol <module> <symbol>',
-                    'show a symbol\'s signature and docstring in the candidate environment'),
-}
-
-_HANDLERS = {
-    'search-dependencies': search_dependencies,
-    'dependency-docs': dependency_docs,
-    'web-search': web_search,
-    'view-web-page': view_web_page,
-    'calc': calc,
-    'list-dependencies': list_dependencies,
-    'show-dependency': show_dependency,
-    'list-symbols': list_symbols,
-    'show-symbol': show_symbol,
-}
+def agnostic_tool_commands(ctx=None):
+    """The language-agnostic fake-terminal commands, defined once and shared by
+    every target: the general web (web-search, view-web-page) and sandboxed
+    computation (calc). A target's `LanguageBackend.tool_commands()` layers its
+    registry and installed-env tools on top of this set."""
+    ctx = ctx or ToolContext()
+    return {
+        'web-search': ToolCommand('web-search', CATEGORY_WEB,
+                                  '$ web-search "search terms"',
+                                  'search the web; returns the top results as numbered '
+                                  'title, URL, and snippet lines',
+                                  lambda args, _c=ctx: web_search(args, _c)),
+        'view-web-page': ToolCommand('view-web-page', CATEGORY_WEB,
+                                     '$ view-web-page "https://url"',
+                                     'fetch a web page and return its text content (truncated)',
+                                     lambda args, _c=ctx: view_web_page(args, _c)),
+        'calc': ToolCommand('calc', CATEGORY_COMPUTATION,
+                            '$ calc "js expression or script"',
+                            'evaluate JavaScript in a sandbox (Math/JSON/Date/String/Array plus '
+                            'a `files` object of the current dir), REPL-style: the value of the '
+                            'final expression is returned (use print()/console.log() for extra lines)',
+                            lambda args, _c=ctx: calc(args, _c)),
+    }
 
 
 def build_commands(ctx=None):
-    """The phase's command set: the base tools always, plus the installed-env
-    tools only when the phase allows them and a usable candidate venv exists."""
+    """The phase's command set: the target backend's tools (the language-agnostic
+    base plus its registry and installed-env tools), kept only where the phase
+    allows the category — the installed-env tools additionally require a usable
+    candidate environment. With no backend (e.g. a test) only the agnostic base
+    is available."""
     ctx = ctx or ToolContext()
-    available = PHASE_TOOLS.get(ctx.phase, BASE_TOOLS)
-    commands = {}
-    for name in available:
-        if name in ENV_TOOLS and not _venv_usable(ctx.venv_python):
+    if ctx.backend is not None:
+        commands = dict(ctx.backend.tool_commands(ctx))
+        env_ok = ctx.backend.installed_env_usable(ctx)
+    else:
+        commands = agnostic_tool_commands(ctx)
+        env_ok = False
+    allowed = PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES)
+    out = {}
+    for name, cmd in commands.items():
+        if cmd.category not in allowed:
             continue
-        spec = _COMMAND_SPECS[name]
-        handler = _HANDLERS[name]
-        commands[name] = ToolCommand(name, spec[0], spec[1],
-                                     lambda args, _h=handler, _c=ctx: _h(args, _c))
-    return commands
+        if cmd.category == CATEGORY_INSTALLED_ENV and not env_ok:
+            continue
+        out[name] = cmd
+    return out
 
 
 def tool_instructions(ctx=None):
@@ -748,7 +575,7 @@ def tool_instructions(ctx=None):
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
         'When you need information that is not in the assignment — for example the exact API of a third-party library the code must use — use the fake terminal below. To issue a command, end your response with a single line beginning with `$` followed by the command name and its arguments. Only the final line of your response is read as a command; everything above it is kept as your in-progress reasoning.',
-        'Routing: prefer search-dependencies / dependency-docs for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation.',
+        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation.',
         'Available commands:',
     ]
     for cmd in commands.values():
@@ -760,6 +587,9 @@ def tool_instructions(ctx=None):
         'Once you have everything you need, produce your final response exactly as specified above, with no trailing command line.',
     ])
     return '\n'.join(lines) + '\n'
+
+
+# --- the $ protocol and the loop -------------------------------------------------
 
 
 _COMMAND_RE = re.compile(r'^\$\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')

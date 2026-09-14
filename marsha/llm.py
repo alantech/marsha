@@ -104,7 +104,7 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
     system = b.oracle_prompt(meta)
-    ctx = tools.ToolContext('gen')
+    ctx = tools.ToolContext(backend=b, phase='gen')
     if tool_use:
         system += tools.tool_instructions(ctx)
     gpt_gen_test = get_mapper(system, n_results=1,
@@ -285,7 +285,8 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     level = args.optimize
     if level <= 0:
         return oracle_md
-    tool_ctx = None if args.no_tools else tools.ToolContext('oracle-opt')
+    tool_ctx = None if args.no_tools else tools.ToolContext(
+        backend=backends.current(), phase='oracle-opt')
     registry = build_registry()
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
@@ -335,7 +336,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     b = backends.current()
     system = b.impl_prompt(meta)
-    ctx = tools.ToolContext('gen')
+    ctx = tools.ToolContext(backend=b, phase='gen')
     if tool_use:
         system += tools.tool_instructions(ctx)
     marsha_for_code_llm = format_marsha_for_llm(meta)
@@ -445,7 +446,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     # candidate venv: the installed-env tools can introspect it. Absent a venv, build_commands
     # drops those tools and the phase degrades to the base set.
     tool_ctx = None if args.no_tools else tools.ToolContext(
-        'impl-opt', venv_python=tools.venv_python_for(subdir), workdir=subdir)
+        backend=b, phase='impl-opt', workdir=subdir)
     registry = build_registry()
     reviewers = resolve_loop_reviewers('impl', args.impl_personas, registry)
     model = resolve_strong_model()
@@ -705,8 +706,9 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
         return corrected_md
     tool_ctx = None
     if not args.no_tools and subdir is not None:
+        b = backends.current()
         tool_ctx = tools.ToolContext(
-            'correction', venv_python=tools.venv_python_for(subdir), workdir=subdir)
+            backend=b, phase='correction', workdir=subdir)
     registry = build_registry()
     reviewers = resolve_loop_reviewers(
         'correction', args.fix_personas, registry)

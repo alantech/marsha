@@ -15,6 +15,7 @@ validator enforces it rather than leaving it to the model.
 """
 
 import asyncio
+import json
 import os
 import platform
 import re
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 
 import autopep8
 import pycodestyle
@@ -30,6 +32,11 @@ from mistletoe import Document, ast_renderer
 
 from marsha.backends.base import LanguageBackend
 from marsha.meta import void_note
+from marsha.tools import (
+    ToolCommand, CATEGORY_REGISTRY, CATEGORY_INSTALLED_ENV,
+    http_get, parse_ddg_html, html_to_text, assert_public_url, truncate, run_in_python,
+    SEARCH_RESULT_COUNT, SNIPPET_CHAR_LIMIT, RESULT_CHAR_LIMIT,
+)
 from marsha.utils import read_file, write_file, run_subprocess
 
 # pyflakes findings that are style noise (the linter previously suppressed them); everything else
@@ -117,6 +124,197 @@ def _requirement_name(requirement):
     return _normalize_name(match.group(0)) if match else ''
 
 
+# --- fake-terminal tools (Python: PyPI registry + installed-env) -----------------
+#
+# The language-agnostic tools (web-search, view-web-page, calc) are defined once
+# in marsha.tools and layered in by LanguageBackend.tool_commands(); the Python
+# backend adds its two language-specific categories here: the package registry
+# (PyPI) and installed-environment introspection (the candidate venv).
+
+def venv_python_for(subdir):
+    # The candidate venv's python (created by the test runner), platform-aware.
+    if os.name == 'nt':
+        return os.path.join(subdir, '.venv', 'Scripts', 'python.exe')
+    return os.path.join(subdir, '.venv', 'bin', 'python')
+
+
+def _venv_usable(venv_python):
+    return bool(venv_python) and os.path.exists(venv_python)
+
+
+async def search_dependencies(args, ctx=None):
+    """`search-dependencies "query"` — best-effort registry search. PyPI has no
+    public search API, so this searches the web for PyPI project pages and
+    shapes the hits into `name — url` lines. Results can be coarse; refine with
+    web-search, and use dependency-docs for a specific package."""
+    query = ' '.join(args).strip()
+    if not query:
+        return 'error: search-dependencies needs a query, e.g. $ search-dependencies "http client"'
+    try:
+        _, _, body = await http_get(
+            'https://html.duckduckgo.com/html/?q='
+            + urllib.parse.quote_plus('site:pypi.org ' + query))
+        results = parse_ddg_html(body.decode('utf-8', 'replace'))
+    except Exception:
+        results = []
+    seen = {}
+    order = []
+    for _title, url, snippet in results:
+        m = re.search(r'pypi\.org/project/([^/]+)', url)
+        if not m:
+            continue
+        name = m.group(1).lower()
+        if name not in seen:
+            seen[name] = (url, snippet)
+            order.append(name)
+    if not order:
+        return 'error: no matching packages found on PyPI (try web-search for a broader query)'
+    lines = [f'Packages matching "{query}" (from PyPI; search is best-effort):']
+    for name in order[:SEARCH_RESULT_COUNT]:
+        url, snippet = seen[name]
+        lines.append(f'- {name} — {url}')
+        if snippet:
+            lines.append(f'    {snippet[:SNIPPET_CHAR_LIMIT]}')
+    lines.append('Use dependency-docs <name> for full metadata and a docs extract.')
+    return truncate('\n'.join(lines))
+
+
+async def dependency_docs(args, ctx=None):
+    """`dependency-docs <package> [version]` — fetch a package's PyPI metadata
+    (name, version, summary, home/docs URLs) plus a bounded extract of its docs
+    page. The docs fetch keeps the SSRF guard."""
+    if not args:
+        return 'error: dependency-docs needs a package name, e.g. $ dependency-docs requests'
+    name = args[0].strip()
+    ver = args[1].strip() if len(args) > 1 else None
+    api = f'https://pypi.org/pypi/{name}/{urllib.parse.quote(ver)}/json' if ver \
+        else f'https://pypi.org/pypi/{name}/json'
+    try:
+        _status, _ctype, body = await http_get(api)
+        data = json.loads(body.decode('utf-8', 'replace'))
+    except Exception as e:
+        return f'error: could not fetch metadata for {name}: {e}'
+    info = data.get('info', {}) if isinstance(data, dict) else {}
+    lines = [f'Package: {info.get("name")} {info.get("version")}'.strip()]
+    if info.get('summary'):
+        lines.append(f'Summary: {info["summary"]}')
+    urls = info.get('project_urls') or {}
+    home = info.get('home_page') or urls.get('Home') or urls.get('Homepage') or ''
+    docs_url = (urls.get('Documentation') or urls.get('Docs')
+                or urls.get('Documentation Url') or home)
+    if home and home != docs_url:
+        lines.append(f'Home: {home}')
+    if docs_url:
+        lines.append(f'Docs: {docs_url}')
+        try:
+            assert_public_url(docs_url)
+            _s, ctype, pbody = await http_get(docs_url)
+            doc = pbody.decode('utf-8', 'replace')
+            text = html_to_text(doc) if 'html' in (ctype or '').lower() \
+                else re.sub(r'[ \t]+', ' ', doc)
+            if text.strip():
+                lines.append('Docs extract:')
+                lines.append(truncate(text, RESULT_CHAR_LIMIT - 400))
+        except Exception as e:
+            lines.append(f'(docs fetch skipped: {e})')
+    return truncate('\n'.join(lines))
+
+
+_SHOW_DEP_SCRIPT = '''
+import sys, importlib.metadata as md
+name = sys.argv[1]
+try:
+    d = md.distribution(name)
+except Exception:
+    print("not installed: " + name)
+    sys.exit(0)
+print(d.metadata["Name"] + " " + md.version(name))
+s = d.metadata.get("Summary")
+if s: print("Summary: " + s)
+'''
+
+_LIST_SYMBOLS_SCRIPT = '''
+import sys, importlib
+mod = sys.argv[1]
+try:
+    m = importlib.import_module(mod)
+except Exception as e:
+    print("error: could not import " + mod + ": " + str(e))
+    sys.exit(0)
+print("\\n".join(s for s in dir(m) if not s.startswith("_")))
+'''
+
+_SHOW_SYMBOL_SCRIPT = '''
+import sys, importlib, inspect
+mod, sym = sys.argv[1], sys.argv[2]
+try:
+    m = importlib.import_module(mod)
+except Exception as e:
+    print("error: could not import " + mod + ": " + str(e))
+    sys.exit(0)
+if not hasattr(m, sym):
+    print("error: " + mod + " has no attribute " + sym)
+    sys.exit(0)
+obj = getattr(m, sym)
+try:
+    print(sym + str(inspect.signature(obj)))
+except Exception:
+    print(sym)
+doc = inspect.getdoc(obj)
+if doc: print(doc[:3000])
+'''
+
+
+async def list_dependencies(args, ctx=None):
+    """`list-dependencies` — list the packages installed in the candidate
+    environment (name==version, one per line)."""
+    out, err = await run_in_python(
+        venv_python_for(ctx.workdir),
+        ['-m', 'pip', 'list', '--format=freeze', '--disable-pip-version-check'])
+    if out is None:
+        return f'error: could not list dependencies: {err}'
+    text = (out or '').strip()
+    if not text:
+        return '(no third-party packages installed in the candidate environment)'
+    return truncate(text)
+
+
+async def show_dependency(args, ctx=None):
+    """`show-dependency <package>` — show a package's name, version, and summary
+    from the candidate environment."""
+    if not args:
+        return 'error: show-dependency needs a package name, e.g. $ show-dependency requests'
+    name = args[0].strip()
+    out, err = await run_in_python(venv_python_for(ctx.workdir), ['-c', _SHOW_DEP_SCRIPT, name])
+    if out is None:
+        return f'error: could not look up {name}: {err}'
+    return truncate((out or err or '').strip())
+
+
+async def list_symbols(args, ctx=None):
+    """`list-symbols <module>` — list the public attributes of an importable
+    module in the candidate environment (the same import the generated code does)."""
+    if not args:
+        return 'error: list-symbols needs a module name, e.g. $ list-symbols requests'
+    mod = args[0].strip()
+    out, err = await run_in_python(venv_python_for(ctx.workdir), ['-c', _LIST_SYMBOLS_SCRIPT, mod])
+    if out is None:
+        return f'error: could not list symbols for {mod}: {err}'
+    return truncate((out or err or '').strip())
+
+
+async def show_symbol(args, ctx=None):
+    """`show-symbol <module> <symbol>` — show a symbol's signature and docstring
+    in the candidate environment."""
+    if len(args) < 2:
+        return 'error: show-symbol needs a module and a symbol, e.g. $ show-symbol requests get'
+    mod, sym = args[0].strip(), args[1].strip()
+    out, err = await run_in_python(venv_python_for(ctx.workdir), ['-c', _SHOW_SYMBOL_SCRIPT, mod, sym])
+    if out is None:
+        return f'error: could not look up {mod}.{sym}: {err}'
+    return truncate((out or err or '').strip())
+
+
 class _StyleReport(pycodestyle.BaseReport):
     """Collect pycodestyle findings as (line, col, code, message) tuples, honouring the ignore set."""
 
@@ -173,6 +371,51 @@ class PythonBackend(LanguageBackend):
             raise Exception(
                 f'Invalid target version: {requested!r} (expected a Python version, e.g. 3.12)')
         return requested
+
+    # --- fake-terminal tools (Python: PyPI registry + installed-env) -----------
+
+    def tool_commands(self, ctx):
+        # The language-agnostic base (web-search, view-web-page, calc) plus
+        # Python's package registry (PyPI) and installed-environment tools.
+        commands = super().tool_commands(ctx)
+        commands['search-dependencies'] = ToolCommand(
+            'search-dependencies', CATEGORY_REGISTRY,
+            '$ search-dependencies "query"',
+            'search the package registry (PyPI) for a dependency; returns '
+            'matching package names with a one-line summary (best-effort)',
+            lambda args, _c=ctx: search_dependencies(args, _c))
+        commands['dependency-docs'] = ToolCommand(
+            'dependency-docs', CATEGORY_REGISTRY,
+            '$ dependency-docs <package> [version]',
+            'fetch a package\'s registry metadata (version, summary, docs URL) and '
+            'a bounded extract of its docs page',
+            lambda args, _c=ctx: dependency_docs(args, _c))
+        commands['list-dependencies'] = ToolCommand(
+            'list-dependencies', CATEGORY_INSTALLED_ENV,
+            '$ list-dependencies',
+            'list the packages installed in the candidate environment (name==version)',
+            lambda args, _c=ctx: list_dependencies(args, _c))
+        commands['show-dependency'] = ToolCommand(
+            'show-dependency', CATEGORY_INSTALLED_ENV,
+            '$ show-dependency <package>',
+            'show a package\'s version and summary from the candidate environment',
+            lambda args, _c=ctx: show_dependency(args, _c))
+        commands['list-symbols'] = ToolCommand(
+            'list-symbols', CATEGORY_INSTALLED_ENV,
+            '$ list-symbols <module>',
+            'list the public attributes of an importable module in the candidate environment',
+            lambda args, _c=ctx: list_symbols(args, _c))
+        commands['show-symbol'] = ToolCommand(
+            'show-symbol', CATEGORY_INSTALLED_ENV,
+            '$ show-symbol <module> <symbol>',
+            'show a symbol\'s signature and docstring in the candidate environment',
+            lambda args, _c=ctx: show_symbol(args, _c))
+        return commands
+
+    def installed_env_usable(self, ctx):
+        # The installed-env tools need the candidate venv (a function of the
+        # candidate's working dir) to exist on disk.
+        return bool(ctx.workdir) and _venv_usable(venv_python_for(ctx.workdir))
 
     # --- naming / contract ---------------------------------------------------
 

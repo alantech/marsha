@@ -13,10 +13,15 @@ language-specific leaf to a LanguageBackend:
 - formatting, linting, test execution
 - the runnable-CLI step and per-backend reviewer guidance
 - toolchain detection
+- the fake-terminal tools: the language-agnostic set (web-search, view-web-page,
+  calc) is defined once in `marsha.tools`; a backend layers its language-specific
+  tools (package registry + installed-env introspection) on top of it.
 
 Only `python` is wired in today; the registry in `marsha.backends` is ready for
 more (issue #204; Rust is the first follow-on, #183).
 """
+
+from marsha.tools import agnostic_tool_commands
 
 
 class LanguageBackend:
@@ -25,6 +30,25 @@ class LanguageBackend:
     id = ''
     aliases = ()
     code_fence_lang = ''
+
+    # --- fake-terminal tools ----------------------------------------------------
+
+    def tool_commands(self, ctx):
+        """The fake-terminal commands for this target language, before phase
+        scoping: the language-agnostic set (web-search, view-web-page, calc),
+        defined once in `marsha.tools`, plus this backend's language-specific
+        tools. A concrete backend layers its registry and installed-env tools on
+        top of `super().tool_commands(ctx)`, so adding a target only adds its
+        registry/env tools, never re-implements the web/computation tools."""
+        return dict(agnostic_tool_commands(ctx))
+
+    def installed_env_usable(self, ctx):
+        """Whether this backend's installed-env tools are available for `ctx`
+        (e.g. the candidate environment exists for the phase's working dir).
+        False by default: only backends that provide installed-env tools
+        (and where its environment exists) return True. The *mechanism* is
+        backend-internal — this is the only installed-env hook the core calls."""
+        return False
 
     def resolve_target_version(self, requested):
         """Validate a --target-version value for this target and return its normalized
