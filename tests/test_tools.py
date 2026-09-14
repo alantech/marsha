@@ -190,39 +190,103 @@ def test_truncate_and_untrusted_block():
 
 # --- web-search ----------------------------------------------------------------
 
-DDG_HTML = '''<html><body>
-<div class="results">
-  <div class="result">
-    <h2 class="result__title"><a class="result__a"
-      href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fpandas.pydata.org%2Fdocs.html&amp;rut=x">pandas.read_csv &mdash; docs</a></h2>
-    <a class="result__snippet">Read a <b>CSV</b> file into a DataFrame.</a>
-  </div>
-  <div class="result">
-    <h2 class="result__title"><a class="result__a" href="https://example.com/csv-guide">A guide to CSV</a></h2>
-    <a class="result__snippet">A plain-text guide to <b>CSV</b> parsing.</a>
-  </div>
-</div>
-</body></html>'''
+def _parallel_body():
+    return json.dumps({
+        'jsonrpc': '2.0', 'id': 1,
+        'result': {
+            'structuredContent': {'results': [
+                {'url': 'https://pandas.pydata.org/docs.html',
+                 'title': 'pandas.read_csv docs',
+                 'excerpts': ['Read a CSV file into a DataFrame.']},
+                {'url': 'https://example.com/csv-guide',
+                 'title': 'A guide to CSV',
+                 'excerpts': ['A plain-text guide to CSV parsing.']},
+            ]},
+            'isError': False,
+        },
+    }).encode('utf-8')
 
 
-def test_web_search_parses_ddg_html():
-    async def fake_get(url, timeout=None):
-        assert url.startswith('https://html.duckduckgo.com/html/?q=')
-        return 200, 'text/html', DDG_HTML.encode()
-    with patch.object(tools, 'http_get', new=fake_get):
+def _exa_body():
+    text = ('Title: pandas.read_csv docs\n'
+            'URL: https://pandas.pydata.org/docs.html\n'
+            'Published: N/A\nAuthor: N/A\nHighlights:\n'
+            '- Read a CSV file into a DataFrame.\n'
+            '---\n\n'
+            'Title: A guide to CSV\n'
+            'URL: https://example.com/csv-guide\n'
+            'Published: N/A\nAuthor: N/A\nHighlights:\n'
+            '- A plain-text guide to CSV parsing.')
+    return ('event: message\ndata: ' + json.dumps({
+        'jsonrpc': '2.0', 'id': 1,
+        'result': {'content': [{'type': 'text', 'text': text}]},
+    }) + '\n\n').encode('utf-8')
+
+
+def test_web_search_uses_parallel_mcp():
+    calls = []
+
+    async def fake_post(url, body, headers=None, timeout=None):
+        calls.append(url)
+        assert url == tools.PARALLEL_MCP_URL
+        assert json.loads(body)['params']['name'] == 'web_search'
+        return 200, 'application/json', _parallel_body()
+
+    with patch.object(tools, 'http_post', new=fake_post):
         out = asyncio.run(tools.web_search(['pandas', 'read_csv']))
+    assert calls == [tools.PARALLEL_MCP_URL]  # Parallel answered; no fallback
     assert 'Search results for: pandas read_csv' in out
     assert 'https://pandas.pydata.org/docs.html' in out
     assert 'A guide to CSV' in out
     assert 'view-web-page' in out
 
 
-def test_web_search_no_results_is_error_text():
+def test_web_search_falls_back_to_exa_when_parallel_empty():
+    async def fake_post(url, body, headers=None, timeout=None):
+        if url == tools.PARALLEL_MCP_URL:
+            return 200, 'application/json', json.dumps(
+                {'jsonrpc': '2.0', 'id': 1,
+                 'result': {'structuredContent': {'results': []}}}).encode('utf-8')
+        assert url == tools.EXA_MCP_URL
+        assert json.loads(body)['params']['name'] == 'web_search_exa'
+        return 200, 'text/event-stream', _exa_body()
+
+    with patch.object(tools, 'http_post', new=fake_post):
+        out = asyncio.run(tools.web_search(['pandas', 'read_csv']))
+    assert 'https://pandas.pydata.org/docs.html' in out
+    assert 'A guide to CSV' in out
+    assert 'view-web-page' in out
+
+
+def test_web_search_falls_back_to_ddg_instant_when_mcp_down():
+    async def fake_post(url, body, headers=None, timeout=None):
+        raise Exception('mcp endpoint unreachable')
+
     async def fake_get(url, timeout=None):
-        if 'html.duckduckgo.com' in url:
-            return 200, 'text/html', b'<html><body><p>no results</p></body></html>'
+        assert 'api.duckduckgo.com' in url
+        return 200, 'application/json', json.dumps({
+            'Heading': 'pandas',
+            'AbstractText': 'A data-analysis library.',
+            'AbstractURL': 'https://pandas.pydata.org/'}).encode('utf-8')
+
+    with patch.object(tools, 'http_post', new=fake_post), \
+         patch.object(tools, 'http_get', new=fake_get):
+        out = asyncio.run(tools.web_search(['pandas']))
+    assert 'Search results for: pandas' in out
+    assert 'https://pandas.pydata.org/' in out
+
+
+def test_web_search_no_results_is_error_text():
+    async def fake_post(url, body, headers=None, timeout=None):
+        return 200, 'application/json', json.dumps(
+            {'jsonrpc': '2.0', 'id': 1,
+             'result': {'structuredContent': {'results': []}}}).encode('utf-8')
+
+    async def fake_get(url, timeout=None):
         return 200, 'application/json', b'{}'
-    with patch.object(tools, 'http_get', new=fake_get):
+
+    with patch.object(tools, 'http_post', new=fake_post), \
+         patch.object(tools, 'http_get', new=fake_get):
         out = asyncio.run(tools.web_search(['zzz']))
     assert out.startswith('error: no results')
 

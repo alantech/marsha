@@ -11,8 +11,10 @@ detects the command, executes it, and feeds the result back into a follow-up
 LLM call — repeating until the model produces final output with no trailing
 command.
 
-MCP is deliberately out of scope: it is more heavyweight and extensible than
-this needs.
+Web search calls keyless one-shot MCP endpoints (Parallel, then Exa) with a
+single JSON `tools/call` — no MCP session, capability negotiation, or streaming
+client — and falls back to the DuckDuckGo instant-answer JSON API when both are
+unavailable.
 
 Tools are split by category and scoped per phase. The **language-agnostic**
 tools (general web + sandboxed computation) are defined once here and shared
@@ -70,6 +72,11 @@ CALC_FILE_CHAR_LIMIT = 50_000
 
 USER_AGENT = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
+
+# Keyless one-shot MCP search endpoints (see _mcp_tools_call); the DuckDuckGo
+# instant-answer API (ddg_instant) is the last-resort fallback.
+PARALLEL_MCP_URL = 'https://search.parallel.ai/mcp'
+EXA_MCP_URL = 'https://mcp.exa.ai/mcp'
 
 
 # --- tool categories and phase scoping ---------------------------------------
@@ -201,6 +208,55 @@ async def http_get(url, timeout=HTTP_TIMEOUT):
     return await asyncio.to_thread(get)
 
 
+async def http_post(url, body, headers=None, timeout=HTTP_TIMEOUT):
+    """POST a bytes body off the event loop and return (status, content_type,
+    body). Mirrors http_get (browser UA, capped read) for the MCP endpoints."""
+    def post():
+        req = urllib.request.Request(
+            url, data=body, method='POST', headers={
+                'User-Agent': USER_AGENT,
+                'Accept-Language': 'en-US,en;q=0.8',
+                **dict(headers or {}),
+            })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
+    return await asyncio.to_thread(post)
+
+
+async def _mcp_tools_call(url, tool, arguments, timeout=HTTP_TIMEOUT):
+    """One-shot MCP `tools/call` against a keyless endpoint: a single JSON-RPC
+    POST with no initialize/session/streaming client. Returns the response's
+    `result` object. Handles both the plain-JSON (Parallel) and the
+    server-sent-events (Exa) response styles."""
+    body = json.dumps({
+        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+        'params': {'name': tool, 'arguments': arguments},
+    }).encode('utf-8')
+    status, ctype, raw = await http_post(
+        url, body,
+        headers={'Accept': 'application/json, text/event-stream',
+                 'Content-Type': 'application/json'},
+        timeout=timeout)
+    doc = raw.decode('utf-8', 'replace')
+    if 'text/event-stream' in (ctype or ''):
+        for line in doc.splitlines():
+            line = line.strip()
+            if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]'):
+                try:
+                    obj = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and 'result' in obj:
+                    return obj['result']
+        raise Exception(f'{tool}: no result in MCP stream (HTTP {status})')
+    obj = json.loads(doc)
+    if isinstance(obj, dict) and obj.get('error'):
+        raise Exception(f'{tool}: MCP error: {obj["error"]}')
+    if isinstance(obj, dict) and 'result' in obj:
+        return obj['result']
+    raise Exception(f'{tool}: unexpected MCP response (HTTP {status})')
+
+
 def _strip_tags(fragment):
     # Drop tags; insert a space only where two word characters would otherwise
     # run together, so `</a>.` stays `.` and `<b>CSV</b> file` keeps one space.
@@ -314,21 +370,81 @@ async def ddg_instant(query):
 # --- language-agnostic tools: general web --------------------------------------
 
 
+async def _search_parallel(query):
+    """Primary web search: Parallel's keyless MCP endpoint, which returns
+    structured JSON (url/title/excerpts per result)."""
+    result = await _mcp_tools_call(
+        PARALLEL_MCP_URL, 'web_search',
+        {'objective': query, 'search_queries': [query]})
+    content = (result or {}).get('structuredContent') or {}
+    out = []
+    for r in content.get('results') or []:
+        url = (r.get('url') or '').strip()
+        if not url:
+            continue
+        title = (r.get('title') or '').strip() or url
+        snippet = re.sub(r'\s+', ' ', ' '.join(r.get('excerpts') or [])).strip()
+        out.append((title, url, snippet))
+    return out
+
+
+def _parse_exa_results(text):
+    """Parse Exa's line-oriented result blob (`Title:`/`URL:`/`Highlights:`
+    blocks separated by `---`) into (title, url, snippet) triples."""
+    out = []
+    for block in re.split(r'\n-{3,}\n', text):
+        title = url = ''
+        highlights = []
+        in_hl = False
+        for line in block.splitlines():
+            s = line.strip()
+            if s.startswith('Title:'):
+                title = s[len('Title:'):].strip()
+                in_hl = False
+            elif s.startswith('URL:'):
+                url = s[len('URL:'):].strip()
+                in_hl = False
+            elif s.startswith(('Published:', 'Author:')):
+                in_hl = False
+            elif s.startswith('Highlights:'):
+                in_hl = True
+            elif in_hl:
+                frag = s[2:] if s.startswith('- ') else s
+                frag = frag.strip()
+                if frag and frag != '...':
+                    highlights.append(frag)
+        if url:
+            out.append((title or url, url, ' '.join(highlights)))
+    return out
+
+
+async def _search_exa(query):
+    """Secondary web search: Exa's keyless MCP endpoint (a different index, so
+    it both fails over Parallel and widens recall)."""
+    result = await _mcp_tools_call(
+        EXA_MCP_URL, 'web_search_exa',
+        {'query': query, 'objective': query, 'numResults': SEARCH_RESULT_COUNT})
+    content = (result or {}).get('content') or []
+    text = next((c.get('text') or '' for c in content
+                 if isinstance(c, dict) and c.get('type') == 'text'), '')
+    return _parse_exa_results(text)
+
+
 async def web_search(args, ctx=None):
-    """`web-search "search terms"` — search the web and return the top results
-    as numbered title/URL/snippet lines."""
+    """`web-search "search terms"` — search the web (keyless one-shot MCP:
+    Parallel, then Exa, then DuckDuckGo instant-answers) and return the top
+    results as numbered title/URL/snippet lines."""
     query = ' '.join(args).strip()
     if not query:
         return 'error: web-search needs a query, e.g. $ web-search "pandas read_csv parameters"'
     results = []
-    try:
-        _, _, body = await http_get(
-            'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote_plus(query))
-        results = parse_ddg_html(body.decode('utf-8', 'replace'))
-    except Exception:
-        results = []
-    if not results:
-        results = await ddg_instant(query)
+    for fetch in (_search_parallel, _search_exa, ddg_instant):
+        try:
+            results = await fetch(query)
+        except Exception:
+            results = []
+        if results:
+            break
     if not results:
         return f'error: no results for: {query}'
     lines = [f'Search results for: {query}']
