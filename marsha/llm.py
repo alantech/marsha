@@ -357,7 +357,8 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
             mapper = get_mapper(system, n_results=1,
                                 stats_stage='first_stage', label='impl-gen')
             return await tools.run_with_tools(mapper, user_request, ctx, debug=debug)
-        tasks = [asyncio.create_task(one_candidate()) for _ in range(n_results)]
+        tasks = [asyncio.create_task(one_candidate())
+                 for _ in range(n_results)]
         try:
             reses = list(await asyncio.gather(*tasks))
         except Exception:

@@ -184,9 +184,11 @@ def assert_public_url(url):
     # Raise unless `url` is an http(s) URL to a public host (SSRF guard).
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ('http', 'https'):
-        raise Exception(f'blocked: only http(s) URLs are allowed (got {parsed.scheme or "?"})')
+        raise Exception(
+            f'blocked: only http(s) URLs are allowed (got {parsed.scheme or "?"})')
     if is_blocked_host(parsed.hostname):
-        raise Exception(f'blocked: {parsed.hostname} is not a public host (SSRF guard)')
+        raise Exception(
+            f'blocked: {parsed.hostname} is not a public host (SSRF guard)')
 
 
 # --- web fetching / parsing (shared by the web tools and the registry tools) ----
@@ -273,7 +275,8 @@ def html_to_text(doc):
     """Reduce an HTML document to readable plain text: scripts, styles, and
     other non-content blocks are dropped, block boundaries become newlines,
     and entities are decoded."""
-    t = re.sub(r'(?is)<(script|style|noscript|svg|head|iframe|template)\b.*?</\1>', ' ', doc)
+    t = re.sub(
+        r'(?is)<(script|style|noscript|svg|head|iframe|template)\b.*?</\1>', ' ', doc)
     t = re.sub(r'(?s)<!--.*?-->', ' ', t)
     t = re.sub(r'(?i)</(p|div|li|ul|ol|tr|td|th|h[1-6]|pre|blockquote|section|article|'
                r'header|footer|table|figure|figcaption|dl|dt|dd)>', '\n', t)
@@ -322,7 +325,8 @@ def parse_ddg_html(doc):
         if href is None:
             continue
         url = _decode_ddg_href(href.group(1))
-        title = re.sub(r'\s+', ' ', html.unescape(_strip_tags(m.group(1)))).strip()
+        title = re.sub(
+            r'\s+', ' ', html.unescape(_strip_tags(m.group(1)))).strip()
         if not url or not title or not url.startswith('http'):
             continue
         snippet = snippets[i] if i < len(snippets) else ''
@@ -383,7 +387,8 @@ async def _search_parallel(query):
         if not url:
             continue
         title = (r.get('title') or '').strip() or url
-        snippet = re.sub(r'\s+', ' ', ' '.join(r.get('excerpts') or [])).strip()
+        snippet = re.sub(
+            r'\s+', ' ', ' '.join(r.get('excerpts') or [])).strip()
         out.append((title, url, snippet))
     return out
 
@@ -600,7 +605,8 @@ async def calc(args, ctx=None):
     if importlib.util.find_spec('quickjs') is None:
         return 'error: calc is unavailable: the quickjs package is not installed'
     workdir = ctx.workdir if ctx is not None else None
-    payload = json.dumps({'script': script, 'files': _read_workdir_files(workdir)}).encode()
+    payload = json.dumps(
+        {'script': script, 'files': _read_workdir_files(workdir)}).encode()
     try:
         stdout, stderr = await _spawn_calc(payload, _scrubbed_env(), CALC_TIMEOUT)
     except Exception as e:
@@ -761,7 +767,8 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
     returned so the stage's validation fails and its normal retry takes over.
     """
     if getattr(mapper, 'n_results', 1) != 1:
-        raise Exception('run_with_tools requires a single-result mapper (n_results=1)')
+        raise Exception(
+            'run_with_tools requires a single-result mapper (n_results=1)')
     ctx = ctx or ToolContext()
     commands = build_commands(ctx)
     messages = [{'role': 'user', 'content': request}]
