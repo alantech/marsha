@@ -434,13 +434,26 @@ def test_calc_requires_a_script():
 
 @pytest.mark.skipif(not HAS_QUICKJS, reason='quickjs not installed')
 def test_calc_real_quickjs():
-    out = asyncio.run(tools.calc(['print(6*7)']))
-    assert out == '42'
-    # The sandbox is additive: no process / fetch / require by construction.
-    out2 = asyncio.run(tools.calc(['print(typeof process, typeof fetch, typeof require)']))
-    assert 'undefined undefined undefined' in out2
-    # console.log is aliased to print (QuickJS has no console global by default).
+    # REPL semantics: the script's final-expression value is stringified and returned.
+    assert asyncio.run(tools.calc(['6*7'])) == '42'
+    assert asyncio.run(tools.calc(['Math.sqrt(2)'])) == '1.4142135623730951'
+    assert asyncio.run(tools.calc(["'a'+'b'+42"])) == 'ab42'
+    assert asyncio.run(tools.calc(['true && false'])) == 'false'
+    assert asyncio.run(tools.calc(['[1,2,3].map(x => x*x)'])) == '[1,4,9]'
+    assert asyncio.run(tools.calc(['({x:1, y:2})'])) == '{"x":1,"y":2}'
+    # Multi-statement scripts return the final expression's value.
+    assert asyncio.run(tools.calc(['var a = 6; var b = 7; a*b'])) == '42'
+    # print / console.log remain as an extra side channel (QuickJS has no console by default).
+    assert asyncio.run(tools.calc(['print(6*7)'])) == '42'
     assert asyncio.run(tools.calc(['console.log(6*7)'])) == '42'
+    # Print lines and the completion value combine, in order.
+    assert asyncio.run(tools.calc(['print(1); 2+2'])) == '1\n4'
+    assert asyncio.run(tools.calc(['print({x:1}); 42'])) == '{"x":1}\n42'
+    # A value-less script (no value, no print) reports no output.
+    assert asyncio.run(tools.calc(['var x = 5'])).startswith('(no output')
+    # The sandbox is additive: no process / fetch / require by construction.
+    assert 'undefined' in asyncio.run(
+        tools.calc(['typeof process + " " + typeof fetch + " " + typeof require']))
 
 
 # --- installed-env tools (mocked venv-python) --------------------------------------

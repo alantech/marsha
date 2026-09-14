@@ -462,8 +462,19 @@ payload = json.loads(sys.stdin.read() or "{}")
 script = payload.get("script", "")
 files = payload.get("files", {})
 c = quickjs.Context()
+def _stringify(v):
+    # REPL-style value -> string: JS literals for primitives, JSON for objects.
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float, str)):
+        return str(v)
+    try:
+        return str(v.json())
+    except Exception:
+        return str(v)
+printed = []
 def _print(*a):
-    print(" ".join(str(x) for x in a))
+    printed.append(" ".join(_stringify(x) for x in a))
 c.add_callable("print", _print)
 # QuickJS has no `console` global (it is a host feature of Node/browsers, not
 # part of the language); alias the common JS idiom to `print` so it works too.
@@ -478,9 +489,18 @@ try:
 except Exception:
     pass
 try:
-    c.eval(script)
+    result = c.eval(script)
 except Exception as e:
+    for line in printed:
+        print(line)
     print("error: script failed: " + str(e))
+    sys.exit(0)
+# REPL semantics: emit any captured print lines, then the script's completion
+# value (its final expression) stringified, unless it is undefined/null.
+for line in printed:
+    print(line)
+if result is not None:
+    print(_stringify(result))
 '''
 
 
@@ -529,14 +549,16 @@ async def _spawn_calc(payload: bytes, env, timeout):
 
 
 async def calc(args, ctx=None):
-    """`calc "js-script"` — evaluate a small JavaScript script in an isolated
+    """`calc "js-expression-or-script"` — evaluate JavaScript in an isolated
     QuickJS sandbox (pure ES: Math/JSON/Date/String/Array, plus a `files`
     object of the current dir's file contents; no network, no filesystem, no
-    secrets) and return its print()/console.log() output. Runs in a subprocess
-    with a hard timeout so a runaway script is killed."""
+    secrets), REPL-style: the value of the script's final expression is
+    stringified and returned (use print()/console.log() for extra output
+    lines). Runs in a subprocess with a hard timeout so a runaway script is
+    killed."""
     script = ' '.join(args).strip()
     if not script:
-        return 'error: calc needs a JavaScript script, e.g. $ calc "print(6*7)"'
+        return 'error: calc needs a JavaScript expression or script, e.g. $ calc "6*7"'
     if importlib.util.find_spec('quickjs') is None:
         return 'error: calc is unavailable: the quickjs package is not installed'
     workdir = ctx.workdir if ctx is not None else None
@@ -551,7 +573,7 @@ async def calc(args, ctx=None):
         return truncate(out)
     if err:
         return 'error: calc produced no output; stderr:\n' + truncate(err)
-    return '(no output — the script printed nothing)'
+    return '(no output — the script produced no value and printed nothing)'
 
 
 # --- installed-environment tools (candidate venv) ---------------------------------
@@ -677,7 +699,7 @@ _COMMAND_SPECS = {
                    'search the web; returns the top results as numbered title, URL, and snippet lines'),
     'view-web-page': ('$ view-web-page "https://url"',
                       'fetch a web page and return its text content (truncated)'),
-    'calc': ('$ calc "js-script"', 'evaluate a small JavaScript script in a sandbox (Math/JSON/Date/String/Array plus a `files` object of the current dir); use print() or console.log() and the output is returned'),
+    'calc': ('$ calc "js expression or script"', 'evaluate JavaScript in a sandbox (Math/JSON/Date/String/Array plus a `files` object of the current dir), REPL-style: the value of the final expression is returned (use print()/console.log() for extra lines)'),
     'list-dependencies': ('$ list-dependencies',
                           'list the packages installed in the candidate environment (name==version)'),
     'show-dependency': ('$ show-dependency <package>',
