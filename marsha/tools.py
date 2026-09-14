@@ -465,6 +465,9 @@ c = quickjs.Context()
 def _print(*a):
     print(" ".join(str(x) for x in a))
 c.add_callable("print", _print)
+# QuickJS has no `console` global (it is a host feature of Node/browsers, not
+# part of the language); alias the common JS idiom to `print` so it works too.
+c.eval("var console = { log: print, info: print, warn: print, error: print };")
 if files:
     c.set("files_json", json.dumps(files))
     c.eval("var files = JSON.parse(files_json);")
@@ -529,8 +532,8 @@ async def calc(args, ctx=None):
     """`calc "js-script"` — evaluate a small JavaScript script in an isolated
     QuickJS sandbox (pure ES: Math/JSON/Date/String/Array, plus a `files`
     object of the current dir's file contents; no network, no filesystem, no
-    secrets) and return its print() output. Runs in a subprocess with a hard
-    timeout so a runaway script is killed."""
+    secrets) and return its print()/console.log() output. Runs in a subprocess
+    with a hard timeout so a runaway script is killed."""
     script = ' '.join(args).strip()
     if not script:
         return 'error: calc needs a JavaScript script, e.g. $ calc "print(6*7)"'
@@ -674,9 +677,7 @@ _COMMAND_SPECS = {
                    'search the web; returns the top results as numbered title, URL, and snippet lines'),
     'view-web-page': ('$ view-web-page "https://url"',
                       'fetch a web page and return its text content (truncated)'),
-    'calc': ('$ calc "js-script"',
-             'evaluate a small JavaScript script in a sandbox (Math/JSON/Date/String/Array plus a '
-             '`files` object of the current dir) and return its print() output'),
+    'calc': ('$ calc "js-script"', 'evaluate a small JavaScript script in a sandbox (Math/JSON/Date/String/Array plus a `files` object of the current dir); use print() or console.log() and the output is returned'),
     'list-dependencies': ('$ list-dependencies',
                           'list the packages installed in the candidate environment (name==version)'),
     'show-dependency': ('$ show-dependency <package>',

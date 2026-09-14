@@ -439,6 +439,8 @@ def test_calc_real_quickjs():
     # The sandbox is additive: no process / fetch / require by construction.
     out2 = asyncio.run(tools.calc(['print(typeof process, typeof fetch, typeof require)']))
     assert 'undefined undefined undefined' in out2
+    # console.log is aliased to print (QuickJS has no console global by default).
+    assert asyncio.run(tools.calc(['console.log(6*7)'])) == '42'
 
 
 # --- installed-env tools (mocked venv-python) --------------------------------------
