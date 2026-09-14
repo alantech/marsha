@@ -19,7 +19,7 @@ dependencies = [
     "pydocstyle",
     "pyflakes",
     "pytest",
-    "quickjs",
+    "quickjs-ng",
     "rich",
     "setuptools<81",
 ]
