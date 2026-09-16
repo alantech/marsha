@@ -404,8 +404,9 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
     assert rc == 0
     assert 'Review findings' in out
     assert 'a.txt:2' in out
-    # Every one of the 12 panel reviewers reports the canned finding.
-    assert out.count('a.txt:2') >= 2
+    # All 12 panel reviewers report the same a.txt:2 finding; the same-location dedup
+    # collapses them into a single finding.
+    assert out.count('a.txt:2') == 1
 
 
 def test_run_review_no_changes(repo, capsys):

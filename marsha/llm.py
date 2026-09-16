@@ -203,31 +203,31 @@ def _trim_findings_to_budget(findings, fits_check):
     return current
 
 
-async def consolidate_findings(context_block, findings, model, debug=False, retries=2):
+async def consolidate_findings(context_block, findings, model, debug=False, retries=3):
     # A dedicated LLM pass that shrinks a findings list: drop resolved/redundant findings and
-    # merge cross-reviewer duplicates (keeping the more detailed [Name-Label]). Survivors keep
-    # their original labels so cross-references stay valid. Returns the original list unchanged
-    # unless the LLM produced a strictly smaller, well-formed list. `context_block` is the
-    # surrounding context (a Marsha meta for the optimize loops; a short note for `marsha review`).
+    # merge cross-reviewer duplicates (keeping the most detailed [Name-Label]). Survivors keep
+    # their original labels so cross-references stay valid. Tries up to `retries` times and keeps
+    # the smallest well-formed result that is strictly smaller than the input; otherwise returns
+    # the input unchanged (a weak model may not reduce the list, so we never return a larger one).
+    # `context_block` is the surrounding context (a Marsha meta for the optimize loops; a short
+    # note for `marsha review`).
     gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
                      stats_stage='third_stage', model=model, label='compact')
     user = f'''{context_block}
 # Review findings to reduce
 
 {format_findings(findings)}'''
+    best = findings
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
             compacted = parse_compacted_findings(text)
-            if 0 < len(compacted) < len(findings):
-                return compacted
-            return findings
+            if 0 < len(compacted) < len(best):
+                best = compacted
         except Exception:
             if debug:
                 print(f'[Compact] attempt {attempt + 1} failed')
-            if attempt == retries - 1:
-                return findings
-    return findings
+    return best
 
 
 async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):

@@ -125,6 +125,24 @@ def test_dedup_findings():
     assert len(out) == 3
 
 
+def test_dedup_by_location_merges_same_line():
+    # Several reviewers flag the same file:line with different wording -> one finding,
+    # keeping the highest severity (then the most detailed description).
+    f1 = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR',
+          'location': 'src/foo.py:10', 'desc': 'short'}
+    f2 = {'name': 'Eli', 'label': 'A1', 'severity': 'MAJOR',
+          'location': 'src/foo.py:10', 'desc': 'a much more detailed explanation'}
+    f3 = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT',
+          'location': 'src/foo.py:10', 'desc': 'tiny'}
+    f4 = {'name': 'Kit', 'label': 'A1', 'severity': 'MINOR',
+          'location': 'src/bar.py:5', 'desc': 'different file'}
+    out = p.dedup_by_location([f1, f2, f3, f4])
+    assert len(out) == 2  # one for foo.py:10, one for bar.py:5
+    kept = {(f['location'], f['desc']) for f in out}
+    assert ('src/foo.py:10', 'a much more detailed explanation') in kept
+    assert ('src/bar.py:5', 'different file') in kept
+
+
 def test_actionable_findings_filters_severity():
     fs = [_f('A', 'A1', 'MAJOR', 'm'), _f(
         'B', 'B1', 'MINOR', 'n'), _f('C', 'C1', 'NIT', 'x')]

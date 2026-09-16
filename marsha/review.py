@@ -21,9 +21,9 @@ from marsha.config import resolve_model
 from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
-from marsha.personas import (actionable_findings, build_registry, format_findings, load_editor,
-                             parse_severities, prior_round_block, resolve_loop_reviewers,
-                             run_personas)
+from marsha.personas import (actionable_findings, build_registry, dedup_by_location,
+                             format_findings, load_editor, parse_severities,
+                             prior_round_block, resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
@@ -209,7 +209,12 @@ def build_review_message(stat_text, base_name, base_ref, context_blocks):
          'code, and their history (`git log`, `git blame`). As you find a concrete candidate '
          'finding, record it with `notes add "<file:line> - <what and why>"` so it survives '
          'compaction. Your final findings must be grounded in code you actually read, not '
-         'assumed from the summary.'),
+         'assumed from the summary.'
+         ' Before you report ANY finding, verify it against the real code: at minimum, `git grep` '
+         'for the logic you think is missing, wrong, or duplicated to confirm it is not already '
+         'handled elsewhere in the codebase, and `git show` the exact lines you are citing. Do not '
+         'report a finding you have not confirmed this way — a claim you cannot verify with the '
+         'tools is not a finding.'),
     ]
     if context_blocks:
         parts.append(
@@ -412,11 +417,15 @@ async def run_review(args):
         prior_findings, prior_preamble = actionable, preamble
 
     if actionable:
+        # Collapse same-location findings first (model-independent), run the semantic pass on the
+        # smaller list, then collapse again in case the pass left same-location duplicates behind.
+        actionable = dedup_by_location(actionable)
         consolidated = await consolidate_findings(
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.', actionable, model,
             debug=args.debug)
         actionable = actionable_findings(consolidated, severities)
+        actionable = dedup_by_location(actionable)
     print(render_findings(actionable, base_name))
 
     if args.post_review:

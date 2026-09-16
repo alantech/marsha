@@ -239,6 +239,35 @@ def actionable_findings(findings, severities):
     return dedup_findings([f for f in findings if f['severity'] in severities])
 
 
+def _location_key(location):
+    # (path, line) for near-dedup: the integer after the final ':' if present, else None.
+    # Two findings at the same path:line are almost always the same concern, so they can be
+    # merged deterministically without a model.
+    location = (location or '').strip()
+    if not location:
+        return ('', None)
+    m = re.match(r'^(.*?):(\d+)\s*$', location)
+    if m:
+        return (m.group(1).strip(), int(m.group(2)))
+    return (location, None)
+
+
+def dedup_by_location(findings):
+    # Merge findings that point at the same file:line — a common failure mode where several
+    # reviewers flag the same spot with slightly different wording. For each location keep the
+    # highest-severity finding, breaking ties on the more detailed (longer) description.
+    order = {'NIT': 0, 'MINOR': 1, 'MAJOR': 2}
+    best = {}
+    for f in findings:
+        key = _location_key(f['location'])
+        rank = (order.get(f['severity'], 1), len(f['desc'].strip()))
+        cur = best.get(key)
+        if cur is None or rank > (order.get(cur['severity'], 1),
+                                  len(cur['desc'].strip())):
+            best[key] = f
+    return list(best.values())
+
+
 def format_findings(findings):
     lines = []
     for f in findings:
