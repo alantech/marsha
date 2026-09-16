@@ -13,7 +13,7 @@ The Marsha compiler can be used to compile the syntax using a `uv`-installed pac
 
 ```bash
 uv pip install git+https://github.com/alantech/marsha
-python -m marsha data_mangling.mrsh
+python -m marsha compile data_mangling.mrsh
 ```
 
 From a source checkout you can instead install a `marsha` command directly:
@@ -153,11 +153,24 @@ The key can be anything; local servers like llama.cpp do not validate it.
 
 Against any OpenAI-compatible endpoint, Marsha probes the backend's `/models` list at startup and, when the configured model isn't served, remaps each model role to the closest match it does serve (logging the choice). The standard role lands on the cheapest, smallest model whose context is at least as large as the model it replaces (400k for the default `gpt-5-mini`); the strong role lands on the largest-context (most capable) one — so on a multi-model backend the two roles may resolve to different models. If no served model reaches the standard role's bar, the largest available is used. An explicitly chosen model (`--model` or the `model`/`model_strong` config keys) pins the role and is never remapped. If the endpoint can't be reached, the configured model is used as-is.
 
-There are also a few flags on how to use Marsha:
+Marsha is organized around subcommands: `marsha compile` runs the compiler and `marsha help` explains them. (Bare `marsha <source.mrsh>` with no subcommand still works as a deprecated alias for `marsha compile`.)
 
 ```sh
 $ marsha --help
-usage: marsha [-h] [-t TARGET] [--target-version TARGET_VERSION] [-d]
+usage: marsha [-h] {compile,help} ...
+
+Marsha AI Compiler
+
+commands:
+  compile   Compile a .mrsh definition into generated code and a test suite.
+  help      Show this overview, or detailed help for a subcommand.
+```
+
+The `compile` subcommand takes these options (see `marsha compile --help`):
+
+```sh
+$ marsha compile --help
+usage: marsha compile [-h] [-t TARGET] [--target-version TARGET_VERSION] [-d]
               [--trace] [--trace-full] [-q] [-a ATTEMPTS]
               [-n N_PARALLEL_EXECUTIONS] [--exclude-main-helper]
               [--exclude-sanity-check] [--no-tools] [--no-warn]
@@ -257,8 +270,8 @@ options:
 ```
 
 * `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
-* `--trace` (implies `-d`) writes a live, timestamped progress trace to `stderr`: each phase transition and every LLM request with its label and duration. It is flushed immediately, so it stays visible in real time even when `stdout` is piped to a file and block-buffered — useful for watching a slow run, e.g. against a local `llama.cpp` server. Watch it with `marsha --trace your.mrsh 2>trace.log &` then `tail -f trace.log`.
- * `--trace-full` (implies `--trace`) is the same live trace, but it also dumps the full input prompt and output of every LLM call to `stderr` — bracketed by `=== <label>: request ===` / `=== <label>: response ===` markers. Use it to debug the exact prompts and responses, e.g. `marsha --trace-full your.mrsh 2>trace.log &`.
+* `--trace` (implies `-d`) writes a live, timestamped progress trace to `stderr`: each phase transition and every LLM request with its label and duration. It is flushed immediately, so it stays visible in real time even when `stdout` is piped to a file and block-buffered — useful for watching a slow run, e.g. against a local `llama.cpp` server. Watch it with `marsha compile --trace your.mrsh 2>trace.log &` then `tail -f trace.log`.
+ * `--trace-full` (implies `--trace`) is the same live trace, but it also dumps the full input prompt and output of every LLM call to `stderr` — bracketed by `=== <label>: request ===` / `=== <label>: response ===` markers. Use it to debug the exact prompts and responses, e.g. `marsha compile --trace-full your.mrsh 2>trace.log &`.
  * `-q` runs only the initial code generation phase without any of the corrective feedback stages. This is significantly cheaper, but more likely to generate code that doesn't quite work. This could be useful if you're using Marsha like Github Copilot or directly asking for code from ChatGPT, but with the Marsha syntax providing some more structure to produce a better result than you might if simply given a blank screen to write into.
 * `-a` The number of times marsha should attempt to compile your program, defaulting to just once. If set to more than 1, on a failure it will try again. For some trickier programs this might improve the ability to get working code at the cost of more LLM calls.
 * `-n` The number of parallel LLM threads of "thought" to pursue per attempt. This defaults to 3. When a path succeeds, all of the other paths are cancelled.

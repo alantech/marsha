@@ -40,7 +40,7 @@ jobs:
         run: |
           uv venv venv
           uv pip install --python ./venv/Scripts/python --upgrade .
-          echo "./venv/Scripts/python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}"
-          ./venv/Scripts/python -m marsha -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}
+          echo "./venv/Scripts/python -m marsha compile -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}"
+          ./venv/Scripts/python -m marsha compile -d -n ${{github.event.inputs.parallel_runs}} -a ${{github.event.inputs.attempts}} ${{github.event.inputs.test}}
         env:
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}

@@ -1,6 +1,6 @@
-import asyncio
+import sys
 
-from marsha.base import main
+from marsha.base import run
 
 # Entry point
-asyncio.run(main())
+sys.exit(run())
