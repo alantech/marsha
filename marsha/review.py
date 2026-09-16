@@ -120,8 +120,9 @@ async def gh_pr_checkout(num, cwd=None):
 
 
 async def gh_pr_context(num, cwd=None):
-    # Pull the PR title, body, and every comment so far to seed the review.
-    fields = 'title,body,comments,reviews'
+    # Pull the PR title, body, issue comments, and every inline review comment (with its
+    # replies) so far, to seed the review with the prior round of review.
+    fields = 'title,body,comments'
     rc, out, err = await _gh('pr', 'view', str(num), '--json', fields, cwd=cwd)
     if rc != 0:
         raise Exception(f'`gh pr view {num}` failed: {err or out}')
@@ -137,17 +138,32 @@ async def gh_pr_context(num, cwd=None):
             author = (c.get('author') or {}).get('login', 'someone')
             lines.append(f"{author}: {c.get('body', '')}".rstrip())
         parts.append('\n'.join(lines))
-    review_comments = []
-    for r in (data.get('reviews') or []):
-        review_comments.extend(r.get('comments') or [])
-    if review_comments:
-        lines = ['\n# Review comments so far']
-        for c in review_comments:
-            author = (c.get('author') or {}).get('login', 'someone')
-            path, line = c.get('path'), c.get('line')
-            where = f'{path}:{line} ' if path and line else ''
-            lines.append(f"{where}{author}: {c.get('body', '')}".rstrip())
-        parts.append('\n'.join(lines))
+    # Inline review comments (and their replies) live in the REST `pulls/comments` collection,
+    # which `gh pr view --json reviews` does not populate. Fetch them directly so the reviewer
+    # can see the prior round of review and avoid re-raising findings already answered.
+    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
+    repo = ''
+    if rc == 0 and out.strip():
+        repo = json.loads(out).get('nameWithOwner', '')
+    if repo:
+        rc, out, err = await _gh(
+            'api', '--paginate', f'repos/{repo}/pulls/{num}/comments',
+            cwd=cwd, timeout=120)
+        if rc == 0 and out.strip():
+            try:
+                review_comments = json.loads(out)
+            except ValueError:
+                review_comments = []
+            if review_comments:
+                lines = ['\n# Review comments so far (findings and replies)']
+                for c in review_comments:
+                    author = (c.get('user') or {}).get('login', 'someone')
+                    path, line = c.get('path'), c.get('line')
+                    where = f'{path}:{line} ' if path and line else ''
+                    prefix = '(reply) ' if c.get('in_reply_to_id') else ''
+                    lines.append(
+                        f"{prefix}{where}{author}: {c.get('body', '')}".rstrip())
+                parts.append('\n'.join(lines))
     return '\n\n'.join(parts)
 
 
