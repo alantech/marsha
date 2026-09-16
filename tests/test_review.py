@@ -177,6 +177,31 @@ def test_run_review_linear_requires_linear(repo, monkeypatch):
         asyncio.run(review.run_review(_args(linear='ACME-1')))
 
 
+def test_gh_pr_context_flattens_reviews():
+    payload = json.dumps({
+        'title': 'My PR',
+        'body': 'the description',
+        'comments': [{'author': {'login': 'a'}, 'body': 'a comment'}],
+        'reviews': [
+            {'comments': [
+                {'author': {'login': 'b'},
+                 'path': 'x.py', 'line': 3, 'body': 'inline'},
+            ]},
+        ],
+    })
+
+    async def fake_gh(*a, **k):
+        assert a[0] == 'pr'
+        assert 'reviewComments' not in ' '.join(a)
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        out = asyncio.run(review.gh_pr_context(7))
+    assert 'My PR' in out and 'the description' in out
+    assert 'a comment' in out
+    assert 'x.py:3' in out and 'inline' in out
+
+
 def test_post_review_maps_inline_and_body():
     diff = ('diff --git a/foo.py b/foo.py\n'
             '--- a/foo.py\n'

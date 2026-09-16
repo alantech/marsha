@@ -98,7 +98,7 @@ async def gh_pr_checkout(num, cwd=None):
 
 async def gh_pr_context(num, cwd=None):
     # Pull the PR title, body, and every comment so far to seed the review.
-    fields = 'title,body,comments,reviewComments'
+    fields = 'title,body,comments,reviews'
     rc, out, err = await _gh('pr', 'view', str(num), '--json', fields, cwd=cwd)
     if rc != 0:
         raise Exception(f'`gh pr view {num}` failed: {err or out}')
@@ -114,7 +114,9 @@ async def gh_pr_context(num, cwd=None):
             author = (c.get('author') or {}).get('login', 'someone')
             lines.append(f"{author}: {c.get('body', '')}".rstrip())
         parts.append('\n'.join(lines))
-    review_comments = data.get('reviewComments') or []
+    review_comments = []
+    for r in (data.get('reviews') or []):
+        review_comments.extend(r.get('comments') or [])
     if review_comments:
         lines = ['\n# Review comments so far']
         for c in review_comments:
