@@ -21,9 +21,10 @@ from marsha.personas import (actionable_findings, build_registry, parse_severiti
                              resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
-# External context (a PR body + comments, or a Linear ticket) can be large; bound it so it
-# cannot blow the reviewer's context budget. The diff itself is left unbounded.
+# External context (a PR body + comments, or a Linear ticket) and the diff itself can be
+# large; bound both so a huge change cannot blow the reviewer's context budget or OOM a run.
 REVIEW_CONTEXT_LIMIT = 48_000
+REVIEW_DIFF_LIMIT = 120_000
 
 
 def gh_available():
@@ -35,8 +36,9 @@ def linear_available():
 
 
 async def _run(cmd, *args, cwd=None, timeout=60, input=None):
+    stdin = subprocess.PIPE if input is not None else subprocess.DEVNULL
     proc = await asyncio.create_subprocess_exec(
-        cmd, *args, cwd=cwd, stdin=subprocess.PIPE,
+        cmd, *args, cwd=cwd, stdin=stdin,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = await run_subprocess(proc, timeout, input=input)
     return (proc.returncode, out, err)
@@ -275,6 +277,7 @@ async def run_review(args):
     if not diff_text.strip():
         print(f'No changes to review against {base_name}.')
         return 0
+    diff_text = tools.truncate(diff_text, limit=REVIEW_DIFF_LIMIT)
 
     context_blocks = []
     if args.linear is not None:
