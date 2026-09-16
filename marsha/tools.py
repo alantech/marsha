@@ -66,10 +66,10 @@ SEARCH_RESULT_COUNT = 10
 SNIPPET_CHAR_LIMIT = 300
 PAGE_CHAR_LIMIT = 12_000
 # The git tool returns whole files/diffs the reviewer cites, so it needs a much larger cap than
-# RESULT_CHAR_LIMIT: cut off at 12KB, a long source file would be truncated and the reviewer
-# would report on a partial view ("this function is truncated, I can't verify the rest"). Sized
-# to cover the largest source file with margin; the model's context window is large enough that a
-# handful of full files stays well within the compaction budget.
+# the generic RESULT_CHAR_LIMIT (12KB): at that smaller cap a long source file would be truncated
+# and the reviewer would report on a partial view ("this function is truncated, I can't verify the
+# rest"). 48KB covers the largest source file with margin; the model's context window is large
+# enough that a handful of full files stays well within the compaction budget.
 GIT_RESULT_CHAR_LIMIT = 48_000
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
@@ -661,7 +661,7 @@ async def run_in_python(python, argv, timeout=30):
 # refused with a message that the reviewer may not modify the git tree.
 GIT_READONLY_COMMANDS = {
     'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'ls-tree',
-    'cat-file', 'cat', 'rev-parse', 'status', 'describe', 'shortlog',
+    'cat-file', 'rev-parse', 'status', 'describe', 'shortlog',
     'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
     'remote',
 }

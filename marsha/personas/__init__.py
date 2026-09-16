@@ -144,7 +144,8 @@ def load_editor(loop):
 
 
 def parse_severities(value):
-    # Parse the --optimize-severity list into the set of uppercase tiers to act on.
+    # Parse a severity list (e.g. --severity / --optimize-severity) into the set of uppercase
+    # tiers to act on.
     allowed = {'major', 'minor', 'nit', 'nitpick'}
     out = set()
     for part in (value or '').split(','):
@@ -153,7 +154,7 @@ def parse_severities(value):
             continue
         if p not in allowed:
             raise Exception(
-                f'Invalid --optimize-severity tier: {p} (choose from major, minor, nit)')
+                f'Invalid severity tier: {p} (choose from major, minor, nit)')
         out.add('nit' if p == 'nitpick' else p)
     return {s.upper() for s in out}
 
