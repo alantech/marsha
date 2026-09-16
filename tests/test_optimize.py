@@ -31,7 +31,7 @@ def make_meta(filename='example'):
 
 def make_args(level=1, **kw):
     base = dict(optimize=level, test_personas=None, impl_personas=None,
-                fix_personas=None, optimize_severity='major,minor,nit')
+                fix_personas=None, optimize_severity='major,minor,nit', no_tools=True)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
