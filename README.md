@@ -288,6 +288,23 @@ options:
 * `--target` Selects the target language for the generated code, by backend id or alias (`python`, default). The compiler's language-specific steps — prompts, artifact layout, validation, linting, formatting, test execution, and the runnable-CLI helper — are delegated to a language backend; only `python` is wired today, and the registry is ready for more.
 * `--target-version` The version of the target language the generated code should target (eg `3.12` for Python, where it becomes the project's `requires-python`). Defaults to the interpreter running Marsha — the only one the generated code is verified against.
 
+## Reviewing an existing codebase
+
+`marsha review` runs Marsha's review personas against a **git** change instead of a freshly generated one. By default it diffs the current branch against the repository's default branch and reports findings (`MAJOR`/`MINOR`/`NIT`, `file:line`, and a one-line note with a suggested fix) from the built-in `impl` reviewers:
+
+```sh
+$ marsha review                  # current branch vs. the default branch
+$ marsha review --personas sage,sasha --severity major
+```
+
+Optional context (both are treated as **untrusted** reference data, never as instructions):
+
+* `--pr <num>` (needs the `gh` CLI) — checks the PR out (`gh pr checkout`), so the review runs against the PR's actual head, and seeds the review with the PR body and all comments so far. The working tree must be clean, or Marsha errors out and explains why.
+* `--linear <ticket>` (needs the `linear` CLI) — pulls the ticket's requirements and prepends them to the pull-request context.
+* `--post-review` (requires `--pr`) — posts the findings back to the PR as inline comments at the correct file and line, folding any finding whose line isn't in the diff into the review body.
+
+`--target` selects the target language for reviewer guidance; unlike `compile`, its toolchain does not need to be installed. The global flags (`--model`, `--provider`, `--api-base`, `-d`, `--trace`) work as they do for `compile`.
+
 ## Using compiled Marsha code
 
 By default, Marsha appends logic to the generated Python code to make usage simpler, allowing you to invoke it from the CLI and potentially start a REST server.
