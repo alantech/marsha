@@ -65,6 +65,12 @@ MAX_HTTP_BYTES = 1_000_000
 SEARCH_RESULT_COUNT = 10
 SNIPPET_CHAR_LIMIT = 300
 PAGE_CHAR_LIMIT = 12_000
+# The git tool returns whole files/diffs the reviewer cites, so it needs a much larger cap than
+# RESULT_CHAR_LIMIT: cut off at 12KB, a long source file would be truncated and the reviewer
+# would report on a partial view ("this function is truncated, I can't verify the rest"). Sized
+# to cover the largest source file with margin; the model's context window is large enough that a
+# handful of full files stays well within the compaction budget.
+GIT_RESULT_CHAR_LIMIT = 48_000
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
@@ -702,7 +708,7 @@ async def git(args, ctx=None):
         return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'
     if errtxt:
         result = (result + '\n[git stderr]\n' + errtxt).strip()
-    return truncate(result)
+    return truncate(result, limit=GIT_RESULT_CHAR_LIMIT)
 
 
 async def notes(args, ctx=None):

@@ -333,6 +333,9 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
     assert 'Previous review round' in panel_calls[1]
     assert 'conventions review' in panel_calls[1]
     assert '[Sage-A1]' in panel_calls[1]
+    # The revision round tells the reviewer to drop rebutted findings unless very confident.
+    assert 'Handling the conventions review' in panel_calls[1]
+    assert 'very confident' in panel_calls[1]
 
 
 def test_review_loop_stops_at_round_budget(repo):

@@ -33,6 +33,17 @@ REVIEW_DIFF_LIMIT = 120_000
 # A reviewer probing the codebase with the git tool needs more rounds than a single-shot
 # lookup; this bounds each reviewer's (and the conventions gate's) tool loop.
 REVIEW_MAX_TOOL_ROUNDS = 12
+# Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the conventions
+# review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;
+# without this, a reviewer re-raises rebutted findings (and, anchored on them, adds new noise).
+_REFUTE_CONFIDENCE_RULE = (
+    '\n# Handling the conventions review\n'
+    'You are re-reviewing after the conventions review pushed back on some of your findings. '
+    'For each of your findings from last round that it rebutted, DROP it. Re-raise it only if '
+    'you are very confident the rebuttal misreads the codebase, and only after re-verifying your '
+    'position with the git tool (git show / git grep). When in doubt, drop the finding. Keep the '
+    'findings it did not rebut, and add a new one only if you have verified it with the git tool. '
+    'Do not re-raise a rebutted finding on a hunch.')
 
 
 def gh_available():
@@ -419,6 +430,7 @@ async def run_review(args):
         if i > 0:
             user_message += prior_round_block(
                 prior_findings, prior_preamble, 'conventions review')
+            user_message += _REFUTE_CONFIDENCE_RULE
         findings = await run_personas(
             reviewers, user_message, model, 'review',
             debug=args.debug, loop='review', guidance=guidance,
