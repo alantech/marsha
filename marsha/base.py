@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import sys
 import tempfile
 import time
 import traceback
@@ -16,100 +17,173 @@ from marsha.meta import MarshaMeta
 from marsha.stats import stats
 from marsha.utils import read_file, copy_file, copy_tree, prettify_time_delta, write_composed
 
-# Parse the input arguments
+# Parse the input arguments. Subcommands hang off `marsha <command>`; the
+# deprecated bare form `marsha <source> [flags]` is rewritten to `compile`
+# in run() (see _normalize_argv).
 parser = argparse.ArgumentParser(
     prog='marsha',
     description='Marsha AI Compiler',
 )
-parser.add_argument('source')
-parser.add_argument('-t', '--target', default='python',
-                    help='Target language for the generated code, by backend id or alias (default: python). Only `python` is wired today; the registry is ready for more.')
-parser.add_argument('--target-version',
-                    help='Version of the target language the generated code should target, eg 3.12 for Python (where it becomes the project requires-python). Default: the interpreter running Marsha.')
-parser.add_argument('-d', '--debug', action='store_true',
-                    help='Turn on debug logging')
-parser.add_argument('--trace', action='store_true',
-                    help='Also write a live, timestamped progress trace to stderr (each phase and every LLM request, with its label and duration). Implies -d. Useful for watching a slow run in real time, e.g. against a local llama.cpp server.')
-parser.add_argument('--trace-full', action='store_true',
-                    help='As --trace, but also dump the full input prompt and output of every LLM call to stderr. Implies --trace (and -d). Use for debugging exact prompts and responses.')
-parser.add_argument('-q', '--quick-and-dirty', action='store_true',
-                    help='Code generation with no correction stages run')
-parser.add_argument('-a', '--attempts', type=int, default=1)
-parser.add_argument('-n', '--n-parallel-executions', type=int, default=3)
-parser.add_argument('--exclude-main-helper', action='store_true',
-                    help='Skips addition of helper code for running as a script')
-parser.add_argument('--exclude-sanity-check', action='store_true',
-                    help='Skips an initial sanity check that the definition is self-consistent')
-parser.add_argument('--no-tools', action='store_true',
-                    help='Disable the LLM tool interface (the fake terminal where the LLM can look up dependency APIs and the web with $ commands: search-dependencies, dependency-docs, web-search, view-web-page, calc, and — in the optimize/correction loops — installed-environment introspection). Enabled by default.')
-parser.add_argument('--no-warn', action='store_true',
-                    help='Do not display warnings about ambiguous areas of the definition from the sanity check')
-parser.add_argument('--optimize', type=int, default=0,
-                    help='Optimization level: number of per-phase LLM review iterations (test-suite coverage/fidelity, implementation quality, and test-correction validation). 0 (default) disables the optimization loops.')
-parser.add_argument('--test-personas',
-                    help='Comma-separated reviewer personas for the test-suite (oracle) loop. Each entry is a built-in name (e.g. ada) or a path to a custom persona file (e.g. ./sharona.md). Default: all built-in oracle reviewers.')
-parser.add_argument('--impl-personas',
-                    help='Comma-separated reviewer personas for the implementation loop. Each entry is a built-in name (e.g. sage) or a path to a custom persona file. Default: all built-in impl reviewers.')
-parser.add_argument('--fix-personas',
-                    help='Comma-separated reviewer personas for the test-correction (oracle-fix) loop. Each entry is a built-in name (e.g. sol) or a path to a custom persona file. Default: all built-in correction reviewers.')
-parser.add_argument('--optimize-severity', default='major,minor,nit',
-                    help='Comma-separated finding severities to act on during --optimize (major,minor,nit). Default: all three.')
-parser.add_argument('--context-window', type=int, default=None,
-                    help='Override the context window (in tokens) used to size review/editor prompts. Auto-detected from the service when possible, else documented defaults. Set it if your backend mis-reports its window.')
-parser.add_argument('--context-cap', type=float, default=0.5,
-                    help='Fraction of the context window a single prompt may occupy before its findings are compacted (default 0.5).')
-parser.add_argument('-s', '--stats', action='store_true',
-                    help='Save stats and write them to a file')
-parser.add_argument('--api-base',
-                    help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file (openai provider only)')
-parser.add_argument('--model',
-                    help='Model to use for code generation, overriding the model in the config file')
-parser.add_argument('--provider',
-                    choices=['openai', 'anthropic'],
-                    help='LLM provider to use: openai (default; any OpenAI-compatible API) or anthropic (Claude)')
+sub = parser.add_subparsers(
+    dest='command', title='commands', metavar='COMMAND')
+compile_parser = sub.add_parser(
+    'compile',
+    help='Compile a .mrsh definition into generated code and a test suite.')
+compile_parser.add_argument('source')
+compile_parser.add_argument('-t', '--target', default='python',
+                            help='Target language for the generated code, by backend id or alias (default: python). Only `python` is wired today; the registry is ready for more.')
+compile_parser.add_argument('--target-version',
+                            help='Version of the target language the generated code should target, eg 3.12 for Python (where it becomes the project requires-python). Default: the interpreter running Marsha.')
+compile_parser.add_argument('-d', '--debug', action='store_true',
+                            help='Turn on debug logging')
+compile_parser.add_argument('--trace', action='store_true',
+                            help='Also write a live, timestamped progress trace to stderr (each phase and every LLM request, with its label and duration). Implies -d. Useful for watching a slow run in real time, e.g. against a local llama.cpp server.')
+compile_parser.add_argument('--trace-full', action='store_true',
+                            help='As --trace, but also dump the full input prompt and output of every LLM call to stderr. Implies --trace (and -d). Use for debugging exact prompts and responses.')
+compile_parser.add_argument('-q', '--quick-and-dirty', action='store_true',
+                            help='Code generation with no correction stages run')
+compile_parser.add_argument('-a', '--attempts', type=int, default=1)
+compile_parser.add_argument(
+    '-n', '--n-parallel-executions', type=int, default=3)
+compile_parser.add_argument('--exclude-main-helper', action='store_true',
+                            help='Skips addition of helper code for running as a script')
+compile_parser.add_argument('--exclude-sanity-check', action='store_true',
+                            help='Skips an initial sanity check that the definition is self-consistent')
+compile_parser.add_argument('--no-tools', action='store_true',
+                            help='Disable the LLM tool interface (the fake terminal where the LLM can look up dependency APIs and the web with $ commands: search-dependencies, dependency-docs, web-search, view-web-page, calc, and — in the optimize/correction loops — installed-environment introspection). Enabled by default.')
+compile_parser.add_argument('--no-warn', action='store_true',
+                            help='Do not display warnings about ambiguous areas of the definition from the sanity check')
+compile_parser.add_argument('--optimize', type=int, default=0,
+                            help='Optimization level: number of per-phase LLM review iterations (test-suite coverage/fidelity, implementation quality, and test-correction validation). 0 (default) disables the optimization loops.')
+compile_parser.add_argument('--test-personas',
+                            help='Comma-separated reviewer personas for the test-suite (oracle) loop. Each entry is a built-in name (e.g. ada) or a path to a custom persona file (e.g. ./sharona.md). Default: all built-in oracle reviewers.')
+compile_parser.add_argument('--impl-personas',
+                            help='Comma-separated reviewer personas for the implementation loop. Each entry is a built-in name (e.g. sage) or a path to a custom persona file. Default: all built-in impl reviewers.')
+compile_parser.add_argument('--fix-personas',
+                            help='Comma-separated reviewer personas for the test-correction (oracle-fix) loop. Each entry is a built-in name (e.g. sol) or a path to a custom persona file. Default: all built-in correction reviewers.')
+compile_parser.add_argument('--optimize-severity', default='major,minor,nit',
+                            help='Comma-separated finding severities to act on during --optimize (major,minor,nit). Default: all three.')
+compile_parser.add_argument('--context-window', type=int, default=None,
+                            help='Override the context window (in tokens) used to size review/editor prompts. Auto-detected from the service when possible, else documented defaults. Set it if your backend mis-reports its window.')
+compile_parser.add_argument('--context-cap', type=float, default=0.5,
+                            help='Fraction of the context window a single prompt may occupy before its findings are compacted (default 0.5).')
+compile_parser.add_argument('-s', '--stats', action='store_true',
+                            help='Save stats and write them to a file')
+compile_parser.add_argument('--api-base',
+                            help='Base URL of an OpenAI-compatible API to use for LLM requests, e.g. a local llama.cpp server. Overrides the OPENAI_BASE_URL environment variable and the config file (openai provider only)')
+compile_parser.add_argument('--model',
+                            help='Model to use for code generation, overriding the model in the config file')
+compile_parser.add_argument('--provider',
+                            choices=['openai', 'anthropic'],
+                            help='LLM provider to use: openai (default; any OpenAI-compatible API) or anthropic (Claude)')
 
-args = parser.parse_args()
-
-# --trace routes a live, flushed progress trace to stderr so a run can be watched in real time,
-# even when stdout is piped to a file and block-buffered. --trace-full adds full request/response
-# transcripts on top of the summary.
-if args.trace_full:
-    log.set_level(log.TRACE_FULL)
-elif args.trace:
-    log.set_level(log.TRACE_SUMMARY)
-else:
-    log.set_level(log.TRACE_OFF)
-
-# Set up the shared LLM client
-set_cli_model(args.model)
-set_cli_provider(args.provider)
-set_cli_api_base(args.api_base)
-client = create_client(args.api_base)
-set_client(client)
-# On a local/OpenAI-compatible server the requested model name is ignored and whatever is loaded
-# is served. Detect what is actually served and remap the standard/strong models to the closest
-# match for each role (smallest-fitting vs. most capable, by context size with price as a
-# tiebreaker) so marsha logs and sends the models that will really be used. Explicitly pinned
-# models are left alone. Real OpenAI (default endpoint) is untouched.
-if is_local_backend():
-    for note in apply_available_models(discover_models(resolve_api_base())):
-        print(f'Note: {note}')
-# Bind the target-language backend (--target) and verify its toolchain is available.
-target = backends.select(args.target)
-if not target.toolchain_ok():
-    raise Exception(f'{args.target} toolchain not found')
-# Resolve the target version (--target-version) against the bound backend's rules.
-if args.target_version is not None:
-    target.target_version = target.resolve_target_version(args.target_version)
-if args.debug or args.trace or args.trace_full:
-    print(f'Using target language: {target.id}')
-    print(f'Using target version: {target.target_version}')
-    print(f'Using LLM provider: {resolve_provider()}')
-    print(f'Using LLM endpoint: {client.base_url}')
-    print(f'Using LLM model: {resolve_model()}')
+help_parser = sub.add_parser(
+    'help',
+    help='Show this overview, or detailed help for a subcommand.')
+help_parser.add_argument('topic', nargs='?', default=None,
+                         help='Subcommand to describe (e.g. compile). '
+                              'Omit for the overview.')
 
 
-async def main():
+def _normalize_argv(argv):
+    # The deprecated bare form `marsha <source> [flags]` maps onto
+    # `marsha compile <source> [flags]`. `compile`/`help` are real
+    # subcommands; a top-level -h/--help shows the subcommand overview.
+    if not argv or argv[0] in ('compile', 'help', '-h', '--help'):
+        return argv, False
+    return ['compile'] + argv, True
+
+
+def print_help(topic):
+    overview = (
+        'Marsha AI Compiler\n'
+        '\n'
+        'Usage: marsha COMMAND [ARGS]\n'
+        '\n'
+        'Commands:\n'
+        '  compile   Compile a .mrsh definition into generated code and a\n'
+        '            test suite. Example: marsha compile your.mrsh\n'
+        '            Key flags: -t/--target, -a/--attempts, --optimize,\n'
+        '            --model, --provider, --api-base, -d/--debug, --trace.\n'
+        '\n'
+        '  help      Show this overview, or detailed help for a subcommand.\n'
+        '            Example: marsha help compile\n'
+        '\n'
+        'Run `marsha help <command>` or `marsha <command> --help` for the full\n'
+        'options. Note: `marsha <source.mrsh>` (no subcommand) is a deprecated\n'
+        'alias for `marsha compile <source.mrsh>`.\n'
+    )
+    if topic is None:
+        print(overview)
+    elif topic in ('compile', 'help'):
+        submap = {'compile': compile_parser, 'help': help_parser}
+        print(submap[topic].format_help())
+    else:
+        print(f'Unknown command: {topic}', file=sys.stderr)
+        print(overview)
+
+
+def run(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    argv, is_legacy = _normalize_argv(argv)
+    if is_legacy:
+        print('Warning: bare `marsha <source>` is deprecated; use '
+              '`marsha compile <source>` instead. See `marsha help`.',
+              file=sys.stderr)
+    args = parser.parse_args(argv)
+    if args.command == 'help':
+        print_help(args.topic)
+        return 0
+    if args.command != 'compile':
+        parser.print_help(sys.stderr)
+        return 2
+    _setup_runtime(args)
+    asyncio.run(main(args))
+    return 0
+
+
+def _setup_runtime(args):
+    # --trace routes a live, flushed progress trace to stderr so a run can
+    # be watched in real time, even when stdout is piped to a file. --trace-full
+    # adds full request/response transcripts on top of the summary.
+    if args.trace_full:
+        log.set_level(log.TRACE_FULL)
+    elif args.trace:
+        log.set_level(log.TRACE_SUMMARY)
+    else:
+        log.set_level(log.TRACE_OFF)
+    # Set up the shared LLM client
+    set_cli_model(args.model)
+    set_cli_provider(args.provider)
+    set_cli_api_base(args.api_base)
+    client = create_client(args.api_base)
+    set_client(client)
+    # On a local/OpenAI-compatible server the requested model name is ignored
+    # and whatever is loaded is served. Remap the standard/strong models to the
+    # closest match served for each role (smallest-fitting vs. most capable, by
+    # context size with price as a tiebreaker) so marsha logs and sends the
+    # models that will really be used. Explicitly pinned models are left alone.
+    if is_local_backend():
+        for note in apply_available_models(discover_models(resolve_api_base())):
+            print(f'Note: {note}')
+    # Bind the target-language backend (--target) and verify its toolchain.
+    target = backends.select(args.target)
+    if not target.toolchain_ok():
+        raise Exception(f'{args.target} toolchain not found')
+    # Resolve the target version (--target-version) against the backend's rules.
+    if args.target_version is not None:
+        target.target_version = target.resolve_target_version(
+            args.target_version)
+    if args.debug or args.trace or args.trace_full:
+        print(f'Using target language: {target.id}')
+        print(f'Using target version: {target.target_version}')
+        print(f'Using LLM provider: {resolve_provider()}')
+        print(f'Using LLM endpoint: {client.base_url}')
+        print(f'Using LLM model: {resolve_model()}')
+
+
+async def main(args):
     t1 = time.time()
     input_file = args.source
     # Name without extension
