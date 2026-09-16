@@ -96,6 +96,11 @@ review_parser.add_argument('--linear', default=None,
 review_parser.add_argument('--post-review', action='store_true',
                            help='Post the findings to the PR as an inline review '
                                 '(requires --pr).')
+review_parser.add_argument('--review-rounds', type=int, default=1,
+                           help='Conventions-feedback rounds after the initial review: '
+                                'the conventions gate rebuts findings that violate a real '
+                                'convention, and the panel revises with the rebuttal. '
+                                '0 disables the gate. Default: 1.')
 review_parser.add_argument('--personas', default=None,
                            help='Comma-separated review personas (a built-in name or a '
                                 'path). Default: all built-in impl reviewers.')

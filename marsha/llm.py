@@ -203,15 +203,15 @@ def _trim_findings_to_budget(findings, fits_check):
     return current
 
 
-async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
-    # A dedicated LLM pass that shrinks the findings list to fit the context budget: drop
-    # resolved/redundant findings and merge cross-reviewer duplicates (keeping the more detailed
-    # [Name-Label]). Survivors keep their original labels so cross-references stay valid. Returns
-    # the original list unchanged unless the LLM produced a strictly smaller, well-formed list.
+async def consolidate_findings(context_block, findings, model, debug=False, retries=2):
+    # A dedicated LLM pass that shrinks a findings list: drop resolved/redundant findings and
+    # merge cross-reviewer duplicates (keeping the more detailed [Name-Label]). Survivors keep
+    # their original labels so cross-references stay valid. Returns the original list unchanged
+    # unless the LLM produced a strictly smaller, well-formed list. `context_block` is the
+    # surrounding context (a Marsha meta for the optimize loops; a short note for `marsha review`).
     gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
                      stats_stage='third_stage', model=model, label='compact')
-    user = f'''{format_marsha_for_llm(meta)}
-{prior_context}
+    user = f'''{context_block}
 # Review findings to reduce
 
 {format_findings(findings)}'''
@@ -228,6 +228,12 @@ async def compact_findings(meta, findings, model, debug=False, retries=2, prior_
             if attempt == retries - 1:
                 return findings
     return findings
+
+
+async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
+    # Shrink the findings list to fit the editor's context budget (see consolidate_findings).
+    return await consolidate_findings(
+        f'{format_marsha_for_llm(meta)}\n{prior_context}', findings, model, debug, retries)
 
 
 async def _budgeted_findings(meta, findings, build, model, args, debug=False):

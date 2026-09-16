@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import os
 import re
 
@@ -8,15 +9,19 @@ from marsha.log import log
 from marsha.mappers import get_mapper
 
 # Per-loop reviewer filename prefix and the (fixed-per-loop) editor/implementor file.
+# For review, the "editor" is the conventions gate (Norman): it rebuts convention-violating
+# findings between reviewer rounds rather than editing code.
 LOOP_PREFIX = {
     'oracle': 'oracle-',
     'impl': 'impl-',
     'correction': 'correction-',
+    'review': 'review-',
 }
 EDITOR_FILE = {
     'oracle': '_oracle-editor.md',
     'impl': '_impl-editor.md',
     'correction': '_correction-editor.md',
+    'review': '_review-conventions.md',
 }
 
 # Appended to every reviewer's system prompt (formatted with the reviewer's number N). It fixes
@@ -243,39 +248,48 @@ def format_findings(findings):
     return '\n'.join(lines)
 
 
-def prior_round_block(findings, preamble):
+def prior_round_block(findings, preamble, label='implementor'):
     # The prior-cycle context shown to reviewers in round >= 2, so each can recognize its own
-    # [Name-Label] in the implementor's push-back and see which point was rejected.
+    # [Name-Label] in the push-back and see which point was rejected. `label` names the role that
+    # produced the push-back ("implementor" in the optimize loops, "conventions review" in review).
     block = '\n# Previous review round\n'
     if findings:
         block += '\nFindings raised last round:\n'
         block += format_findings(findings) + '\n'
     if preamble:
-        block += '\nWhat the implementor said last round:\n'
+        block += f'\nWhat the {label} said last round:\n'
         block += preamble.strip() + '\n'
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
     # per-language conventions the (language-agnostic) reviewer bodies leave out. `tool_ctx`, when
-    # set, enables the fake terminal for this reviewer (see marsha.tools).
+    # set, enables the fake terminal for this reviewer (see marsha.tools); each reviewer gets a
+    # fresh copy of its `notes` list so their scratchpads do not leak across reviewers.
+    # `max_tool_rounds` bounds the tool loop (defaults to tools.MAX_TOOL_ROUNDS).
     async def one(spec):
         name, body, review_number = spec
         system = body
         if guidance:
             system += f'\n\n{guidance}'
         system += FINDINGS_CONTRACT.format(review_number=review_number)
-        if tool_ctx is not None:
-            system += tools.tool_instructions(tool_ctx)
+        # A fresh notes list per reviewer (the `notes` tool mutates it); the command set is the
+        # same for all reviewers, so the instructions can be built from either copy.
+        rctx = dataclasses.replace(tool_ctx, notes=list(
+            tool_ctx.notes)) if tool_ctx is not None else None
+        if rctx is not None:
+            system += tools.tool_instructions(rctx)
         label = f'{loop}:{name}' if loop else name
         try:
             mapper = get_mapper(
                 system, n_results=1, stats_stage=stats_stage, model=model, label=label)
-            if tool_ctx is not None:
-                text = await tools.run_with_tools(mapper, user_message, tool_ctx, debug=debug)
+            if rctx is not None:
+                text = await tools.run_with_tools(
+                    mapper, user_message, rctx,
+                    debug=debug, max_rounds=max_tool_rounds or tools.MAX_TOOL_ROUNDS)
             else:
                 text = await mapper.run(user_message)
         except Exception as e:

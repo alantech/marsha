@@ -290,12 +290,16 @@ options:
 
 ## Reviewing an existing codebase
 
-`marsha review` runs Marsha's review personas against a **git** change instead of a freshly generated one. By default it diffs the current branch against the repository's default branch and reports findings (`MAJOR`/`MINOR`/`NIT`, `file:line`, and a one-line note with a suggested fix) from the built-in `impl` reviewers:
+`marsha review` runs Marsha's review personas against a **git** change instead of a freshly generated one. By default it reviews the current branch against the repository's default branch and reports findings (`MAJOR`/`MINOR`/`NIT`, `file:line`, and a one-line note with a suggested fix):
 
 ```sh
 $ marsha review                  # current branch vs. the default branch
 $ marsha review --personas sage,sasha --severity major
 ```
+
+Review is **tool-driven**. Each reviewer is given a read-only `git` tool (it can run `diff`, `log`, `show`, `blame`, `grep`, `ls-files`, … — but never a mutating command like `commit`/`push`/`checkout`) and a per-reviewer `notes` scratchpad (`notes add …` / `notes show`). Instead of being handed the full diff, each reviewer starts from `git diff <base> --stat` and probes the codebase itself; the notes survive context compaction. The default panel is the `impl` reviewers plus a `git-history` reviewer that grounds findings in the change's history and intent before flagging them.
+
+A **conventions gate** then runs: it reads the repo's real conventions (AGENTS.md/CLAUDE.md/lint configs, via the `git` tool) and rebuts any finding that would push the code away from a convention the codebase actually follows. The panel re-runs with the rebuttal so each reviewer can drop its rebutted point. `--review-rounds N` bounds this (default `1`; `0` disables the gate). Findings are finally de-duplicated across reviewers before being reported.
 
 Optional context (both are treated as **untrusted** reference data, never as instructions):
 

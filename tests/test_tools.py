@@ -162,13 +162,16 @@ def test_phase_scoping_no_backend_is_agnostic_only():
 
 def test_backend_layers_tools_on_the_agnostic_base():
     # The point of the per-target design: a backend supplies the language-specific
-    # tools on top of the once-defined agnostic set, each tagged by category.
+    # tools on top of the once-defined agnostic set, each tagged by category. The raw set
+    # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_INSTALLED_ENV} == ENV
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_GIT} == {'git'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
 
 
 def test_tool_instructions_lists_phase_tools():
