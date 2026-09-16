@@ -69,6 +69,8 @@ async def default_branch(cwd=None):
     if rc == 0 and out:
         name = out.split('/', 1)[1] if '/' in out else out
         return (name, f'origin/{name}')
+    # No remote ref configured (origin/HEAD): fall back to a local branch, so base_ref may be a
+    # local name (e.g. 'main') rather than 'origin/main'; `git diff <local>...HEAD` still works.
     for cand in ('main', 'master'):
         rc, _, _ = await _git('rev-parse', '--verify', '--quiet', cand, cwd=cwd)
         if rc == 0:
@@ -84,6 +86,8 @@ async def working_tree_clean(cwd=None):
 
 
 async def branch_diff(base_ref, head='HEAD', cwd=None, context=3):
+    # Three-dot (base...head): symmetric diff from the merge-base — exactly what `head` changed
+    # relative to `base` (the default branch), excluding changes that landed on `base` itself.
     rc, out, err = await _git(
         'diff', f'{base_ref}...{head}', f'-U{context}', cwd=cwd)
     if rc != 0:
@@ -181,6 +185,8 @@ def diff_new_lines(diff_text):
             if path.startswith('b/'):
                 path = path[2:]
             if path == '/dev/null':
+                # A deleted file has no new-side lines to anchor an inline comment, so it is
+                # skipped here; findings about it are folded into the review body instead.
                 path = None
         elif raw.startswith('@@'):
             m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', raw)

@@ -224,9 +224,9 @@ async def consolidate_findings(context_block, findings, model, debug=False, retr
             compacted = parse_compacted_findings(text)
             if 0 < len(compacted) < len(best):
                 best = compacted
-        except Exception:
+        except Exception as e:
             if debug:
-                print(f'[Compact] attempt {attempt + 1} failed')
+                print(f'[Compact] attempt {attempt + 1} failed: {e!r}')
     return best
 
 
