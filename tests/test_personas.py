@@ -92,6 +92,17 @@ def test_parse_findings_label_is_position_based():
     assert [f['label'] for f in fs] == ['A1', 'B1']
 
 
+def test_parse_findings_reuses_wellformed_label():
+    # On a re-review a reviewer reuses the exact label of a finding it still stands by; a
+    # well-formed label (one letter + this reviewer's number) is honored, leaving a gap where a
+    # conceded finding (B2) was dropped. A foreign label (number mismatch) is not honored.
+    fs = p.parse_findings(
+        'A2 [MAJOR] a - kept\nC2 [MINOR] b - kept', 'Ada', 2)
+    assert [f['label'] for f in fs] == ['A2', 'C2']
+    fs = p.parse_findings('A9 [MAJOR] a - foreign', 'Ada', 2)
+    assert [f['label'] for f in fs] == ['A2']
+
+
 def test_parse_findings_case_and_nitpick():
     fs = p.parse_findings('a1 [major] x - one\nb1 [nitpick] y - two', 'Ada', 2)
     assert [f['severity'] for f in fs] == ['MAJOR', 'NIT']

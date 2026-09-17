@@ -29,6 +29,7 @@ EDITOR_FILE = {
 FINDINGS_CONTRACT = '''
 
 You are review #{review_number}. Label each finding with a letter (A, then B, then C, ... in the order you report it) immediately followed by your review number, {review_number}. So your first finding is labeled A{review_number}, your second B{review_number}, and so on.
+When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings: if you still stand by it, reuse its exact label; if you no longer stand by it (the push-back on it was right), do not re-raise it; and give any genuinely new finding the next unused letter followed by {review_number}.
 Report each finding on its own line, in exactly this form:
 <LETTER>{review_number} [MAJOR|MINOR|NIT] <location> - <one-line description>
 For example: A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
@@ -171,22 +172,42 @@ def _split_location(rest):
     return '', rest
 
 
+def _position_label(review_number, used):
+    # The first position-based label (A<n>, B<n>, ...) not already used, so a fallback label can
+    # never collide with a reused one.
+    for n in range(26):
+        cand = f'{chr(ord("A") + n)}{review_number}'
+        if cand not in used:
+            return cand
+    return f'{chr(ord("A") + len(used))}{review_number}'
+
+
 def parse_findings(text, name, review_number):
-    # Parse one reviewer's findings. The canonical label is <letter><review_number>, where the
-    # letter is the finding's 1-based position, so a malformed reviewer label cannot break it.
+    # Parse one reviewer's findings. The canonical label is <letter><review_number>. On a
+    # re-review a reviewer reuses the exact label of a prior finding it still stands by, so a
+    # well-formed written label (a single letter followed by THIS reviewer's number) is honored;
+    # anything else is labeled by position, so a malformed or foreign label cannot break it.
     findings = []
+    used = set()
+    own_label = re.compile(rf'[A-Z]{review_number}')
     for line in text.split('\n'):
         m = re.match(
-            r'^\s*(?:[A-Za-z]+\d+\s+)?\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', line, re.IGNORECASE)
+            r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', line, re.IGNORECASE)
         if not m:
             continue
-        severity = m.group(1).upper()
+        severity = m.group(2).upper()
         if severity == 'NITPICK':
             severity = 'NIT'
-        location, description = _split_location(m.group(2).strip())
+        location, description = _split_location(m.group(3).strip())
+        written = (m.group(1) or '').upper()
+        if own_label.fullmatch(written) and written not in used:
+            label = written
+        else:
+            label = _position_label(review_number, used)
+        used.add(label)
         findings.append({
             'name': name,
-            'label': f'{chr(ord("A") + len(findings))}{review_number}',
+            'label': label,
             'severity': severity,
             'location': location,
             'desc': description,

@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import types
 from unittest.mock import AsyncMock, patch
@@ -487,7 +488,7 @@ def test_post_review_maps_inline_and_body():
     findings = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 'inline one'},
-        {'name': 'Eli', 'label': 'A1', 'severity': 'MINOR',
+        {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
          'location': 'bar.py:99', 'desc': 'not in diff'},
     ]
     calls = {}
@@ -504,14 +505,17 @@ def test_post_review_maps_inline_and_body():
 
     assert 'repos/acme/widget/pulls/123/reviews' in calls['args']
     payload = json.loads(calls['input'].decode('utf-8'))
-    paths = [c['path'] for c in payload['comments']]
-    assert paths == ['foo.py']
+    # The fresh in-diff finding is inlined and leads with its [label]; the out-of-diff one is
+    # folded into the review body.
+    assert [c['path'] for c in payload['comments']] == ['foo.py']
+    assert payload['comments'][0]['body'] == '**[A1] MAJOR**: inline one'
     assert 'bar.py' in payload['body']
+    assert '**[B1] MINOR**' in payload['body']
 
 
 def test_post_review_replies_on_existing_thread():
-    # A finding re-raised at a location that already has an inline-comment thread is posted as a
-    # reply on that thread (not a new top-level comment); a fresh location is a new inline.
+    # A finding re-raised under a label that already has a thread is posted as a reply on that
+    # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.
     diff = ('diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n'
             '@@ -1,2 +1,3 @@\n line1\n+new\n line2\n'
             'diff --git a/baz.py b/baz.py\n--- a/baz.py\n+++ b/baz.py\n'
@@ -519,13 +523,15 @@ def test_post_review_replies_on_existing_thread():
     findings = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 're-raised point'},
-        {'name': 'Eli', 'label': 'A1', 'severity': 'MINOR',
+        {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
          'location': 'baz.py:3', 'desc': 'fresh point'},
     ]
-    existing = json.dumps([
-        {'id': 999, 'path': 'foo.py', 'line': 2, 'in_reply_to_id': None,
-         'body': 'earlier finding'},
-    ])
+    threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 999, 'path': 'foo.py', 'line': 2,
+                 'body': '**[A1] MAJOR**: earlier finding'}]}},
+        ]}}}}})
     review_payload = None
     reply_payload = None
 
@@ -533,13 +539,13 @@ def test_post_review_replies_on_existing_thread():
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         joined = ' '.join(a)
-        if 'pulls/comments/' in joined:      # reply: .../pulls/comments/999/replies
+        if 'pulls/comments/999/replies' in joined:   # reply on the A1 thread
             nonlocal reply_payload
             reply_payload = k.get('input')
             return (0, '{}', '')
-        if '--paginate' in a:                # existing list: .../pulls/123/comments
-            return (0, existing, '')
-        if '/reviews' in joined:             # new review: .../pulls/123/reviews
+        if 'reviewThreads' in joined:                # fetch prior threads (GraphQL)
+            return (0, threads, '')
+        if '/reviews' in joined:                     # new review: .../pulls/123/reviews
             nonlocal review_payload
             review_payload = k.get('input')
             return (0, '{}', '')
@@ -549,6 +555,100 @@ def test_post_review_replies_on_existing_thread():
         asyncio.run(review.post_review(123, findings, diff))
 
     posted = json.loads(review_payload.decode('utf-8'))
+    # Only the fresh label (B1) opens a new inline comment; A1 replies on its existing thread.
     assert [c['path'] for c in posted['comments']] == ['baz.py']
+    assert posted['comments'][0]['body'] == '**[B1] MINOR**: fresh point'
     reply = json.loads(reply_payload.decode('utf-8'))
-    assert 're-raised point' in reply['body']
+    assert reply['body'] == '**[A1] MAJOR**: re-raised point'
+
+
+def test_post_review_resolves_conceded_thread():
+    # A prior thread whose label the reviewer no longer raises (and whose reviewer ran this pass)
+    # is closed by resolving its thread; threads for reviewers not re-run are left alone.
+    findings = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'still stands'},
+    ]
+    threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'nodes': [
+            {'id': 'PRRT_A1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 11, 'path': 'foo.py', 'line': 2,
+                 'body': '**[A1] MAJOR**: still stands'}]}},
+            {'id': 'PRRT_C2', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 22, 'path': 'bar.py', 'line': 5,
+                 'body': '**[C2] MINOR**: conceded point'}]}},
+            {'id': 'PRRT_D3', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 33, 'path': 'baz.py', 'line': 9,
+                 'body': '**[D3] MINOR**: reviewer not re-run'}]}},
+            {'id': 'PRRT_HUMAN', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 44, 'path': 'foo.py', 'line': 1,
+                 'body': 'a human comment with no label'}]}},
+        ]}}}}})
+    resolved = []
+
+    async def fake_gh(*a, **k):
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'resolveThread' in joined:
+            m = re.search(r'threadId: "([^"]+)"', joined)
+            resolved.append(m.group(1) if m else None)
+            return (0, '{"data": {"resolveThread": {"thread": {"isResolved": true}}}}', '')
+        if 'reviewThreads' in joined:
+            return (0, threads, '')
+        if '/reviews' in joined:
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        # Reviewer #1 (Sage) and #2 ran this pass; #3 did not. A1 was re-raised (kept), so only
+        # C2 (reviewer #2, conceded) is resolved — D3 (reviewer #3) and the human thread stay.
+        asyncio.run(
+            review.post_review(123, findings, '', active_numbers=[1, 2]))
+
+    assert resolved == ['PRRT_C2']
+
+
+def test_fetch_review_threads_parses_labels():
+    # Only threads whose root comment leads with a [label] are matched; the label is the key and
+    # the thread id / root databaseId / resolved flag are carried through for reply + resolve.
+    payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 999, 'path': 'foo.py', 'line': 2,
+                 'body': '**[A1] MAJOR**: one'}]}},
+            {'id': 'PRRT_2', 'isResolved': True, 'comments': {'nodes': [
+                {'databaseId': 1000, 'path': 'foo.py', 'line': 3,
+                 'body': '**[B2] MINOR**: two'}]}},
+            {'id': 'PRRT_3', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1001, 'path': 'bar.py', 'line': 4,
+                 'body': 'no label here'}]}},
+        ]}}}}})
+
+    async def fake_gh(*a, **k):
+        assert a[:2] == ('api', 'graphql')
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        threads = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+
+    assert set(threads) == {'A1', 'B2'}
+    assert threads['A1'] == {'thread_id': 'PRRT_1', 'root_id': 999,
+                             'is_resolved': False, 'path': 'foo.py', 'line': 2}
+    assert threads['B2']['is_resolved'] is True
+
+
+def test_resolve_thread_posts_mutation():
+    sent = {}
+
+    async def fake_gh(*a, **k):
+        sent['args'] = a
+        return (0, '{"data": {"resolveThread": {"thread": {"isResolved": true}}}}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        ok = asyncio.run(review._resolve_thread('PRRT_1'))
+
+    assert ok is True
+    assert 'api' in sent['args'] and 'graphql' in sent['args']
+    assert any('resolveThread' in str(part) for part in sent['args'])
+    assert any('PRRT_1' in str(part) for part in sent['args'])

@@ -323,30 +323,73 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
     return text
 
 
-async def _fetch_comment_threads(repo, pr_num, cwd=None):
-    # Map (path, line) -> root id of an existing inline-comment thread, so a re-raised finding can
-    # reply on that thread instead of opening a new top-level comment. Only top-level comments
-    # (no in_reply_to_id) are thread roots; the first (lowest id) at a location wins.
+# The label a posted finding leads with, e.g. "[A2]" in "**[A2] MAJOR**: ...". Only Marsha's
+# comments carry this; a prior thread is matched by it so a re-run can reply or resolve it.
+_POSTED_LABEL_RE = re.compile(r'^\*\*\[([A-Za-z]+\d+)\]')
+
+
+def _label_reviewer_number(label):
+    # The trailing digits of a finding label (e.g. "A2" -> 2): the review number that owns it.
+    m = re.search(r'(\d+)$', label or '')
+    return int(m.group(1)) if m else None
+
+
+async def _fetch_review_threads(repo, pr_num, cwd=None):
+    # Map a posted finding's [label] (e.g. "A2") -> its review thread, so a re-run can reply on
+    # the thread the finding opened, or resolve it if the finding is no longer raised. Only
+    # threads whose root comment leads with a [label] (i.e. ones Marsha posted) are matched;
+    # human comments and pre-label comments are ignored. Returns
+    # label -> {thread_id, root_id, is_resolved, path, line}.
+    owner, _, name = repo.partition('/')
+    if not owner or not name:
+        return {}
+    query = (
+        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
+        'reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) {'
+        'nodes { databaseId path line body } } } } } } }' % (owner, name, pr_num))
     rc, out, err = await _gh(
-        'api', '--paginate', f'repos/{repo}/pulls/{pr_num}/comments',
-        cwd=cwd, timeout=120)
+        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
     if rc != 0 or not out.strip():
         return {}
     try:
-        comments = json.loads(out)
+        data = json.loads(out)
     except ValueError:
         return {}
+    pr = ((data.get('data') or {}).get('repository')
+          or {}).get('pullRequest') or {}
+    nodes = (pr.get('reviewThreads') or {}).get('nodes') or []
     threads = {}
-    for c in comments:
-        if c.get('in_reply_to_id'):
+    for node in nodes:
+        comments = (node.get('comments') or {}).get('nodes') or []
+        if not comments:
             continue
-        path, line = c.get('path'), c.get('line')
-        if path and line is not None:
-            threads.setdefault((path, line), c['id'])
+        root = comments[0]
+        m = _POSTED_LABEL_RE.match((root.get('body') or '').strip())
+        if not m:
+            continue
+        threads[m.group(1).upper()] = {
+            'thread_id': node.get('id'),
+            'root_id': root.get('databaseId'),
+            'is_resolved': bool(node.get('isResolved')),
+            'path': root.get('path'),
+            'line': root.get('line'),
+        }
     return threads
 
 
-async def post_review(pr_num, findings, diff_text, cwd=None):
+async def _resolve_thread(thread_id, cwd=None):
+    # Close a review thread (mark it resolved) once the finding that opened it is conceded.
+    if not thread_id:
+        return False
+    mutation = (
+        'mutation { resolveThread(input: {threadId: "%s"}) '
+        '{ thread { isResolved } } }' % thread_id)
+    rc, _out, _err = await _gh(
+        'api', 'graphql', '-f', f'query={mutation}', cwd=cwd, timeout=60)
+    return rc == 0
+
+
+async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None):
     if not findings:
         print('No findings to post.')
         return
@@ -357,26 +400,25 @@ async def post_review(pr_num, findings, diff_text, cwd=None):
     repo = json.loads(out).get('nameWithOwner', '')
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
-    # Locations that already have an inline-comment thread: a finding re-raised there replies on
-    # that thread rather than opening a new top-level comment, so the PR reads as one thread per
-    # point instead of a pile of duplicates.
-    threads = await _fetch_comment_threads(repo, pr_num, cwd)
+    # Prior threads keyed by the [label] of their root finding. A finding re-raised under a label
+    # that already has a thread replies there (the reviewer still stands by it) rather than
+    # opening a new top-level comment, so the PR reads as one thread per point.
+    threads = await _fetch_review_threads(repo, pr_num, cwd)
     new_inline = []
     replies = []
     body_findings = []
     for f in findings:
         path, line = parse_location(f['location'])
-        body = f"**{f['severity']}** ({f['name']}): {f['desc']}"
-        if path and line is not None and line in touched.get(path, set()):
-            if (path, line) in threads:
-                replies.append((threads[(path, line)], body))
-            else:
-                new_inline.append(
-                    {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
+        body = f"**[{f['label']}] {f['severity']}**: {f['desc']}"
+        if f['label'] in threads:
+            replies.append((threads[f['label']]['root_id'], body))
+        elif path and line is not None and line in touched.get(path, set()):
+            new_inline.append(
+                {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
         else:
             loc = f['location'] or 'n/a'
             body_findings.append(
-                f"- **{f['severity']}** `{loc}` ({f['name']}): {f['desc']}")
+                f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}")
     if new_inline or body_findings:
         review = {'event': 'COMMENT', 'comments': new_inline}
         if body_findings:
@@ -402,9 +444,23 @@ async def post_review(pr_num, findings, diff_text, cwd=None):
         if rc != 0:
             raise Exception(
                 f'Failed to reply to PR #{pr_num} thread {cid}: {err or out}')
+    # Concede: a prior finding the reviewer no longer raises is closed by resolving its thread.
+    # Only threads whose reviewer ran this pass are touched, so a changed panel cannot close
+    # threads for reviewers that were not re-run.
+    active = set(active_numbers or [])
+    raised = {f['label'] for f in findings}
+    closed = 0
+    for label, thread in threads.items():
+        if thread['is_resolved'] or label in raised:
+            continue
+        if _label_reviewer_number(label) not in active:
+            continue
+        if await _resolve_thread(thread['thread_id'], cwd):
+            closed += 1
     print(
         f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
-        f'{len(replies)} replies, {len(body_findings)} in the review body.')
+        f'{len(replies)} replies, {len(body_findings)} in the review body, '
+        f'{closed} threads resolved.')
 
 
 async def run_review(args):
@@ -512,5 +568,7 @@ async def run_review(args):
     print(render_findings(actionable, base_name))
 
     if args.post_review:
-        await post_review(args.pr, actionable, full_diff, cwd)
+        active_numbers = [num for _n, _b, num in reviewers]
+        await post_review(
+            args.pr, actionable, full_diff, cwd, active_numbers=active_numbers)
     return 0
