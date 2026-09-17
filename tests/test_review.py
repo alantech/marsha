@@ -581,7 +581,7 @@ def test_post_review_replies_on_existing_thread():
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         joined = ' '.join(a)
-        if 'pulls/comments/999/replies' in joined:   # reply on the A1 thread
+        if 'pulls/123/comments' in joined:           # reply: POST .../comments (in_reply_to)
             nonlocal reply_payload
             reply_payload = k.get('input')
             return (0, '{}', '')
@@ -601,6 +601,7 @@ def test_post_review_replies_on_existing_thread():
     assert [c['path'] for c in posted['comments']] == ['baz.py']
     assert posted['comments'][0]['body'] == '**[B1] MINOR**: fresh point'
     reply = json.loads(reply_payload.decode('utf-8'))
+    assert reply['in_reply_to'] == 999
     assert reply['body'] == '**[A1] MAJOR**: re-raised point'
 
 

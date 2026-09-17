@@ -456,9 +456,12 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
                 'A finding line may fall outside the PR diff; those are listed in the '
                 'review body instead.')
     for cid, body in replies:
-        payload = json.dumps({'body': body})
+        # A reply is created via the main review-comment endpoint with `in_reply_to` (the
+        # .../comments/{id}/replies sub-resource no longer exists in the GitHub API); the
+        # positioning (path/line/side) is inherited from the comment being replied to.
+        payload = json.dumps({'body': body, 'in_reply_to': cid})
         rc, out, err = await _gh(
-            'api', f'repos/{repo}/pulls/comments/{cid}/replies',
+            'api', f'repos/{repo}/pulls/{pr_num}/comments',
             '--method', 'POST', '--input', '-',
             cwd=cwd, input=payload.encode('utf-8'))
         if rc != 0:
