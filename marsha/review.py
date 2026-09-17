@@ -469,7 +469,9 @@ def _reviewer_prior_block(number, prior):
         '(b) the user explicitly rejected it and you agree with their reasoning and do not want to '
         'push back.\n'
         f'A finding you close is simply left out of your findings list. Any genuinely new finding '
-        f'gets the next unused letter followed by {number}.\n']
+        f'gets the next unused letter followed by {number}, SKIPPING every label listed above '
+        f'(even ones you closed): a new finding must never reuse a prior label, or it will '
+        f'collide with an old thread. Reuse a prior label only to re-raise that exact finding.\n']
     for f in prior:
         loc = f' {f["location"]}' if f['location'] else ''
         lines.append(f'- [{f["label"]}] {f["severity"]}{loc} - {f["desc"]}')
@@ -632,11 +634,14 @@ async def run_review(args):
     # label only for a concern it still stands by. A label then tracks a concern across runs, and
     # post_review can reply on (or resolve) the right thread for it.
     prior_block_by_number = {}
+    prior_labels_by_number = {}
     if args.pr is not None:
         by_number = await _prior_findings_by_reviewer(args.pr, cwd)
-        prior_block_by_number = {
-            num: _reviewer_prior_block(num, prior)
-            for num, prior in by_number.items() if prior}
+        for num, prior in by_number.items():
+            if not prior:
+                continue
+            prior_block_by_number[num] = _reviewer_prior_block(num, prior)
+            prior_labels_by_number[num] = {f['label'] for f in prior}
 
     # Review loop: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges
@@ -654,7 +659,8 @@ async def run_review(args):
             reviewers, user_message, model, 'review',
             debug=args.debug, loop='review', guidance=guidance,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
-            prior_block_by_number=prior_block_by_number)
+            prior_block_by_number=prior_block_by_number,
+            prior_labels_by_number=prior_labels_by_number)
         actionable = actionable_findings(findings, severities)
         if i == rounds or not actionable:
             break

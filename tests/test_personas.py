@@ -103,6 +103,22 @@ def test_parse_findings_reuses_wellformed_label():
     assert [f['label'] for f in fs] == ['A2']
 
 
+def test_parse_findings_reraise_honors_prior_label():
+    # A well-formed label that is one of the reviewer's prior labels is honored (a re-raise), so
+    # it maps back onto the prior thread.
+    fs = p.parse_findings('A1 [MAJOR] x.py:1 - re-raised', 'Sage', 1,
+                          prior_labels=['A1', 'B1'])
+    assert [f['label'] for f in fs] == ['A1']
+
+
+def test_parse_findings_new_finding_skips_prior_labels():
+    # A position-based (unlabeled) new finding skips the reviewer's prior labels so it cannot
+    # collide with an old thread's label; the first fresh letter is the next one after them.
+    text = '[MINOR] x.py:1 - new one\n[MINOR] x.py:2 - new two'
+    fs = p.parse_findings(text, 'Sage', 1, prior_labels=['A1', 'B1'])
+    assert [f['label'] for f in fs] == ['C1', 'D1']
+
+
 def test_parse_findings_case_and_nitpick():
     fs = p.parse_findings('a1 [major] x - one\nb1 [nitpick] y - two', 'Ada', 2)
     assert [f['severity'] for f in fs] == ['MAJOR', 'NIT']

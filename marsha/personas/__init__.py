@@ -29,7 +29,7 @@ EDITOR_FILE = {
 FINDINGS_CONTRACT = '''
 
 You are review #{review_number}. Label each finding with a letter (A, then B, then C, ... in the order you report it) immediately followed by your review number, {review_number}. So your first finding is labeled A{review_number}, your second B{review_number}, and so on.
-When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings. Re-raise it (reusing its exact label) only if you still believe it is a real issue and want to push back; otherwise close it — do not re-raise it — when you verify with your tools that the code no longer has the issue, or when the user rejected it and you agree and will not push back. Give any genuinely new finding the next unused letter followed by {review_number}.
+When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings. Re-raise it (reusing its exact label) only if you still believe it is a real issue and want to push back; otherwise close it — do not re-raise it — when you verify with your tools that the code no longer has the issue, or when the user rejected it and you agree and will not push back. Give any genuinely new finding the next unused letter followed by {review_number}, skipping the labels of your prior findings so a new finding never reuses a prior label (which would collide with an old thread).
 Report each finding on its own line, in exactly this form:
 <LETTER>{review_number} [MAJOR|MINOR|NIT] <location> - <one-line description>
 For example: A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
@@ -189,11 +189,13 @@ def _position_label(review_number, used):
     raise ValueError(f'no available label for reviewer {review_number}')
 
 
-def parse_findings(text, name, review_number):
+def parse_findings(text, name, review_number, prior_labels=None):
     # Parse one reviewer's findings. The canonical label is <letter><review_number>. On a
     # re-review a reviewer reuses the exact label of a prior finding it still stands by, so a
     # well-formed written label (a single letter followed by THIS reviewer's number) is honored;
-    # anything else is labeled by position, so a malformed or foreign label cannot break it.
+    # anything else is labeled by position, skipping the reviewer's prior labels, so a malformed or
+    # foreign label cannot break it and a new finding never collides with a prior thread's label.
+    prior = {lbl.upper() for lbl in (prior_labels or [])}
     findings = []
     used = set()
     own_label = re.compile(rf'[A-Z]{review_number}')
@@ -210,7 +212,7 @@ def parse_findings(text, name, review_number):
         if own_label.fullmatch(written) and written not in used:
             label = written
         else:
-            label = _position_label(review_number, used)
+            label = _position_label(review_number, used | prior)
         used.add(label)
         findings.append({
             'name': name,
@@ -325,7 +327,7 @@ def prior_round_block(findings, preamble, label='implementor'):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None, prior_labels_by_number=None):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
@@ -335,7 +337,9 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
     # `max_tool_rounds` bounds the tool loop (defaults to tools.MAX_TOOL_ROUNDS).
     # `prior_block_by_number`, when set, maps a reviewer number to a block of that reviewer's OWN
     # prior (labeled) findings + the user's replies, appended to that reviewer's message so it
-    # reuses a label only for a concern it still stands by.
+    # reuses a label only for a concern it still stands by. `prior_labels_by_number` maps a
+    # reviewer number to the set of its prior labels so parse_findings can keep a new (position-
+    # based) finding from colliding with a prior thread's label.
     async def one(spec):
         name, body, review_number = spec
         system = body
@@ -352,6 +356,7 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
         user = user_message
         if prior_block_by_number and review_number in prior_block_by_number:
             user += prior_block_by_number[review_number]
+        prior_labels = (prior_labels_by_number or {}).get(review_number)
         try:
             mapper = get_mapper(
                 system, n_results=1, stats_stage=stats_stage, model=model, label=label)
@@ -366,7 +371,7 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
             return []
-        return parse_findings(text, name, review_number)
+        return parse_findings(text, name, review_number, prior_labels=prior_labels)
     if is_local_backend():
         results = [await one(s) for s in reviewers]
     else:
