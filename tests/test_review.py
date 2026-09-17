@@ -677,7 +677,8 @@ def test_fetch_review_threads_parses_labels():
 
     assert set(threads) == {'A1', 'B2'}
     assert threads['A1'] == {'thread_id': 'PRRT_1', 'root_id': 999,
-                             'is_resolved': False, 'path': 'foo.py', 'line': 2}
+                             'is_resolved': False, 'path': 'foo.py', 'line': 2,
+                             'desc': 'one'}
     assert threads['B2']['is_resolved'] is True
 
 
@@ -695,6 +696,73 @@ def test_resolve_thread_posts_mutation():
     assert 'api' in sent['args'] and 'graphql' in sent['args']
     assert any('resolveReviewThread' in str(part) for part in sent['args'])
     assert any('PRRT_1' in str(part) for part in sent['args'])
+
+
+def test_finding_matches_thread_same_line():
+    # Same file + same line is a conclusive match; a different file is not, regardless of text.
+    assert review._finding_matches_thread(
+        {'location': 'foo.py:10', 'desc': 'x'},
+        {'path': 'foo.py', 'line': 10, 'desc': 'y'}) is True
+    assert review._finding_matches_thread(
+        {'location': 'bar.py:10', 'desc': 'x'},
+        {'path': 'foo.py', 'line': 10, 'desc': 'y'}) is False
+
+
+def test_desc_similar_threshold():
+    # A re-raised finding restates a prior one (high overlap); two near-siblings on the same file
+    # share a common phrase but are distinct concerns and must NOT match (avoids the collision).
+    assert review._desc_similar(
+        'the run helper does not catch oserror',
+        'the run helper does not catch oserror') is True
+    assert review._desc_similar(
+        'missing type hint on run_review function',
+        'missing type hint on post_review function') is False
+
+
+def test_verify_finding_labels_reassigns_collision():
+    # A finding that wears a prior thread's label but is a different concern (different file) is
+    # reassigned a fresh label that skips all the reviewer's prior labels, freeing the old label.
+    threads = {
+        'A1': {'path': 'foo.py', 'line': 10, 'desc': 'missing type hint'},
+        'B1': {'path': 'bar.py', 'line': 5, 'desc': 'off-by-one'},
+    }
+    findings = [{'label': 'A1', 'location': 'baz.py:9', 'desc': 'wrong variable name'}]
+    n = review._verify_finding_labels(findings, threads)
+    assert n == 1
+    assert findings[0]['label'] == 'C1'
+
+
+def test_verify_finding_labels_keeps_genuine_reraise():
+    # A finding that reuses a prior label and matches it (same file + line) is a genuine re-raise;
+    # the label is kept so it replies on that thread.
+    threads = {'A1': {'path': 'foo.py', 'line': 10, 'desc': 'missing type hint'}}
+    findings = [{'label': 'A1', 'location': 'foo.py:10', 'desc': 'missing type hint again'}]
+    n = review._verify_finding_labels(findings, threads)
+    assert n == 0
+    assert findings[0]['label'] == 'A1'
+
+
+def test_verify_finding_labels_reraise_line_shifted():
+    # Same file, shifted line, near-identical description: still the same concern (a line moved
+    # between runs), so the label is kept rather than reassigned.
+    threads = {'A1': {'path': 'foo.py', 'line': 10,
+                      'desc': 'the run helper does not catch oserror for a missing binary'}}
+    findings = [{'label': 'A1', 'location': 'foo.py:12',
+                 'desc': 'the run helper does not catch oserror when a binary is missing'}]
+    n = review._verify_finding_labels(findings, threads)
+    assert n == 0
+    assert findings[0]['label'] == 'A1'
+
+
+def test_verify_finding_labels_dedupes_inrun():
+    # Two findings sharing one label in a single run (a parser slip) get distinct labels.
+    findings = [
+        {'label': 'A1', 'location': 'a.py:1', 'desc': 'one'},
+        {'label': 'A1', 'location': 'a.py:2', 'desc': 'two'},
+    ]
+    n = review._verify_finding_labels(findings, {})
+    assert n == 1
+    assert [f['label'] for f in findings] == ['A1', 'B1']
 
 
 def test_prior_findings_by_reviewer_groups_by_number():

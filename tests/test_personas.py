@@ -103,6 +103,15 @@ def test_parse_findings_reuses_wellformed_label():
     assert [f['label'] for f in fs] == ['A2']
 
 
+def test_parse_findings_honors_multiletter_label():
+    # A reused two-letter label (AA<n>) is this reviewer's own, so it is honored rather than
+    # renumbered; a label with a foreign number is still rejected.
+    fs = p.parse_findings('AA12 [MAJOR] a - kept', 'Hollis', 12)
+    assert [f['label'] for f in fs] == ['AA12']
+    fs = p.parse_findings('AA13 [MAJOR] a - foreign', 'Hollis', 12)
+    assert [f['label'] for f in fs] == ['A12']
+
+
 def test_parse_findings_reraise_honors_prior_label():
     # A well-formed label that is one of the reviewer's prior labels is honored (a re-raise), so
     # it maps back onto the prior thread.

@@ -192,13 +192,15 @@ def _position_label(review_number, used):
 def parse_findings(text, name, review_number, prior_labels=None):
     # Parse one reviewer's findings. The canonical label is <letter><review_number>. On a
     # re-review a reviewer reuses the exact label of a prior finding it still stands by, so a
-    # well-formed written label (a single letter followed by THIS reviewer's number) is honored;
-    # anything else is labeled by position, skipping the reviewer's prior labels, so a malformed or
-    # foreign label cannot break it and a new finding never collides with a prior thread's label.
+    # well-formed written label (one or more letters followed by THIS reviewer's number) is
+    # honored; anything else is labeled by position, skipping the reviewer's prior labels, so a
+    # malformed or foreign label cannot break it and a new finding never collides with a prior
+    # thread's label. One-or-more letters keeps a reused two-letter label (AA<n>, ...) from being
+    # misread as a foreign label and renumbered.
     prior = {lbl.upper() for lbl in (prior_labels or [])}
     findings = []
     used = set()
-    own_label = re.compile(rf'[A-Z]{review_number}')
+    own_label = re.compile(rf'[A-Z]+{review_number}')
     for line in text.split('\n'):
         m = re.match(
             r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', line, re.IGNORECASE)

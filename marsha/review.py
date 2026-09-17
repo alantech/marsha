@@ -21,9 +21,10 @@ from marsha.config import resolve_model
 from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
-from marsha.personas import (actionable_findings, build_registry, dedup_by_location,
-                             format_findings, load_editor, parse_severities,
-                             prior_round_block, resolve_loop_reviewers, run_personas)
+from marsha.personas import (_position_label, actionable_findings, build_registry,
+                             dedup_by_location, format_findings, load_editor,
+                             parse_severities, prior_round_block, resolve_loop_reviewers,
+                             run_personas)
 from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
@@ -388,15 +389,18 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
         if not comments:
             continue
         root = comments[0]
-        m = _POSTED_LABEL_RE.match((root.get('body') or '').strip())
+        body = (root.get('body') or '').strip()
+        m = _POSTED_LABEL_RE.match(body)
         if not m:
             continue
+        fm = _POSTED_FINDING_RE.match(body)
         threads[m.group(1).upper()] = {
             'thread_id': node.get('id'),
             'root_id': root.get('databaseId'),
             'is_resolved': bool(node.get('isResolved')),
             'path': root.get('path'),
             'line': root.get('line'),
+            'desc': (fm.group(3).strip() if fm else ''),
         }
     return threads
 
@@ -492,6 +496,55 @@ async def _resolve_thread(thread_id, cwd=None):
     return rc == 0
 
 
+def _desc_similar(a, b):
+    # Token overlap of two finding descriptions. A re-raised finding restates a prior one with
+    # nearly the same words, so a high Jaccard means it is the same concern (used only when the
+    # line shifted between runs and can no longer be matched by position).
+    ta, tb = set(a.lower().split()), set(b.lower().split())
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= 0.75
+
+
+def _finding_matches_thread(finding, thread):
+    # Is `finding` the same concern as the prior thread's finding? Same file at the same line is
+    # conclusive; the same file with a shifted/missing line needs a near-identical description.
+    # Anything else is treated as a different concern so it never replies on an unrelated thread.
+    path, line = parse_location(finding['location'])
+    tpath, tline = thread.get('path'), thread.get('line')
+    if not (path and tpath and path == tpath):
+        return False
+    if line is not None and tline is not None and line == tline:
+        return True
+    return _desc_similar(finding['desc'], thread.get('desc') or '')
+
+
+def _verify_finding_labels(findings, threads):
+    # Reassign any finding that wears a prior thread's label without matching that thread's
+    # finding (a new finding colliding with an unrelated old thread), plus any in-run label
+    # duplicate, so each label maps to exactly one concern and one thread. Returns how many
+    # labels were reassigned. A reassignment frees the old label, so the concede pass below can
+    # resolve the thread it collided with.
+    prior_by_number = {}
+    for label, thread in threads.items():
+        num = _label_reviewer_number(label)
+        prior_by_number.setdefault(num, {})[label] = thread
+    used_by_number = {}
+    reassigned = 0
+    for f in findings:
+        num = _label_reviewer_number(f['label'])
+        prior_labels = set((prior_by_number.get(num) or {}).keys())
+        used = used_by_number.setdefault(num, set())
+        prior = (prior_by_number.get(num) or {}).get(f['label'])
+        collides = (prior is not None and not _finding_matches_thread(f, prior)) \
+            or (f['label'] in used)
+        if collides:
+            f['label'] = _position_label(num, prior_labels | used)
+            reassigned += 1
+        used.add(f['label'])
+    return reassigned
+
+
 async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None):
     if not findings:
         print('No findings to post.')
@@ -507,6 +560,13 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
     # that already has a thread replies there (the reviewer still stands by it) rather than
     # opening a new top-level comment, so the PR reads as one thread per point.
     threads = await _fetch_review_threads(repo, pr_num, cwd)
+    # A reviewer's label can collide with an unrelated prior thread (e.g. a new finding that took
+    # a position a closed finding used). Reassign any such label so a reply never lands on the
+    # wrong thread, and so the old thread can be resolved by the concede pass below.
+    reassigned = _verify_finding_labels(findings, threads)
+    if reassigned:
+        log(f'review: reassigned {reassigned} finding label(s) that collided with a '
+            f'prior thread')
     new_inline = []
     replies = []
     body_findings = []
