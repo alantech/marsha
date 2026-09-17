@@ -507,3 +507,48 @@ def test_post_review_maps_inline_and_body():
     paths = [c['path'] for c in payload['comments']]
     assert paths == ['foo.py']
     assert 'bar.py' in payload['body']
+
+
+def test_post_review_replies_on_existing_thread():
+    # A finding re-raised at a location that already has an inline-comment thread is posted as a
+    # reply on that thread (not a new top-level comment); a fresh location is a new inline.
+    diff = ('diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n'
+            '@@ -1,2 +1,3 @@\n line1\n+new\n line2\n'
+            'diff --git a/baz.py b/baz.py\n--- a/baz.py\n+++ b/baz.py\n'
+            '@@ -1,2 +1,4 @@\n line1\n+x\n+y\n line2\n')
+    findings = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 're-raised point'},
+        {'name': 'Eli', 'label': 'A1', 'severity': 'MINOR',
+         'location': 'baz.py:3', 'desc': 'fresh point'},
+    ]
+    existing = json.dumps([
+        {'id': 999, 'path': 'foo.py', 'line': 2, 'in_reply_to_id': None,
+         'body': 'earlier finding'},
+    ])
+    review_payload = None
+    reply_payload = None
+
+    async def fake_gh(*a, **k):
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/comments/' in joined:      # reply: .../pulls/comments/999/replies
+            nonlocal reply_payload
+            reply_payload = k.get('input')
+            return (0, '{}', '')
+        if '--paginate' in a:                # existing list: .../pulls/123/comments
+            return (0, existing, '')
+        if '/reviews' in joined:             # new review: .../pulls/123/reviews
+            nonlocal review_payload
+            review_payload = k.get('input')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, findings, diff))
+
+    posted = json.loads(review_payload.decode('utf-8'))
+    assert [c['path'] for c in posted['comments']] == ['baz.py']
+    reply = json.loads(reply_payload.decode('utf-8'))
+    assert 're-raised point' in reply['body']

@@ -248,6 +248,14 @@ def build_review_message(stat_text, base_name, base_ref, context_blocks):
          'handled elsewhere in the codebase, and `git show` the exact lines you are citing. Do not '
          'report a finding you have not confirmed this way — a claim you cannot verify with the '
          'tools is not a finding.'),
+        ('Match the existing conventions of the codebase. Before reporting a style or '
+         'convention finding, check what the surrounding code actually does (with the git tool) '
+         'and report '
+         'only what the changed code deviates from. Do not flag code for failing to follow a '
+         'convention the codebase does not itself follow — for example, do not demand type '
+         'annotations if the surrounding code has none, or specific exception types if the '
+         'codebase uses bare `Exception`. A convention finding must point to a pattern the '
+         'codebase clearly and consistently follows elsewhere that the changed code breaks.'),
     ]
     if context_blocks:
         parts.append(
@@ -315,47 +323,88 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
     return text
 
 
+async def _fetch_comment_threads(repo, pr_num, cwd=None):
+    # Map (path, line) -> root id of an existing inline-comment thread, so a re-raised finding can
+    # reply on that thread instead of opening a new top-level comment. Only top-level comments
+    # (no in_reply_to_id) are thread roots; the first (lowest id) at a location wins.
+    rc, out, err = await _gh(
+        'api', '--paginate', f'repos/{repo}/pulls/{pr_num}/comments',
+        cwd=cwd, timeout=120)
+    if rc != 0 or not out.strip():
+        return {}
+    try:
+        comments = json.loads(out)
+    except ValueError:
+        return {}
+    threads = {}
+    for c in comments:
+        if c.get('in_reply_to_id'):
+            continue
+        path, line = c.get('path'), c.get('line')
+        if path and line is not None:
+            threads.setdefault((path, line), c['id'])
+    return threads
+
+
 async def post_review(pr_num, findings, diff_text, cwd=None):
     if not findings:
         print('No findings to post.')
         return
     touched = diff_new_lines(diff_text)
-    inline = []
-    body_findings = []
-    for f in findings:
-        path, line = parse_location(f['location'])
-        body = f"**{f['severity']}** ({f['name']}): {f['desc']}"
-        if path and line is not None and line in touched.get(path, set()):
-            inline.append(
-                {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
-        else:
-            loc = f['location'] or 'n/a'
-            body_findings.append(
-                f"- **{f['severity']}** `{loc}` ({f['name']}): {f['desc']}")
-    review = {'event': 'COMMENT', 'comments': inline}
-    if body_findings:
-        review['body'] = (
-            'Marsha review — findings that could not be placed on a diff line:\n\n'
-            + '\n'.join(body_findings))
     rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
     if rc != 0:
         raise Exception(f'Could not resolve the repository: {err or out}')
     repo = json.loads(out).get('nameWithOwner', '')
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
-    payload = json.dumps(review)
-    rc, out, err = await _gh(
-        'api', f'repos/{repo}/pulls/{pr_num}/reviews',
-        '--method', 'POST', '--input', '-',
-        cwd=cwd, input=payload.encode('utf-8'))
-    if rc != 0:
-        raise Exception(
-            f'Failed to post the review to PR #{pr_num}: {err or out}\n'
-            'A finding line may fall outside the PR diff; those are listed in the '
-            'review body instead.')
+    # Locations that already have an inline-comment thread: a finding re-raised there replies on
+    # that thread rather than opening a new top-level comment, so the PR reads as one thread per
+    # point instead of a pile of duplicates.
+    threads = await _fetch_comment_threads(repo, pr_num, cwd)
+    new_inline = []
+    replies = []
+    body_findings = []
+    for f in findings:
+        path, line = parse_location(f['location'])
+        body = f"**{f['severity']}** ({f['name']}): {f['desc']}"
+        if path and line is not None and line in touched.get(path, set()):
+            if (path, line) in threads:
+                replies.append((threads[(path, line)], body))
+            else:
+                new_inline.append(
+                    {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
+        else:
+            loc = f['location'] or 'n/a'
+            body_findings.append(
+                f"- **{f['severity']}** `{loc}` ({f['name']}): {f['desc']}")
+    if new_inline or body_findings:
+        review = {'event': 'COMMENT', 'comments': new_inline}
+        if body_findings:
+            review['body'] = (
+                'Marsha review — findings that could not be placed on a diff line:\n\n'
+                + '\n'.join(body_findings))
+        payload = json.dumps(review)
+        rc, out, err = await _gh(
+            'api', f'repos/{repo}/pulls/{pr_num}/reviews',
+            '--method', 'POST', '--input', '-',
+            cwd=cwd, input=payload.encode('utf-8'))
+        if rc != 0:
+            raise Exception(
+                f'Failed to post the review to PR #{pr_num}: {err or out}\n'
+                'A finding line may fall outside the PR diff; those are listed in the '
+                'review body instead.')
+    for cid, body in replies:
+        payload = json.dumps({'body': body})
+        rc, out, err = await _gh(
+            'api', f'repos/{repo}/pulls/comments/{cid}/replies',
+            '--method', 'POST', '--input', '-',
+            cwd=cwd, input=payload.encode('utf-8'))
+        if rc != 0:
+            raise Exception(
+                f'Failed to reply to PR #{pr_num} thread {cid}: {err or out}')
     print(
-        f'Posted review to PR #{pr_num}: {len(inline)} inline, '
-        f'{len(body_findings)} in the review body.')
+        f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
+        f'{len(replies)} replies, {len(body_findings)} in the review body.')
 
 
 async def run_review(args):
