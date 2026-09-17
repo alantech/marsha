@@ -142,39 +142,55 @@ async def gh_pr_context(num, cwd=None):
     body = (data.get('body') or '').strip()
     if body:
         parts.append(body)
-    comments = data.get('comments') or []
+    # A minimized (hidden) comment is skipped so it stays out of the reviewer's context even if
+    # it cannot be deleted. `gh pr view --json comments` exposes this as a boolean `isMinimized`.
+    comments = [c for c in (data.get('comments') or [])
+                if not c.get('isMinimized')]
     if comments:
         lines = ['\n# Comments so far']
         for c in comments:
             author = (c.get('author') or {}).get('login', 'someone')
             lines.append(f"{author}: {c.get('body', '')}".rstrip())
         parts.append('\n'.join(lines))
-    # Inline review comments (and their replies) live in the REST `pulls/comments` collection,
-    # which `gh pr view --json reviews` does not populate. Fetch them directly so the reviewer
-    # can see the prior round of review and avoid re-raising findings already answered.
+    # Inline review comments (and their replies), fetched via GraphQL reviewThreads so each
+    # comment's isMinimized flag is available (the REST `pulls/comments` collection does not
+    # expose it): a hidden inline comment is skipped for the same reason as above.
     rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
     repo = ''
     if rc == 0 and out.strip():
         repo = json.loads(out).get('nameWithOwner', '')
-    if repo:
+    owner, _, name = repo.partition('/')
+    if owner and name:
+        query = (
+            'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
+            'reviewThreads(first: 100) { nodes { comments(first: 20) { nodes {'
+            'isMinimized path line body author { login } } } } } } } }'
+            % (owner, name, num))
         rc, out, err = await _gh(
-            'api', '--paginate', f'repos/{repo}/pulls/{num}/comments',
-            cwd=cwd, timeout=120)
+            'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
         if rc == 0 and out.strip():
             try:
-                review_comments = json.loads(out)
+                data = json.loads(out)
             except ValueError:
-                review_comments = []
-            if review_comments:
-                lines = ['\n# Review comments so far (findings and replies)']
-                for c in review_comments:
-                    author = (c.get('user') or {}).get('login', 'someone')
+                data = {}
+            nodes = (((data.get('data') or {}).get('repository')
+                      or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+            rows = []
+            for node in (nodes.get('nodes') or []):
+                comments = (node.get('comments') or {}).get('nodes') or []
+                for i, c in enumerate(comments):
+                    if c.get('isMinimized'):
+                        continue
+                    author = (c.get('author') or {}).get('login', 'someone')
                     path, line = c.get('path'), c.get('line')
                     where = f'{path}:{line} ' if path and line else ''
-                    prefix = '(reply) ' if c.get('in_reply_to_id') else ''
-                    lines.append(
+                    prefix = '(reply) ' if i > 0 else ''
+                    rows.append(
                         f"{prefix}{where}{author}: {c.get('body', '')}".rstrip())
-                parts.append('\n'.join(lines))
+            if rows:
+                parts.append(
+                    '\n# Review comments so far (findings and replies)\n'
+                    + '\n'.join(rows))
     return '\n\n'.join(parts)
 
 

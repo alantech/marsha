@@ -452,12 +452,15 @@ def test_gh_pr_context_flattens_reviews():
         'comments': [{'author': {'login': 'a'}, 'body': 'a comment'}],
     })
     repo_payload = json.dumps({'nameWithOwner': 'octo/repo'})
-    comments_payload = json.dumps([
-        {'user': {'login': 'b'}, 'path': 'x.py', 'line': 3,
-         'body': 'inline finding', 'in_reply_to_id': None},
-        {'user': {'login': 'c'}, 'path': 'x.py', 'line': 3,
-         'body': 'reply says invalid', 'in_reply_to_id': 1},
-    ])
+    threads_payload = json.dumps({'data': {'repository': {'pullRequest': {
+        'reviewThreads': {'nodes': [
+            {'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'x.py', 'line': 3,
+                 'body': 'inline finding', 'author': {'login': 'b'}},
+                {'isMinimized': False, 'path': 'x.py', 'line': 3,
+                 'body': 'reply says invalid', 'author': {'login': 'c'}},
+            ]}},
+        ]}}}}})
 
     async def fake_gh(*a, **k):
         if a[0] == 'pr':
@@ -465,8 +468,8 @@ def test_gh_pr_context_flattens_reviews():
         if a[0] == 'repo':
             return (0, repo_payload, '')
         if a[0] == 'api':
-            assert 'pulls/7/comments' in ' '.join(a)
-            return (0, comments_payload, '')
+            assert 'graphql' in a and 'pullRequest(number: 7)' in ' '.join(a)
+            return (0, threads_payload, '')
         raise AssertionError(f'unexpected gh call: {a}')
 
     with patch.object(review, '_gh', new=fake_gh):
@@ -475,6 +478,45 @@ def test_gh_pr_context_flattens_reviews():
     assert 'a comment' in out
     assert 'x.py:3' in out and 'inline finding' in out
     assert 'reply says invalid' in out and '(reply)' in out
+
+
+def test_gh_pr_context_skips_hidden_comments():
+    # A minimized (hidden) comment is left out of the reviewer's context: issue comments via the
+    # `isMinimized` flag, inline comments via GraphQL `isMinimized`.
+    pr_payload = json.dumps({
+        'title': 'T', 'body': 'B',
+        'comments': [
+            {'author': {'login': 'a'}, 'body': 'visible issue comment'},
+            {'author': {'login': 'a'}, 'body': 'hidden issue comment',
+             'isMinimized': True, 'minimizedReason': 'RESOLVED'},
+        ],
+    })
+    repo_payload = json.dumps({'nameWithOwner': 'octo/repo'})
+    threads_payload = json.dumps({'data': {'repository': {'pullRequest': {
+        'reviewThreads': {'nodes': [
+            {'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'x.py', 'line': 3,
+                 'body': 'visible inline', 'author': {'login': 'b'}},
+                {'isMinimized': True, 'path': 'x.py', 'line': 4,
+                 'body': 'hidden inline', 'author': {'login': 'c'}},
+            ]}},
+        ]}}}}})
+
+    async def fake_gh(*a, **k):
+        if a[0] == 'pr':
+            return (0, pr_payload, '')
+        if a[0] == 'repo':
+            return (0, repo_payload, '')
+        if a[0] == 'api':
+            return (0, threads_payload, '')
+        raise AssertionError(f'unexpected gh call: {a}')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        out = asyncio.run(review.gh_pr_context(7))
+    assert 'visible issue comment' in out
+    assert 'hidden issue comment' not in out
+    assert 'visible inline' in out
+    assert 'hidden inline' not in out
 
 
 def test_post_review_maps_inline_and_body():
