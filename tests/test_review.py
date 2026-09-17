@@ -633,10 +633,10 @@ def test_post_review_resolves_conceded_thread():
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         joined = ' '.join(a)
-        if 'resolveThread' in joined:
+        if 'resolveReviewThread' in joined:
             m = re.search(r'threadId: "([^"]+)"', joined)
             resolved.append(m.group(1) if m else None)
-            return (0, '{"data": {"resolveThread": {"thread": {"isResolved": true}}}}', '')
+            return (0, '{"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}', '')
         if 'reviewThreads' in joined:
             return (0, threads, '')
         if '/reviews' in joined:
@@ -686,12 +686,12 @@ def test_resolve_thread_posts_mutation():
 
     async def fake_gh(*a, **k):
         sent['args'] = a
-        return (0, '{"data": {"resolveThread": {"thread": {"isResolved": true}}}}', '')
+        return (0, '{"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}', '')
 
     with patch.object(review, '_gh', new=fake_gh):
         ok = asyncio.run(review._resolve_thread('PRRT_1'))
 
     assert ok is True
     assert 'api' in sent['args'] and 'graphql' in sent['args']
-    assert any('resolveThread' in str(part) for part in sent['args'])
+    assert any('resolveReviewThread' in str(part) for part in sent['args'])
     assert any('PRRT_1' in str(part) for part in sent['args'])

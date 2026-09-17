@@ -402,7 +402,7 @@ async def _resolve_thread(thread_id, cwd=None):
     if not thread_id:
         return False
     mutation = (
-        'mutation { resolveThread(input: {threadId: "%s"}) '
+        'mutation { resolveReviewThread(input: {threadId: "%s"}) '
         '{ thread { isResolved } } }' % thread_id)
     rc, _out, _err = await _gh(
         'api', 'graphql', '-f', f'query={mutation}', cwd=cwd, timeout=60)
