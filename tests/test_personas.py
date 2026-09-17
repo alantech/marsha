@@ -154,6 +154,17 @@ def test_dedup_by_location_merges_same_line():
     assert ('src/bar.py:5', 'different file') in kept
 
 
+def test_dedup_by_location_keeps_unlocated_separate():
+    # Findings with no location have nothing to merge on, so each is kept rather than collapsed
+    # into a single unlocated finding.
+    a = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR', 'location': '', 'desc': 'one'}
+    b = {'name': 'Eli', 'label': 'B1', 'severity': 'MAJOR', 'location': '', 'desc': 'two'}
+    c = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT', 'location': 'x.py:1', 'desc': 'loc'}
+    out = p.dedup_by_location([a, b, c])
+    assert len(out) == 3
+    assert {f['desc'] for f in out} == {'one', 'two', 'loc'}
+
+
 def test_actionable_findings_filters_severity():
     fs = [_f('A', 'A1', 'MAJOR', 'm'), _f(
         'B', 'B1', 'MINOR', 'n'), _f('C', 'C1', 'NIT', 'x')]

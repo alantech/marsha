@@ -278,16 +278,21 @@ def dedup_by_location(findings):
     # Merge findings that point at the same file:line — a common failure mode where several
     # reviewers flag the same spot with slightly different wording. For each location keep the
     # highest-severity finding, breaking ties on the more detailed (longer) description.
+    # Findings with no location are kept as-is (there is no location to merge them on).
     order = {'NIT': 0, 'MINOR': 1, 'MAJOR': 2}
     best = {}
+    unlocated = []
     for f in findings:
+        if not (f['location'] or '').strip():
+            unlocated.append(f)
+            continue
         key = _location_key(f['location'])
         rank = (order.get(f['severity'], 1), len(f['desc'].strip()))
         cur = best.get(key)
         if cur is None or rank > (order.get(cur['severity'], 1),
                                   len(cur['desc'].strip())):
             best[key] = f
-    return list(best.values())
+    return list(best.values()) + unlocated
 
 
 def format_findings(findings):

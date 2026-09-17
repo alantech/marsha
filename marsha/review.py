@@ -137,7 +137,10 @@ async def gh_pr_context(num, cwd=None):
     rc, out, err = await _gh('pr', 'view', str(num), '--json', fields, cwd=cwd)
     if rc != 0:
         raise Exception(f'`gh pr view {num}` failed: {err or out}')
-    data = json.loads(out)
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        raise Exception(f'`gh pr view {num}` returned unparseable JSON: {e}')
     parts = [f"Pull request #{num}: {data.get('title', '')}"]
     body = (data.get('body') or '').strip()
     if body:
@@ -369,7 +372,8 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
         return {}
     try:
         data = json.loads(out)
-    except ValueError:
+    except ValueError as e:
+        log(f'review: could not parse review threads for PR #{pr_num}: {e}')
         return {}
     pr = ((data.get('data') or {}).get('repository')
           or {}).get('pullRequest') or {}
