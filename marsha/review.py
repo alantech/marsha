@@ -461,9 +461,15 @@ def _reviewer_prior_block(number, prior):
     lines = [
         '\n# Your prior review findings on this PR\n'
         'In an earlier review pass you raised the findings below; the user replied to each. '
-        'For each one, read the user reply: if you still stand by the finding, RE-RAISE it '
-        f'using its EXACT label; if you concede it (the reply is right), do NOT re-raise it. '
-        f'Any genuinely new finding gets the next unused letter followed by {number}.\n']
+        'For each one, read the user reply and decide exactly one of two things:\n'
+        '- RE-RAISE it (reusing its EXACT label) ONLY if you still believe it is a real issue AND '
+        'you want to push back on the user\'s response.\n'
+        '- Otherwise CLOSE it — do NOT re-raise it — when either: (a) you VERIFY, using your tools, '
+        'that the code no longer has the issue (it has been fixed since you flagged it), or '
+        '(b) the user explicitly rejected it and you agree with their reasoning and do not want to '
+        'push back.\n'
+        f'A finding you close is simply left out of your findings list. Any genuinely new finding '
+        f'gets the next unused letter followed by {number}.\n']
     for f in prior:
         loc = f' {f["location"]}' if f['location'] else ''
         lines.append(f'- [{f["label"]}] {f["severity"]}{loc} - {f["desc"]}')

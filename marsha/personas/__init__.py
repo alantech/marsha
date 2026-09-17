@@ -29,7 +29,7 @@ EDITOR_FILE = {
 FINDINGS_CONTRACT = '''
 
 You are review #{review_number}. Label each finding with a letter (A, then B, then C, ... in the order you report it) immediately followed by your review number, {review_number}. So your first finding is labeled A{review_number}, your second B{review_number}, and so on.
-When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings: if you still stand by it, reuse its exact label; if you no longer stand by it (the push-back on it was right), do not re-raise it; and give any genuinely new finding the next unused letter followed by {review_number}.
+When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings. Re-raise it (reusing its exact label) only if you still believe it is a real issue and want to push back; otherwise close it — do not re-raise it — when you verify with your tools that the code no longer has the issue, or when the user rejected it and you agree and will not push back. Give any genuinely new finding the next unused letter followed by {review_number}.
 Report each finding on its own line, in exactly this form:
 <LETTER>{review_number} [MAJOR|MINOR|NIT] <location> - <one-line description>
 For example: A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
@@ -174,12 +174,19 @@ def _split_location(rest):
 
 def _position_label(review_number, used):
     # The first position-based label (A<n>, B<n>, ...) not already used, so a fallback label can
-    # never collide with a reused one.
+    # never collide with a reused one. Beyond the 26 single letters (a degenerate 27th+ finding
+    # from one reviewer) it extends to two letters (AA<n>, AB<n>, ...) so the label always stays
+    # alphabetic and unique instead of spilling onto non-letter characters.
     for n in range(26):
         cand = f'{chr(ord("A") + n)}{review_number}'
         if cand not in used:
             return cand
-    return f'{chr(ord("A") + len(used))}{review_number}'
+    for hi in range(26):
+        for lo in range(26):
+            cand = f'{chr(ord("A") + hi)}{chr(ord("A") + lo)}{review_number}'
+            if cand not in used:
+                return cand
+    raise ValueError(f'no available label for reviewer {review_number}')
 
 
 def parse_findings(text, name, review_number):
