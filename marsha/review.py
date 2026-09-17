@@ -345,6 +345,10 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
 # The label a posted finding leads with, e.g. "[A2]" in "**[A2] MAJOR**: ...". Only Marsha's
 # comments carry this; a prior thread is matched by it so a re-run can reply or resolve it.
 _POSTED_LABEL_RE = re.compile(r'^\*\*\[([A-Za-z]+\d+)\]')
+# A posted finding's full root body: "**[A2] MAJOR**: <description>" — the label and severity
+# are wrapped in bold, so a closing ** follows the severity.
+_POSTED_FINDING_RE = re.compile(
+    r'^\*\*\[([A-Za-z]+\d+)\]\s*([A-Z]+)\*\*\s*:\s*(.*)$')
 
 
 def _label_reviewer_number(label):
@@ -395,6 +399,77 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
             'line': root.get('line'),
         }
     return threads
+
+
+async def _prior_findings_by_reviewer(pr_num, cwd=None):
+    # Group this PR's prior Marsha review threads by the reviewer number that owns them, so each
+    # reviewer can be shown its OWN prior findings (plus the user's replies) and decide, per
+    # finding, whether to re-raise (reusing the exact label) or concede. Returns
+    # reviewer_number -> [ {label, severity, location, desc, replies} ].
+    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
+    if rc != 0 or not out.strip():
+        return {}
+    repo = json.loads(out).get('nameWithOwner', '')
+    owner, _, name = repo.partition('/')
+    if not owner or not name:
+        return {}
+    query = (
+        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
+        'reviewThreads(first: 100) { nodes { isResolved comments(first: 10) {'
+        'nodes { isMinimized path line body } } } } } } }' % (owner, name, pr_num))
+    rc, out, err = await _gh(
+        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
+    if rc != 0 or not out.strip():
+        return {}
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        log(f'review: could not parse prior findings for PR #{pr_num}: {e}')
+        return {}
+    nodes = (((data.get('data') or {}).get('repository')
+              or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+    by_number = {}
+    for node in (nodes.get('nodes') or []):
+        if node.get('isResolved'):
+            continue
+        comments = (node.get('comments') or {}).get('nodes') or []
+        if not comments:
+            continue
+        root = comments[0]
+        m = _POSTED_FINDING_RE.match((root.get('body') or '').strip())
+        if not m:
+            continue
+        label, severity, desc = m.group(
+            1).upper(), m.group(2), m.group(3).strip()
+        path, line = root.get('path'), root.get('line')
+        location = f'{path}:{line}' if path and line is not None else (
+            path or '')
+        replies = [
+            c.get('body', '') for c in comments[1:] if not c.get('isMinimized')]
+        by_number.setdefault(_label_reviewer_number(label), []).append({
+            'label': label, 'severity': severity, 'location': location,
+            'desc': desc, 'replies': replies,
+        })
+    return by_number
+
+
+def _reviewer_prior_block(number, prior):
+    # The per-reviewer prior-findings context: show this reviewer its OWN prior findings and the
+    # user's replies, and tell it to re-raise (reusing the exact label) only what it still stands
+    # by and to drop what it concedes — so a label tracks a concern across runs instead of a
+    # position.
+    lines = [
+        '\n# Your prior review findings on this PR\n'
+        'In an earlier review pass you raised the findings below; the user replied to each. '
+        'For each one, read the user reply: if you still stand by the finding, RE-RAISE it '
+        f'using its EXACT label; if you concede it (the reply is right), do NOT re-raise it. '
+        f'Any genuinely new finding gets the next unused letter followed by {number}.\n']
+    for f in prior:
+        loc = f' {f["location"]}' if f['location'] else ''
+        lines.append(f'- [{f["label"]}] {f["severity"]}{loc} - {f["desc"]}')
+        for r in f['replies']:
+            lines.append(f'    user: {r}')
+    return '\n'.join(lines)
 
 
 async def _resolve_thread(thread_id, cwd=None):
@@ -547,6 +622,16 @@ async def run_review(args):
         names = ', '.join(name for name, _, _ in reviewers)
         print(f'Reviewing against {base_name} with personas: {names}')
 
+    # Show each reviewer its OWN prior findings (labeled) plus the user's replies, so it reuses a
+    # label only for a concern it still stands by. A label then tracks a concern across runs, and
+    # post_review can reply on (or resolve) the right thread for it.
+    prior_block_by_number = {}
+    if args.pr is not None:
+        by_number = await _prior_findings_by_reviewer(args.pr, cwd)
+        prior_block_by_number = {
+            num: _reviewer_prior_block(num, prior)
+            for num, prior in by_number.items() if prior}
+
     # Review loop: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges
     # when the gate is quiet, the panel is clean, or the round budget is exhausted.
@@ -562,7 +647,8 @@ async def run_review(args):
         findings = await run_personas(
             reviewers, user_message, model, 'review',
             debug=args.debug, loop='review', guidance=guidance,
-            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS)
+            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
+            prior_block_by_number=prior_block_by_number)
         actionable = actionable_findings(findings, severities)
         if i == rounds or not actionable:
             break

@@ -695,3 +695,80 @@ def test_resolve_thread_posts_mutation():
     assert 'api' in sent['args'] and 'graphql' in sent['args']
     assert any('resolveReviewThread' in str(part) for part in sent['args'])
     assert any('PRRT_1' in str(part) for part in sent['args'])
+
+
+def test_prior_findings_by_reviewer_groups_by_number():
+    # Threads are grouped by the reviewer number in the label; resolved threads and unlabeled
+    # (human) comments are skipped, and replies are attached to their finding.
+    payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'nodes': [
+            {'id': 'T1', 'isResolved': False, 'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'a.py', 'line': 3,
+                 'body': '**[A1] MAJOR**: keep this'},
+                {'isMinimized': False, 'path': 'a.py', 'line': 3,
+                 'body': 'user: actually fixed it'},
+            ]}},
+            {'id': 'T2', 'isResolved': False, 'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'b.py', 'line': 5,
+                 'body': '**[B2] MINOR**: yours too'},
+            ]}},
+            {'id': 'T3', 'isResolved': True, 'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'c.py', 'line': 1,
+                 'body': '**[C2] MINOR**: already resolved'},
+            ]}},
+            {'id': 'T4', 'isResolved': False, 'comments': {'nodes': [
+                {'isMinimized': False, 'path': 'd.py', 'line': 1,
+                 'body': 'a human comment, no label'},
+            ]}},
+        ]}}}}})
+
+    async def fake_gh(*a, **k):
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        out = asyncio.run(review._prior_findings_by_reviewer(123))
+
+    assert set(out) == {1, 2}
+    assert [f['label'] for f in out[1]] == ['A1']
+    assert out[1][0]['replies'] == ['user: actually fixed it']
+    assert out[1][0]['location'] == 'a.py:3'
+    assert [f['label'] for f in out[2]] == ['B2']
+
+
+def test_reviewer_prior_block_format():
+    prior = [
+        {'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:3', 'desc': 'keep this',
+         'replies': ['user: actually fixed it']},
+        {'label': 'B1', 'severity': 'MINOR', 'location': '', 'desc': 'maybe not', 'replies': []},
+    ]
+    block = review._reviewer_prior_block(1, prior)
+    assert '# Your prior review findings' in block
+    assert '[A1] MAJOR a.py:3 - keep this' in block
+    assert 'user: actually fixed it' in block
+    assert '[B1] MINOR - maybe not' in block
+    assert 'EXACT label' in block
+
+
+def test_run_personas_appends_prior_block():
+    # The per-reviewer prior block is appended only to the reviewer its number is keyed under.
+    captured = []
+
+    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
+                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+        m = re.search(r'You are review #(\d+)', mapper.system)
+        captured.append((int(m.group(1)) if m else None, request))
+        return 'NO FINDINGS'
+
+    prior = {1: '\n# Your prior review findings on this PR\n- [A1] MAJOR a.py:3 - keep this'}
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1, system=a[0])):
+        asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1), ('Eli', 'body', 2)], 'base msg', 'm', 'review',
+            tool_ctx=tools.ToolContext(phase='review', workdir='.', notes=[]),
+            prior_block_by_number=prior))
+    by_num = dict(captured)
+    assert prior[1] in by_num[1]
+    assert 'Your prior review findings' not in by_num[2]

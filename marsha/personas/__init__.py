@@ -318,7 +318,7 @@ def prior_round_block(findings, preamble, label='implementor'):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
@@ -326,6 +326,9 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
     # set, enables the fake terminal for this reviewer (see marsha.tools); each reviewer gets a
     # fresh copy of its `notes` list so their scratchpads do not leak across reviewers.
     # `max_tool_rounds` bounds the tool loop (defaults to tools.MAX_TOOL_ROUNDS).
+    # `prior_block_by_number`, when set, maps a reviewer number to a block of that reviewer's OWN
+    # prior (labeled) findings + the user's replies, appended to that reviewer's message so it
+    # reuses a label only for a concern it still stands by.
     async def one(spec):
         name, body, review_number = spec
         system = body
@@ -339,15 +342,18 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
         if rctx is not None:
             system += tools.tool_instructions(rctx)
         label = f'{loop}:{name}' if loop else name
+        user = user_message
+        if prior_block_by_number and review_number in prior_block_by_number:
+            user += prior_block_by_number[review_number]
         try:
             mapper = get_mapper(
                 system, n_results=1, stats_stage=stats_stage, model=model, label=label)
             if rctx is not None:
                 text = await tools.run_with_tools(
-                    mapper, user_message, rctx,
+                    mapper, user, rctx,
                     debug=debug, max_rounds=max_tool_rounds or tools.MAX_TOOL_ROUNDS)
             else:
-                text = await mapper.run(user_message)
+                text = await mapper.run(user)
         except Exception as e:
             if debug:
                 print(f'[Personas] {name} failed: {e}')
