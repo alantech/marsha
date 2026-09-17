@@ -29,6 +29,8 @@ from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
 # large; bound both so a huge change cannot blow the reviewer's context budget or OOM a run.
+# 48k chars is roughly a few pages of PR context; 120k keeps a large-but-bounded diff without
+# dropping the whole change. Both are char counts, truncated before the reviewer ever sees them.
 REVIEW_CONTEXT_LIMIT = 48_000
 REVIEW_DIFF_LIMIT = 120_000
 # A reviewer probing the codebase with the git tool needs more rounds than a single-shot
@@ -226,7 +228,7 @@ def diff_new_lines(diff_text):
     touched = {}
     path = None
     new_lineno = 0
-    for raw in diff_text.split('\n'):
+    for raw in diff_text.splitlines():
         if raw.startswith('+++ '):
             path = raw[4:].strip()
             if path.startswith('b/'):
