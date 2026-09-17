@@ -819,6 +819,25 @@ def test_reviewer_prior_block_format():
     assert 'EXACT label' in block
 
 
+def test_closed_findings_block_lists_conceded():
+    # Prior findings not re-raised this pass (label absent from the raised set) are listed for the
+    # consolidator to drop; re-raised ones are not, and an empty input yields no block.
+    by_number = {
+        1: [
+            {'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:3',
+             'desc': 'missing type hint', 'replies': ['rejected']},
+            {'label': 'B1', 'severity': 'MINOR', 'location': 'b.py:9',
+             'desc': 'off-by-one', 'replies': []},
+        ],
+    }
+    block = review._closed_findings_block(by_number, {'A1'})
+    assert 'do NOT re-raise' in block
+    assert '[B1] MINOR b.py:9 - off-by-one' in block
+    assert '[A1]' not in block  # re-raised, so not in the closed list
+    assert review._closed_findings_block(by_number, {'A1', 'B1'}) == ''
+    assert review._closed_findings_block({}, {'A1'}) == ''
+
+
 def test_run_personas_appends_prior_block():
     # The per-reviewer prior block is appended only to the reviewer its number is keyed under.
     captured = []

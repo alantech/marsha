@@ -484,6 +484,27 @@ def _reviewer_prior_block(number, prior):
     return '\n'.join(lines)
 
 
+def _closed_findings_block(by_number, raised_labels):
+    # Findings conceded this pass — raised in a prior pass but not re-raised now, usually because
+    # the user rejected them or they were verified fixed. The panel may still independently
+    # re-raise the same concern under a fresh label; the consolidation pass drops those so a
+    # rejected concern does not resurface as a brand-new thread. Returns '' when nothing is closed.
+    closed = [f for prior in by_number.values() for f in prior
+              if f['label'] not in raised_labels]
+    if not closed:
+        return ''
+    lines = [
+        '\n# Concerns already closed — do NOT re-raise\n'
+        'The concerns below were raised in an earlier pass and then closed: the user rejected '
+        'them or they were verified fixed. A reviewer can independently re-raise the same concern '
+        'under a brand-new label. Drop any finding that is the same concern as one of these, even '
+        'if its label or wording differs; keep only genuinely new findings.\n']
+    for f in closed:
+        loc = f' {f["location"]}' if f['location'] else ''
+        lines.append(f'- [{f["label"]}] {f["severity"]}{loc} - {f["desc"]}')
+    return '\n'.join(lines)
+
+
 async def _resolve_thread(thread_id, cwd=None):
     # Close a review thread (mark it resolved) once the finding that opened it is conceded.
     if not thread_id:
@@ -695,6 +716,7 @@ async def run_review(args):
     # post_review can reply on (or resolve) the right thread for it.
     prior_block_by_number = {}
     prior_labels_by_number = {}
+    by_number = {}
     if args.pr is not None:
         by_number = await _prior_findings_by_reviewer(args.pr, cwd)
         for num, prior in by_number.items():
@@ -740,10 +762,16 @@ async def run_review(args):
         # Collapse same-location findings first (model-independent), run the semantic pass on the
         # smaller list, then collapse again in case the pass left same-location duplicates behind.
         actionable = dedup_by_location(actionable)
-        consolidated = await consolidate_findings(
+        context = (
             f'Consolidate findings from a code review of the checked-out branch '
-            f'against the default branch {base_name}.', actionable, model,
-            debug=args.debug)
+            f'against the default branch {base_name}.')
+        if args.pr is not None:
+            # Tell the consolidator which prior concerns were just closed so it drops any finding
+            # a reviewer re-raised under a fresh label instead of letting it open a new thread.
+            context += _closed_findings_block(
+                by_number, {f['label'] for f in actionable})
+        consolidated = await consolidate_findings(
+            context, actionable, model, debug=args.debug)
         actionable = actionable_findings(consolidated, severities)
         actionable = dedup_by_location(actionable)
     print(render_findings(actionable, base_name))
