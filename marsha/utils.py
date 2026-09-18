@@ -78,5 +78,12 @@ async def run_subprocess(stream: Process, timeout: float = 60.0, input: bytes = 
         except OSError:
             # Ignore 'no such process' error
             pass
+        # Reap the killed child and close its pipes so it does not linger as a zombie (or leak
+        # its transports) until garbage collection; ignore a follow-up failure if it is already
+        # gone.
+        try:
+            await stream.wait()
+        except Exception:
+            pass
         raise Exception('run_subprocess timeout...')
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
