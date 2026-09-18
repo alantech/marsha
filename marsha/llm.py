@@ -185,6 +185,7 @@ Reduce the list by doing ALL of the following:
 1. Drop any finding that is NOT a real, actionable defect. A real defect is a concrete, verified problem in the current code: a correctness or safety bug, a spec/oracle violation, or a change that measurably degrades quality, reliability, or performance. The SEVERITY label is only a reviewer's opinion, not a verdict, so judge the ACTUAL impact. Drop findings whose impact is nil or merely theoretical, including: a stylistic or readability preference; a robustness/scale concern with no realistic trigger (e.g. "only matters if there are more than N items", "could hide a transient error that callers already handle"); a micro-optimization with no evidence of real cost; or anything the surrounding code already handles.
 2. Drop any finding that is already resolved, superseded, or no longer needs to be acted on.
 3. When two or more findings make the same point, keep ONLY the single most detailed one and drop the rest. Preserve the exact [Name-Label] of the most detailed one.
+4. When two findings make contradictory claims about the same code, keep only the one grounded in the actual code and drop the other.
 Keep ONLY findings a developer would actually act on. When in doubt whether a finding changes anything real, drop it.
 You MUST preserve each kept finding's [Name-Label] exactly as it was given: do not rename, renumber, or invent labels. The reduced list may therefore skip some letter/number combinations.
 Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
