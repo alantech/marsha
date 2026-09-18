@@ -942,8 +942,8 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '
                    'format required, with no trailing command line.')
-        messages = messages + [
+        messages.extend([
             {'role': 'assistant', 'content': text},
             {'role': 'user', 'content': block},
-        ]
+        ])
     return last_text

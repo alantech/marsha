@@ -377,5 +377,6 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
     if is_local_backend():
         results = [await one(s) for s in reviewers]
     else:
-        results = await asyncio.gather(*[one(s) for s in reviewers])
+        # A generator (not a list) avoids the intermediate list of coroutines gather would build.
+        results = await asyncio.gather(*(one(s) for s in reviewers))
     return [f for sub in results for f in sub]
