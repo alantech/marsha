@@ -72,7 +72,7 @@ async def run_subprocess(stream: Process, timeout: float = 60.0, input: bytes = 
     stderr = ''
     try:
         stdout, stderr = await asyncio.wait_for(stream.communicate(input), timeout)
-    except asyncio.exceptions.TimeoutError:
+    except asyncio.exceptions.TimeoutError as e:
         try:
             stream.kill()
         except OSError:
@@ -85,5 +85,6 @@ async def run_subprocess(stream: Process, timeout: float = 60.0, input: bytes = 
             await stream.wait()
         except Exception:
             pass
-        raise Exception('run_subprocess timeout...')
+        # Chain the original TimeoutError so callers can tell a timeout apart from other errors.
+        raise Exception('run_subprocess timeout...') from e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))

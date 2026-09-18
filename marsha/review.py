@@ -697,11 +697,23 @@ async def _fetch_prior_body_findings(repo, pr_num, cwd=None):
     return found
 
 
-def _filter_duplicate_findings(findings, threads, body_findings):
-    # Drop a finding that re-raises a concern already raised in a prior pass -- a prior thread or a
-    # prior review-body finding -- matched by concern (file + description), not exact line. A
-    # finding that keeps the exact label of a prior thread is a deliberate re-raise that replies on
-    # that thread, so it is kept. Returns (kept, dropped_count).
+def _thread_settled(conv):
+    # A prior thread is settled (the user already weighed in) if it is resolved, or if it has any
+    # reply that is not a Marsha re-raise -- a human reply such as a rejection, a "fixed" note, or
+    # a "false positive" answer. Re-raising a settled thread is noise, so it is dropped.
+    if conv.get('is_resolved'):
+        return True
+    return any(not _POSTED_LABEL_RE.match((r or '').strip())
+               for r in (conv.get('replies') or []))
+
+
+def _filter_duplicate_findings(findings, threads, body_findings, settled_labels=None):
+    # Drop a finding that restates a concern already raised in a prior pass (a prior thread or a
+    # prior review-body finding), matched by concern (file + description) rather than exact line,
+    # or that re-raises a thread the user already settled. A finding that keeps the exact label of
+    # an OPEN prior thread is a deliberate re-raise that replies on that thread, so it is kept.
+    # Returns (kept, dropped_count).
+    settled = set(settled_labels or ())
     prior = [{'path': t.get('path'), 'desc': t.get('desc') or ''}
              for t in threads.values()]
     prior += [{'path': b.get('path'), 'desc': b.get('desc') or ''}
@@ -709,8 +721,13 @@ def _filter_duplicate_findings(findings, threads, body_findings):
     thread_labels = set(threads)
     kept, dropped = [], 0
     for f in findings:
+        if f['label'] in settled:
+            # Re-raising a concern the user already settled (rejected/fixed/resolved) is noise.
+            dropped += 1
+            continue
         if f['label'] in thread_labels:
-            kept.append(f)  # deliberate re-raise; it replies on its own thread
+            # A deliberate re-raise of an open thread replies on it, so keep it.
+            kept.append(f)
             continue
         if any(_same_concern(f, p) for p in prior):
             dropped += 1
@@ -740,11 +757,13 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
             f'prior thread')
     # Deterministic re-raise de-dup: drop a finding that restates a concern already raised in a
     # prior pass (a prior thread or a prior review body), matched by concern rather than exact
-    # line. This is the reliable complement to the LLM consolidation pass, which the model does not
-    # follow consistently.
+    # line, or that re-raises a thread the user already settled. This is the reliable complement to
+    # the LLM consolidation pass, which the model does not follow consistently.
     prior_body = await _fetch_prior_body_findings(repo, pr_num, cwd)
+    convs = await _prior_conversations(repo, pr_num, cwd)
+    settled = {c['label'] for c in convs if _thread_settled(c)}
     findings, dup_dropped = _filter_duplicate_findings(
-        findings, threads, prior_body)
+        findings, threads, prior_body, settled_labels=settled)
     if dup_dropped:
         log(f'review: dropped {dup_dropped} finding(s) that re-raised a prior concern')
     new_inline = []

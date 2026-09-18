@@ -609,6 +609,32 @@ def test_fetch_prior_body_findings_parses_marsha_bodies():
     assert out[1]['path'] == 'marsha/tools.py'
 
 
+def test_thread_settled_detects_user_reply_or_resolution():
+    # A thread is settled if resolved, or if it has any human reply (a Marsha re-raise leads with
+    # **[label] and does not count).
+    assert review._thread_settled({'is_resolved': True, 'replies': []})
+    assert review._thread_settled(
+        {'is_resolved': False, 'replies': ['Rejected. already handled']})
+    assert not review._thread_settled(
+        {'is_resolved': False, 'replies': ['**[B9] MINOR**: still a problem']})
+    assert not review._thread_settled({'is_resolved': False, 'replies': []})
+
+
+def test_filter_duplicate_drops_reraise_of_settled_thread():
+    # A re-raise that reuses the exact label of a thread the user already settled is dropped; an
+    # unrelated new finding is kept.
+    threads = {'B9': {'path': 'marsha/review.py', 'line': 169, 'desc': 'renumbering'}}
+    findings = [
+        {'label': 'B9', 'location': 'marsha/review.py:169',
+         'desc': 'renumbering a custom panel'},
+        {'label': 'A1', 'location': 'marsha/tools.py:5', 'desc': 'something new'},
+    ]
+    kept, dropped = review._filter_duplicate_findings(
+        findings, threads, [], settled_labels={'B9'})
+    assert dropped == 1
+    assert [f['label'] for f in kept] == ['A1']
+
+
 def test_post_review_maps_inline_and_body():
     diff = ('diff --git a/foo.py b/foo.py\n'
             '--- a/foo.py\n'
