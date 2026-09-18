@@ -671,6 +671,26 @@ def test_post_review_maps_inline_and_body():
     assert '**[B1] MINOR**' in payload['body']
 
 
+def test_post_review_all_clear_posts_note():
+    # A no-finding --post-review still posts a short all-clear note to the PR.
+    calls = {}
+
+    async def fake_gh(*a, **k):
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        calls['args'] = a
+        calls['input'] = k.get('input')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, [], ''))
+
+    assert 'repos/acme/widget/pulls/123/reviews' in calls['args']
+    payload = json.loads(calls['input'].decode('utf-8'))
+    assert payload['event'] == 'COMMENT'
+    assert 'no issues found' in payload['body']
+
+
 def test_post_review_replies_on_existing_thread():
     # A finding re-raised under a label that already has a thread is posted as a reply on that
     # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.

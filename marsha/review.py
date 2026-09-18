@@ -736,14 +736,29 @@ def _filter_duplicate_findings(findings, threads, body_findings, settled_labels=
     return kept, dropped
 
 
+async def _post_all_clear(repo, pr_num, cwd=None):
+    # A no-finding --post-review still posts a short all-clear note to the PR.
+    payload = json.dumps(
+        {'event': 'COMMENT', 'body': 'Marsha review — no issues found.'})
+    rc, out, err = await _gh(
+        'api', f'repos/{repo}/pulls/{pr_num}/reviews',
+        '--method', 'POST', '--input', '-',
+        cwd=cwd, input=payload.encode('utf-8'))
+    if rc != 0:
+        raise Exception(
+            f'Failed to post the all-clear to PR #{pr_num}: {err or out}')
+
+
 async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None):
-    if not findings:
-        print('No findings to post.')
-        return
-    touched = diff_new_lines(diff_text)
     repo = await _repo_name(cwd)
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
+    if not findings:
+        # An all-clear --post-review still posts a short note to the PR.
+        await _post_all_clear(repo, pr_num, cwd)
+        print(f'All clear: posted a no-issues note to PR #{pr_num}.')
+        return
+    touched = diff_new_lines(diff_text)
     # Prior threads keyed by the [label] of their root finding. A finding re-raised under a label
     # that already has a thread replies there (the reviewer still stands by it) rather than
     # opening a new top-level comment, so the PR reads as one thread per point.
