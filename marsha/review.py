@@ -314,6 +314,18 @@ def build_review_message(stat_text, base_name, base_ref, context_blocks):
     return '\n\n'.join(parts)
 
 
+def order_findings(findings):
+    # Order the final set by severity, then by location.
+    order = {'MAJOR': 0, 'MINOR': 1, 'NIT': 2}
+
+    def key(f):
+        path, line = parse_location(f.get('location') or '')
+        return (order.get(f['severity'], 3), path or '',
+                -1 if line is None else line)
+
+    return sorted(findings, key=key)
+
+
 def render_findings(findings, base_ref):
     if not findings:
         return f'No findings against {base_ref}.'
@@ -973,6 +985,8 @@ async def run_review(args):
             context, actionable, model, debug=args.debug, allow_empty=True)
         actionable = dedup_findings(consolidated)
         actionable = dedup_by_location(actionable)
+    # Order the final set (severity, then location) before printing or posting.
+    actionable = order_findings(actionable)
     print(render_findings(actionable, base_name))
 
     if args.post_review:

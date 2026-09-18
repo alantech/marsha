@@ -135,6 +135,22 @@ def test_render_findings():
     assert '(Sage)' in out
 
 
+def test_order_findings_by_severity_then_location():
+    # The final set leads with the most severe, then is ordered by location within a severity.
+    fs = [
+        {'name': 'E', 'label': 'E1', 'severity': 'NIT', 'location': 'b.py:2', 'desc': 'n'},
+        {'name': 'B', 'label': 'B1', 'severity': 'MAJOR', 'location': 'z.py:9', 'desc': 'm'},
+        {'name': 'C', 'label': 'C1', 'severity': 'MINOR', 'location': 'a.py:1', 'desc': 'i'},
+        {'name': 'D', 'label': 'D1', 'severity': 'MAJOR', 'location': 'a.py:5', 'desc': 'm2'},
+        {'name': 'F', 'label': 'F1', 'severity': 'MINOR', 'location': 'a.py:10', 'desc': 'i2'},
+    ]
+    out = review.order_findings(fs)
+    assert [(f['severity'], f['location']) for f in out] == [
+        ('MAJOR', 'a.py:5'), ('MAJOR', 'z.py:9'),
+        ('MINOR', 'a.py:1'), ('MINOR', 'a.py:10'),
+        ('NIT', 'b.py:2')]
+
+
 # --- the git tool: read-only allowlist ---------------------------------------
 
 
