@@ -49,7 +49,11 @@ def personas_dir():
 
 
 def _is_path(entry):
-    return entry.startswith('/') or entry.startswith('.') or entry.startswith('~')
+    # A persona entry is a file path (not a built-in name) when it is absolute, home-relative
+    # (~), dot-relative (./), or contains a path separator in POSIX or Windows style, so the
+    # check is portable to Windows (backslashes and drive-letter paths) as well as POSIX.
+    return (os.path.isabs(entry) or entry.startswith('~')
+            or entry.startswith('.') or '/' in entry or '\\' in entry)
 
 
 def load_persona(path):
@@ -94,7 +98,7 @@ def reset_registry():
 
 
 def resolve_persona(entry, registry):
-    # A path (leading /, ., or ~) loads that file directly; otherwise it is a built-in name.
+    # A file path loads that persona file directly; otherwise the entry is a built-in name.
     entry = entry.strip()
     if not entry:
         raise Exception('Empty persona entry')

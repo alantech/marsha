@@ -49,6 +49,16 @@ def test_resolve_persona_unknown_raises():
         pass
 
 
+def test_is_path_detects_posix_and_windows_paths():
+    # Both POSIX and Windows path styles are recognized as paths; built-in names are not.
+    paths = ['/abs/p.md', './rel/p.md', '~/home/p.md', 'rel/p.md',
+             'C:\\abs\\p.md', '.\\rel\\p.md', 'rel\\p.md']
+    for entry in paths:
+        assert p._is_path(entry), entry
+    for name in ['ada', 'sage', 'my-persona']:
+        assert not p._is_path(name), name
+
+
 def test_resolve_loop_reviewers_default():
     reg = p.build_registry()
     specs = p.resolve_loop_reviewers('oracle', None, reg)
