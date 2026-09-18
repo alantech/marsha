@@ -820,21 +820,17 @@ def test_reviewer_prior_block_format():
 
 
 def test_closed_findings_block_lists_conceded():
-    # Prior findings not re-raised this pass (label absent from the raised set) are listed for the
+    # Every prior thread (resolved and unresolved) not re-raised this pass is listed for the
     # consolidator to drop; re-raised ones are not, and an empty input yields no block.
-    by_number = {
-        1: [
-            {'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:3',
-             'desc': 'missing type hint', 'replies': ['rejected']},
-            {'label': 'B1', 'severity': 'MINOR', 'location': 'b.py:9',
-             'desc': 'off-by-one', 'replies': []},
-        ],
+    threads = {
+        'A1': {'path': 'a.py', 'line': 3, 'desc': 'missing type hint'},
+        'B1': {'path': 'b.py', 'line': 9, 'desc': 'off-by-one'},
     }
-    block = review._closed_findings_block(by_number, {'A1'})
+    block = review._closed_findings_block(threads, {'A1'})
     assert 'do NOT re-raise' in block
-    assert '[B1] MINOR b.py:9 - off-by-one' in block
+    assert '[B1] b.py:9 - off-by-one' in block
     assert '[A1]' not in block  # re-raised, so not in the closed list
-    assert review._closed_findings_block(by_number, {'A1', 'B1'}) == ''
+    assert review._closed_findings_block(threads, {'A1', 'B1'}) == ''
     assert review._closed_findings_block({}, {'A1'}) == ''
 
 

@@ -21,10 +21,9 @@ from marsha.config import resolve_model
 from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
-from marsha.personas import (_position_label, actionable_findings, build_registry,
-                             dedup_by_location, format_findings, load_editor,
-                             parse_severities, prior_round_block, resolve_loop_reviewers,
-                             run_personas)
+from marsha.personas import (actionable_findings, build_registry, dedup_by_location,
+                             format_findings, load_editor, parse_severities, position_label,
+                             prior_round_block, resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
@@ -63,10 +62,10 @@ async def _run(cmd, *args, cwd=None, timeout=60, input=None):
         proc = await asyncio.create_subprocess_exec(
             cmd, *args, cwd=cwd, stdin=stdin,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        # A missing git/gh/linear binary should read as a clear setup error, not a raw
-        # FileNotFoundError traceback.
-        raise Exception(f'`{cmd}` is not installed or not on PATH.') from None
+    except FileNotFoundError as e:
+        # A missing git/gh/linear binary reads as a clear setup error; chaining the original
+        # (from e) keeps its type and traceback in __cause__ for callers that inspect it.
+        raise Exception(f'`{cmd}` is not installed or not on PATH.') from e
     except OSError as e:
         raise Exception(f'could not run `{cmd}`: {e}') from e
     out, err = await run_subprocess(proc, timeout, input=input)
@@ -493,24 +492,30 @@ def _reviewer_prior_block(number, prior):
     return '\n'.join(lines)
 
 
-def _closed_findings_block(by_number, raised_labels):
-    # Findings conceded this pass — raised in a prior pass but not re-raised now, usually because
-    # the user rejected them or they were verified fixed. The panel may still independently
-    # re-raise the same concern under a fresh label; the consolidation pass drops those so a
-    # rejected concern does not resurface as a brand-new thread. Returns '' when nothing is closed.
-    closed = [f for prior in by_number.values() for f in prior
-              if f['label'] not in raised_labels]
+def _closed_findings_block(threads, raised_labels):
+    # Every prior Marsha thread (resolved and unresolved) whose label is not re-raised this pass is
+    # an already-adjudicated concern. The panel can independently re-find the same concern under a
+    # brand-new label, so the consolidation pass is told to drop any finding that matches one of
+    # these. Covering RESOLVED threads too (not just this pass's concessions) is what breaks the
+    # re-find treadmill: a concern closed in an earlier pass no longer resurfaces as a new thread.
+    closed = [(label, th) for label, th in threads.items()
+              if label not in raised_labels]
     if not closed:
         return ''
     lines = [
         '\n# Concerns already closed — do NOT re-raise\n'
-        'The concerns below were raised in an earlier pass and then closed: the user rejected '
-        'them or they were verified fixed. A reviewer can independently re-raise the same concern '
-        'under a brand-new label. Drop any finding that is the same concern as one of these, even '
-        'if its label or wording differs; keep only genuinely new findings.\n']
-    for f in closed:
-        loc = f' {f["location"]}' if f['location'] else ''
-        lines.append(f'- [{f["label"]}] {f["severity"]}{loc} - {f["desc"]}')
+        'The concerns below were raised in earlier review passes and are already closed (the user '
+        'rejected them or they were verified fixed). A reviewer can independently re-find the same '
+        'concern under a brand-new label. Drop any finding that is the same concern as one of '
+        'these, even if its label or wording differs; keep only genuinely new findings.\n']
+    for label, th in closed:
+        path, line = th.get('path'), th.get('line')
+        if path and line is not None:
+            location = f'{path}:{line}'
+        else:
+            location = path or ''
+        loc = f' {location}' if location else ''
+        lines.append(f'- [{label}]{loc} - {th.get("desc") or ""}')
     return '\n'.join(lines)
 
 
@@ -569,7 +574,7 @@ def _verify_finding_labels(findings, threads):
         collides = (prior is not None and not _finding_matches_thread(f, prior)) \
             or (f['label'] in used)
         if collides:
-            f['label'] = _position_label(num, prior_labels | used)
+            f['label'] = position_label(num, prior_labels | used)
             reassigned += 1
         used.add(f['label'])
     return reassigned
@@ -775,10 +780,16 @@ async def run_review(args):
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
         if args.pr is not None:
-            # Tell the consolidator which prior concerns were just closed so it drops any finding
-            # a reviewer re-raised under a fresh label instead of letting it open a new thread.
+            # Tell the consolidator about every already-closed concern — resolved threads included,
+            # not just this pass's concessions — so a reviewer re-finding one under a fresh label is
+            # dropped instead of opening a new thread. That is what breaks the re-find treadmill.
+            rc, out, _ = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
+            repo = ''
+            if rc == 0 and out.strip():
+                repo = json.loads(out).get('nameWithOwner', '')
+            threads = await _fetch_review_threads(repo, args.pr, cwd) if repo else {}
             context += _closed_findings_block(
-                by_number, {f['label'] for f in actionable})
+                threads, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
             context, actionable, model, debug=args.debug)
         actionable = actionable_findings(consolidated, severities)

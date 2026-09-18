@@ -194,9 +194,9 @@ def test_position_label_extends_past_z():
     # After the 26 single letters are used, the fallback extends to two letters (AA<n>...) rather
     # than spilling onto non-alphabetic characters.
     used = {f'{chr(ord("A") + n)}5' for n in range(26)}
-    assert p._position_label(5, used) == 'AA5'
+    assert p.position_label(5, used) == 'AA5'
     used.add('AA5')
-    assert p._position_label(5, used) == 'AB5'
+    assert p.position_label(5, used) == 'AB5'
 
 
 def test_actionable_findings_filters_severity():

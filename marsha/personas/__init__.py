@@ -172,7 +172,7 @@ def _split_location(rest):
     return '', rest
 
 
-def _position_label(review_number, used):
+def position_label(review_number, used):
     # The first position-based label (A<n>, B<n>, ...) not already used, so a fallback label can
     # never collide with a reused one. Beyond the 26 single letters (a degenerate 27th+ finding
     # from one reviewer) it extends to two letters (AA<n>, AB<n>, ...) so the label always stays
@@ -214,7 +214,7 @@ def parse_findings(text, name, review_number, prior_labels=None):
         if own_label.fullmatch(written) and written not in used:
             label = written
         else:
-            label = _position_label(review_number, used | prior)
+            label = position_label(review_number, used | prior)
         used.add(label)
         findings.append({
             'name': name,
