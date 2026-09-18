@@ -59,7 +59,7 @@ def repo(tmp_path, monkeypatch):
 
 def _args(**kw):
     base = dict(pr=None, linear=None, post_review=False, personas=None,
-                review_rounds=0, severity='major,minor,nit', target='python',
+                review_rounds=0, target='python',
                 target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
     base.update(kw)

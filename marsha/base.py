@@ -104,9 +104,6 @@ review_parser.add_argument('--review-rounds', type=int, default=1,
 review_parser.add_argument('--personas', default=None,
                            help='Comma-separated review personas (a built-in name or a '
                                 'path). Default: all built-in impl reviewers.')
-review_parser.add_argument('--severity', default='major,minor,nit',
-                           help='Comma-separated finding severities to report '
-                                '(major,minor,nit). Default: all.')
 review_parser.add_argument('--target', default='python',
                            help='Target language, for reviewer guidance (default: python). '
                                 'Its toolchain need not be installed.')
@@ -149,8 +146,7 @@ def print_help(topic):
         '\n'
         '  review    Review a branch diff against the default branch with the\n'
         '            review personas. Example: marsha review --pr 123\n'
-        '            Key flags: --pr, --linear, --post-review, --personas,\n'
-        '            --severity.\n'
+        '            Key flags: --pr, --linear, --post-review, --personas.\n'
         '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'

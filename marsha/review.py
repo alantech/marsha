@@ -21,8 +21,8 @@ from marsha.config import resolve_model
 from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
-from marsha.personas import (actionable_findings, build_registry, dedup_by_location,
-                             format_findings, load_editor, parse_severities, position_label,
+from marsha.personas import (build_registry, dedup_by_location, dedup_findings,
+                             format_findings, load_editor, position_label,
                              prior_round_block, resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
@@ -883,7 +883,6 @@ async def run_review(args):
 
     model = resolve_model()
     guidance = backends.current().persona_guidance()
-    severities = parse_severities(args.severity)
     tool_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
     if args.debug:
         names = ', '.join(name for name, _, _ in reviewers)
@@ -921,7 +920,7 @@ async def run_review(args):
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number)
-        actionable = actionable_findings(findings, severities)
+        actionable = dedup_findings(findings)
         if i == rounds or not actionable:
             break
         preamble = await conventions_gate(
@@ -939,6 +938,10 @@ async def run_review(args):
     if actionable:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
         # smaller list, then collapse again in case the pass left same-location duplicates behind.
+        # The semantic pass also drops findings that are not real defects (style preferences,
+        # theoretical scale/robustness, micro-optimizations), so a change with no real issue posts
+        # nothing: allow_empty lets it reduce the list to zero, which a budget-driven compaction
+        # must never do.
         actionable = dedup_by_location(actionable)
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
@@ -952,8 +955,8 @@ async def run_review(args):
             context += _prior_conversations_block(
                 convs, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
-            context, actionable, model, debug=args.debug)
-        actionable = actionable_findings(consolidated, severities)
+            context, actionable, model, debug=args.debug, allow_empty=True)
+        actionable = dedup_findings(consolidated)
         actionable = dedup_by_location(actionable)
     print(render_findings(actionable, base_name))
 
