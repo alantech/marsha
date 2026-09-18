@@ -34,7 +34,9 @@ Report each finding on its own line, in exactly this form:
 <LETTER>{review_number} [MAJOR|MINOR|NIT] <location> - <one-line description>
 For example: A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
 Severity meanings: MAJOR = violates the spec or oracle contract, or would let a wrong artifact pass; MINOR = degrades quality but not correctness; NIT = a cheap style fix.
-If the artifact is fully clean from your perspective, respond with exactly: NO FINDINGS
+Report ONLY findings about the CURRENT code that you have verified with the git tool. Do not report a concern an earlier review already raised and that has since been fixed, or that the user rejected: those are settled, and re-raising them is noise, not a finding.
+A finding must be a concrete, actionable problem in the current code. Do NOT comment on or evaluate a prior fix, ask the user to confirm or verify anything, or report a mere observation that is not a problem you can point at in the code. None of those are findings.
+If you have no new, verified finding, respond with exactly: NO FINDINGS
 Do not restate your own name. Do not add any prose outside the findings.
 '''
 

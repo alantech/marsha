@@ -413,6 +413,50 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
     return threads
 
 
+async def _prior_conversations(repo, pr_num, cwd=None):
+    # Every prior Marsha thread as a full conversation — the finding, the replies, and whether it
+    # was resolved — so the consolidation pass can see a concern's whole history and drop a finding
+    # that re-opens an already-settled conversation. Returns
+    # [ {label, location, desc, replies, is_resolved} ] (resolved and unresolved alike).
+    owner, _, name = repo.partition('/')
+    if not owner or not name:
+        return []
+    query = (
+        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
+        'reviewThreads(first: 100) { nodes { isResolved comments(first: 8) {'
+        'nodes { path line body } } } } } } }' % (owner, name, pr_num))
+    rc, out, err = await _gh(
+        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
+    if rc != 0 or not out.strip():
+        return []
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return []
+    nodes = (((data.get('data') or {}).get('repository')
+              or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+    convs = []
+    for node in (nodes.get('nodes') or []):
+        comments = (node.get('comments') or {}).get('nodes') or []
+        if not comments:
+            continue
+        root = comments[0]
+        m = _POSTED_FINDING_RE.match((root.get('body') or '').strip())
+        if not m:
+            continue
+        path, line = root.get('path'), root.get('line')
+        if path and line is not None:
+            location = f'{path}:{line}'
+        else:
+            location = path or ''
+        replies = [c.get('body', '') for c in comments[1:]]
+        convs.append({
+            'label': m.group(1).upper(), 'location': location,
+            'desc': m.group(3).strip(), 'replies': replies,
+            'is_resolved': bool(node.get('isResolved'))})
+    return convs
+
+
 async def _prior_findings_by_reviewer(pr_num, cwd=None):
     # Group this PR's prior Marsha review threads by the reviewer number that owns them, so each
     # reviewer can be shown its OWN prior findings (plus the user's replies) and decide, per
@@ -492,30 +536,28 @@ def _reviewer_prior_block(number, prior):
     return '\n'.join(lines)
 
 
-def _closed_findings_block(threads, raised_labels):
-    # Every prior Marsha thread (resolved and unresolved) whose label is not re-raised this pass is
-    # an already-adjudicated concern. The panel can independently re-find the same concern under a
-    # brand-new label, so the consolidation pass is told to drop any finding that matches one of
-    # these. Covering RESOLVED threads too (not just this pass's concessions) is what breaks the
-    # re-find treadmill: a concern closed in an earlier pass no longer resurfaces as a new thread.
-    closed = [(label, th) for label, th in threads.items()
-              if label not in raised_labels]
+def _prior_conversations_block(convs, raised_labels):
+    # The full history of prior Marsha threads (finding + replies + resolution) that are not
+    # re-raised this pass, handed to the consolidation pass. With the conversation in front of it,
+    # the pass can drop a finding that re-opens an already-settled conversation (same concern under
+    # a new label) rather than letting it surface as a fresh thread — the fix for the re-find
+    # treadmill. Returns '' when there is no prior history.
+    closed = [c for c in convs if c['label'] not in raised_labels]
     if not closed:
         return ''
     lines = [
-        '\n# Concerns already closed — do NOT re-raise\n'
-        'The concerns below were raised in earlier review passes and are already closed (the user '
-        'rejected them or they were verified fixed). A reviewer can independently re-find the same '
-        'concern under a brand-new label. Drop any finding that is the same concern as one of '
-        'these, even if its label or wording differs; keep only genuinely new findings.\n']
-    for label, th in closed:
-        path, line = th.get('path'), th.get('line')
-        if path and line is not None:
-            location = f'{path}:{line}'
-        else:
-            location = path or ''
-        loc = f' {location}' if location else ''
-        lines.append(f'- [{label}]{loc} - {th.get("desc") or ""}')
+        '\n# Prior review conversations (already settled) — do NOT re-open\n'
+        'Below are conversations from earlier review passes: each original finding, what the user '
+        'replied, and whether the thread was resolved. A reviewer may independently re-find the '
+        'same concern under a brand-new label. Drop any finding that re-opens one of these '
+        'conversations — i.e. it is the same concern as an original finding below, even if its '
+        'label or wording differs. Keep only genuinely new findings.\n']
+    for c in closed:
+        loc = f' {c["location"]}' if c['location'] else ''
+        status = 'resolved' if c['is_resolved'] else 'open'
+        lines.append(f'- [{c["label"]}]{loc} ({status}) - {c["desc"]}')
+        for r in c['replies']:
+            lines.append(f'    user: {r}')
     return '\n'.join(lines)
 
 
@@ -780,16 +822,16 @@ async def run_review(args):
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
         if args.pr is not None:
-            # Tell the consolidator about every already-closed concern — resolved threads included,
-            # not just this pass's concessions — so a reviewer re-finding one under a fresh label is
-            # dropped instead of opening a new thread. That is what breaks the re-find treadmill.
+            # Hand the consolidator the FULL prior conversation history (findings + replies +
+            # resolution) so it can drop a finding that re-opens an already-settled conversation,
+            # even under a fresh label. That is what breaks the re-find treadmill.
             rc, out, _ = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
             repo = ''
             if rc == 0 and out.strip():
                 repo = json.loads(out).get('nameWithOwner', '')
-            threads = await _fetch_review_threads(repo, args.pr, cwd) if repo else {}
-            context += _closed_findings_block(
-                threads, {f['label'] for f in actionable})
+            convs = await _prior_conversations(repo, args.pr, cwd) if repo else []
+            context += _prior_conversations_block(
+                convs, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
             context, actionable, model, debug=args.debug)
         actionable = actionable_findings(consolidated, severities)

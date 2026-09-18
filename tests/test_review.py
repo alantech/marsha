@@ -819,19 +819,21 @@ def test_reviewer_prior_block_format():
     assert 'EXACT label' in block
 
 
-def test_closed_findings_block_lists_conceded():
-    # Every prior thread (resolved and unresolved) not re-raised this pass is listed for the
-    # consolidator to drop; re-raised ones are not, and an empty input yields no block.
-    threads = {
-        'A1': {'path': 'a.py', 'line': 3, 'desc': 'missing type hint'},
-        'B1': {'path': 'b.py', 'line': 9, 'desc': 'off-by-one'},
-    }
-    block = review._closed_findings_block(threads, {'A1'})
-    assert 'do NOT re-raise' in block
-    assert '[B1] b.py:9 - off-by-one' in block
-    assert '[A1]' not in block  # re-raised, so not in the closed list
-    assert review._closed_findings_block(threads, {'A1', 'B1'}) == ''
-    assert review._closed_findings_block({}, {'A1'}) == ''
+def test_prior_conversations_block_lists_settled():
+    # Every prior conversation not re-raised this pass is listed (with its replies + status) for
+    # the consolidator to drop; re-raised ones are not, and an empty input yields no block.
+    convs = [
+        {'label': 'A1', 'location': 'a.py:3', 'desc': 'missing type hint',
+         'replies': ['Rejected. out of scope.'], 'is_resolved': True},
+        {'label': 'B1', 'location': 'b.py:9', 'desc': 'off-by-one',
+         'replies': [], 'is_resolved': False},
+    ]
+    block = review._prior_conversations_block(convs, {'A1'})
+    assert 'do NOT re-open' in block
+    assert '[B1] b.py:9 (open) - off-by-one' in block
+    assert '[A1]' not in block  # re-raised, so not in the list
+    assert review._prior_conversations_block(convs, {'A1', 'B1'}) == ''
+    assert review._prior_conversations_block([], {'A1'}) == ''
 
 
 def test_run_personas_appends_prior_block():
