@@ -82,6 +82,28 @@ async def _gh(*args, cwd=None, timeout=120, input=None):
     return (rc, out.strip(), err.strip())
 
 
+# Resolved once per cwd and cached: several helpers each need the repo's owner/name, and the CLI
+# resolves it for a single repo, so this avoids the redundant `gh repo view` subprocess calls.
+_repo_name_cache = {}
+
+
+async def _repo_name(cwd):
+    # The current repository's `owner/name`, resolved once per cwd (only a successful result is
+    # cached, so a transient failure is retried on the next call). Returns '' if unresolvable.
+    if cwd in _repo_name_cache:
+        return _repo_name_cache[cwd]
+    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
+    repo = ''
+    if rc == 0 and out.strip():
+        try:
+            repo = json.loads(out).get('nameWithOwner', '')
+        except ValueError:
+            repo = ''
+    if repo:
+        _repo_name_cache[cwd] = repo
+    return repo
+
+
 async def default_branch(cwd=None):
     # (name, ref) of the repository default branch, e.g. ('main', 'origin/main').
     rc, out, _ = await _git(
@@ -167,10 +189,7 @@ async def gh_pr_context(num, cwd=None):
     # Inline review comments (and their replies), fetched via GraphQL reviewThreads so each
     # comment's isMinimized flag is available (the REST `pulls/comments` collection does not
     # expose it): a hidden inline comment is skipped for the same reason as above.
-    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
-    repo = ''
-    if rc == 0 and out.strip():
-        repo = json.loads(out).get('nameWithOwner', '')
+    repo = await _repo_name(cwd)
     owner, _, name = repo.partition('/')
     if owner and name:
         query = (
@@ -462,10 +481,7 @@ async def _prior_findings_by_reviewer(pr_num, cwd=None):
     # reviewer can be shown its OWN prior findings (plus the user's replies) and decide, per
     # finding, whether to re-raise (reusing the exact label) or concede. Returns
     # reviewer_number -> [ {label, severity, location, desc, replies} ].
-    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
-    if rc != 0 or not out.strip():
-        return {}
-    repo = json.loads(out).get('nameWithOwner', '')
+    repo = await _repo_name(cwd)
     owner, _, name = repo.partition('/')
     if not owner or not name:
         return {}
@@ -627,10 +643,7 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         print('No findings to post.')
         return
     touched = diff_new_lines(diff_text)
-    rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
-    if rc != 0:
-        raise Exception(f'Could not resolve the repository: {err or out}')
-    repo = json.loads(out).get('nameWithOwner', '')
+    repo = await _repo_name(cwd)
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
     # Prior threads keyed by the [label] of their root finding. A finding re-raised under a label
@@ -825,10 +838,7 @@ async def run_review(args):
             # Hand the consolidator the FULL prior conversation history (findings + replies +
             # resolution) so it can drop a finding that re-opens an already-settled conversation,
             # even under a fresh label. That is what breaks the re-find treadmill.
-            rc, out, _ = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
-            repo = ''
-            if rc == 0 and out.strip():
-                repo = json.loads(out).get('nameWithOwner', '')
+            repo = await _repo_name(cwd)
             convs = await _prior_conversations(repo, args.pr, cwd) if repo else []
             context += _prior_conversations_block(
                 convs, {f['label'] for f in actionable})

@@ -23,6 +23,15 @@ from marsha import review
 from marsha import tools
 
 
+@pytest.fixture(autouse=True)
+def _clear_repo_name_cache():
+    # `_repo_name` caches the `gh repo view` result per cwd; reset it so each test starts with a
+    # cold cache (a warm cache would leak one test's repo into the next).
+    review._repo_name_cache.clear()
+    yield
+    review._repo_name_cache.clear()
+
+
 def _git(cwd, *args):
     subprocess.run(['git', *args], cwd=cwd, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -517,6 +526,33 @@ def test_gh_pr_context_skips_hidden_comments():
     assert 'hidden issue comment' not in out
     assert 'visible inline' in out
     assert 'hidden inline' not in out
+
+
+def test_repo_name_is_cached_per_cwd():
+    # `_repo_name` resolves the repo once per cwd and caches it, so the several helpers that each
+    # need the owner/name don't each shell out to `gh repo view` in the same run.
+    calls = {'n': 0}
+
+    async def fake_gh(*a, **k):
+        calls['n'] += 1
+        return (0, '{"nameWithOwner": "acme/widget"}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        assert asyncio.run(review._repo_name(None)) == 'acme/widget'
+        assert asyncio.run(review._repo_name(None)) == 'acme/widget'
+    assert calls['n'] == 1  # the second call is served from the cache
+
+
+def test_repo_name_does_not_cache_failure():
+    # A failed resolution is not cached, so a later call retries instead of reusing an empty name.
+    results = iter([(1, '', 'boom'), (0, '{"nameWithOwner": "acme/widget"}', '')])
+
+    async def fake_gh(*a, **k):
+        return next(results)
+
+    with patch.object(review, '_gh', new=fake_gh):
+        assert asyncio.run(review._repo_name(None)) == ''
+        assert asyncio.run(review._repo_name(None)) == 'acme/widget'
 
 
 def test_post_review_maps_inline_and_body():
