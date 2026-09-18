@@ -14,6 +14,7 @@ from marsha import log
 from marsha.llm import generate_code, review_and_fix
 from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
+from marsha.review import run_review
 from marsha.stats import stats
 from marsha.utils import read_file, copy_file, copy_tree, prettify_time_delta, write_composed
 
@@ -83,13 +84,50 @@ help_parser = sub.add_parser(
 help_parser.add_argument('topic', nargs='?', default=None,
                          help='Subcommand to describe (e.g. compile). '
                               'Omit for the overview.')
+review_parser = sub.add_parser(
+    'review',
+    help='Review a branch diff against the default branch with the review personas.')
+review_parser.add_argument('--pr', type=int, default=None,
+                           help='GitHub PR number to review (needs the gh CLI). '
+                                'Checks the PR out; the working tree must be clean.')
+review_parser.add_argument('--linear', default=None,
+                           help='Linear ticket name whose requirements seed the review '
+                                '(needs the linear CLI).')
+review_parser.add_argument('--post-review', action='store_true',
+                           help='Post the findings to the PR as an inline review '
+                                '(requires --pr).')
+review_parser.add_argument('--review-rounds', type=int, default=1,
+                           help='Conventions-feedback rounds after the initial review: '
+                                'the conventions gate rebuts findings that violate a real '
+                                'convention, and the panel revises with the rebuttal. '
+                                '0 disables the gate. Default: 1.')
+review_parser.add_argument('--personas', default=None,
+                           help='Comma-separated review personas (a built-in name or a '
+                                'path). Default: all built-in impl reviewers.')
+review_parser.add_argument('--target', default='python',
+                           help='Target language, for reviewer guidance (default: python). '
+                                'Its toolchain need not be installed.')
+review_parser.add_argument('--target-version', default=None,
+                           help='Target language version (for guidance).')
+review_parser.add_argument('-d', '--debug', action='store_true',
+                           help='Turn on debug logging')
+review_parser.add_argument('--trace', action='store_true',
+                           help='Live progress trace to stderr. Implies -d.')
+review_parser.add_argument('--trace-full', action='store_true',
+                           help='As --trace, but also dump full prompts/responses.')
+review_parser.add_argument('--api-base',
+                           help='OpenAI-compatible API base URL for the LLM.')
+review_parser.add_argument('--model',
+                           help='Model to use for the review.')
+review_parser.add_argument('--provider', choices=['openai', 'anthropic'],
+                           help='LLM provider: openai (default) or anthropic (Claude).')
 
 
 def _normalize_argv(argv):
     # The deprecated bare form `marsha <source> [flags]` maps onto
     # `marsha compile <source> [flags]`. `compile`/`help` are real
     # subcommands; a top-level -h/--help shows the subcommand overview.
-    if not argv or argv[0] in ('compile', 'help', '-h', '--help'):
+    if not argv or argv[0] in ('compile', 'help', 'review', '-h', '--help'):
         return argv, False
     return ['compile'] + argv, True
 
@@ -106,6 +144,10 @@ def print_help(topic):
         '            Key flags: -t/--target, -a/--attempts, --optimize,\n'
         '            --model, --provider, --api-base, -d/--debug, --trace.\n'
         '\n'
+        '  review    Review a branch diff against the default branch with the\n'
+        '            review personas. Example: marsha review --pr 123\n'
+        '            Key flags: --pr, --linear, --post-review, --personas.\n'
+        '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'
         '\n'
@@ -115,8 +157,9 @@ def print_help(topic):
     )
     if topic is None:
         print(overview)
-    elif topic in ('compile', 'help'):
-        submap = {'compile': compile_parser, 'help': help_parser}
+    elif topic in ('compile', 'help', 'review'):
+        submap = {'compile': compile_parser, 'help': help_parser,
+                  'review': review_parser}
         print(submap[topic].format_help())
     else:
         print(f'Unknown command: {topic}', file=sys.stderr)
@@ -135,6 +178,9 @@ def run(argv=None):
     if args.command == 'help':
         print_help(args.topic)
         return 0
+    if args.command == 'review':
+        _setup_runtime(args, require_toolchain=False)
+        return asyncio.run(run_review(args))
     if args.command != 'compile':
         parser.print_help(sys.stderr)
         return 2
@@ -143,7 +189,7 @@ def run(argv=None):
     return 0
 
 
-def _setup_runtime(args):
+def _setup_runtime(args, require_toolchain=True):
     # --trace routes a live, flushed progress trace to stderr so a run can
     # be watched in real time, even when stdout is piped to a file. --trace-full
     # adds full request/response transcripts on top of the summary.
@@ -169,7 +215,7 @@ def _setup_runtime(args):
             print(f'Note: {note}')
     # Bind the target-language backend (--target) and verify its toolchain.
     target = backends.select(args.target)
-    if not target.toolchain_ok():
+    if require_toolchain and not target.toolchain_ok():
         raise Exception(f'{args.target} toolchain not found')
     # Resolve the target version (--target-version) against the backend's rules.
     if args.target_version is not None:

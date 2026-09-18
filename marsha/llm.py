@@ -179,11 +179,13 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
     return None, ''
 
 
-_COMPACT_PROMPT = '''You are consolidating a list of code-review findings so it fits within a smaller context budget.
+_COMPACT_PROMPT = '''You are consolidating a list of code-review findings before they are posted to a pull request.
 You are given findings, one per line, each referenced by a [Name-Label]. Different reviewers (the names) may have raised the same point, and some findings may already be resolved or no longer needed.
-Reduce the list by doing BOTH of the following:
-1. Drop any finding that is already resolved, superseded, or no longer needs to be acted on.
-2. When two or more findings make the same point, keep ONLY the single most detailed one and drop the rest. Preserve the exact [Name-Label] of the most detailed one.
+Reduce the list by doing ALL of the following:
+1. Drop any finding that is NOT a real, actionable defect. A real defect is a concrete, verified problem in the current code: a correctness or safety bug, a spec/oracle violation, or a change that measurably degrades quality, reliability, or performance. The SEVERITY label is only a reviewer's opinion, not a verdict, so judge the ACTUAL impact. Drop findings whose impact is nil or merely theoretical, including: a stylistic or readability preference; a robustness/scale concern with no realistic trigger (e.g. "only matters if there are more than N items", "could hide a transient error that callers already handle"); a micro-optimization with no evidence of real cost; or anything the surrounding code already handles.
+2. Drop any finding that is already resolved, superseded, or no longer needs to be acted on.
+3. When two or more findings make the same point, keep ONLY the single most detailed one and drop the rest. Preserve the exact [Name-Label] of the most detailed one.
+Keep ONLY findings a developer would actually act on. When in doubt whether a finding changes anything real, drop it.
 You MUST preserve each kept finding's [Name-Label] exactly as it was given: do not rename, renumber, or invent labels. The reduced list may therefore skip some letter/number combinations.
 Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
 - [Name-Label] SEVERITY <location> - <description>
@@ -203,31 +205,41 @@ def _trim_findings_to_budget(findings, fits_check):
     return current
 
 
-async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
-    # A dedicated LLM pass that shrinks the findings list to fit the context budget: drop
-    # resolved/redundant findings and merge cross-reviewer duplicates (keeping the more detailed
-    # [Name-Label]). Survivors keep their original labels so cross-references stay valid. Returns
-    # the original list unchanged unless the LLM produced a strictly smaller, well-formed list.
+async def consolidate_findings(context_block, findings, model, debug=False,
+                               retries=3, allow_empty=False):
+    # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
+    # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
+    # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
+    # [Name-Label]). Survivors keep their labels so cross-references stay valid. Tries up to
+    # `retries` times, keeping the smallest well-formed result strictly smaller than the input;
+    # otherwise it returns the input unchanged (we never return a larger list). `allow_empty`
+    # permits reducing to zero (a clean change posts nothing); it stays False for budget
+    # compaction, where dropping every finding would lose the work. `context_block` is the
+    # surrounding context (a Marsha meta for the optimize loops; a note for `marsha review`).
     gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
                      stats_stage='third_stage', model=model, label='compact')
-    user = f'''{format_marsha_for_llm(meta)}
-{prior_context}
+    user = f'''{context_block}
 # Review findings to reduce
 
 {format_findings(findings)}'''
+    best = findings
+    floor = 0 if allow_empty else 1
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
             compacted = parse_compacted_findings(text)
-            if 0 < len(compacted) < len(findings):
-                return compacted
-            return findings
-        except Exception:
+            if floor <= len(compacted) < len(best):
+                best = compacted
+        except Exception as e:
             if debug:
-                print(f'[Compact] attempt {attempt + 1} failed')
-            if attempt == retries - 1:
-                return findings
-    return findings
+                print(f'[Compact] attempt {attempt + 1} failed: {e!r}')
+    return best
+
+
+async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
+    # Shrink the findings list to fit the editor's context budget (see consolidate_findings).
+    return await consolidate_findings(
+        f'{format_marsha_for_llm(meta)}\n{prior_context}', findings, model, debug, retries)
 
 
 async def _budgeted_findings(meta, findings, build, model, args, debug=False):

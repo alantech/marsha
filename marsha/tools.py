@@ -46,7 +46,10 @@ import sys
 import urllib.parse
 import urllib.request
 
+from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.llm_client import get_client
 from marsha.log import log
+from marsha.mappers import get_mapper
 from marsha.utils import run_subprocess
 
 # Safety cap on how many tool rounds one generation may spend issuing commands
@@ -62,6 +65,12 @@ MAX_HTTP_BYTES = 1_000_000
 SEARCH_RESULT_COUNT = 10
 SNIPPET_CHAR_LIMIT = 300
 PAGE_CHAR_LIMIT = 12_000
+# The git tool returns whole files/diffs the reviewer cites, so it needs a much larger cap than
+# the generic RESULT_CHAR_LIMIT (12KB): at that smaller cap a long source file would be truncated
+# and the reviewer would report on a partial view ("this function is truncated, I can't verify the
+# rest"). 48KB covers the largest source file with margin; the model's context window is large
+# enough that a handful of full files stays well within the compaction budget.
+GIT_RESULT_CHAR_LIMIT = 48_000
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
@@ -89,6 +98,10 @@ CATEGORY_REGISTRY = 'registry'
 CATEGORY_WEB = 'web'
 CATEGORY_COMPUTATION = 'computation'
 CATEGORY_INSTALLED_ENV = 'installed-env'
+# Review-only, language-agnostic tools: a read-only git tool (the reviewer probes
+# the repository) and a per-reviewer notes scratchpad (survives compaction).
+CATEGORY_GIT = 'git'
+CATEGORY_NOTES = 'notes'
 
 _BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB, CATEGORY_COMPUTATION}
 PHASE_CATEGORIES = {
@@ -96,6 +109,7 @@ PHASE_CATEGORIES = {
     'oracle-opt': _BASE_CATEGORIES,
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
+    'review': {CATEGORY_GIT, CATEGORY_NOTES},
 }
 
 
@@ -110,6 +124,9 @@ class ToolContext:
     phase: str = 'gen'
     workdir: str = None
     backend: object = None
+    # Per-reviewer scratchpad (the `notes` tool). A fresh list per reviewer; on a
+    # context compaction the notes are re-attached so they survive. Empty elsewhere.
+    notes: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -636,14 +653,97 @@ async def run_in_python(python, argv, timeout=30):
     return stdout, stderr
 
 
+# --- review tools: a read-only git tool and a per-reviewer notes scratchpad -----
+
+
+# Read-only git subcommands a reviewer may run. An allowlist (not a blocklist) so
+# that a mutating subcommand can never slip through: anything not listed here is
+# refused with a message that the reviewer may not modify the git tree.
+GIT_READONLY_COMMANDS = {
+    'diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'ls-tree',
+    'cat-file', 'rev-parse', 'status', 'describe', 'shortlog',
+    'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
+    'remote',
+}
+# Flags that make an otherwise-read-only command write to disk (e.g. `git diff
+# --output=file`); rejected so the reviewer cannot touch the working tree.
+GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
+GIT_TIMEOUT = 60
+
+
+async def git(args, ctx=None):
+    """`git <subcommand> [args...]` — run a read-only git command in the
+    repository's working directory and return its output (truncated). Only
+    read-only subcommands are permitted; mutating ones (commit/push/pull/
+    checkout/reset/...) are refused, as are flags that write to disk."""
+    if not args:
+        return 'error: git needs a subcommand, e.g. $ git diff <base>...HEAD'
+    sub = args[0]
+    if sub not in GIT_READONLY_COMMANDS:
+        return (
+            f'error: `git {sub}` is not allowed: you may only run read-only git '
+            'commands (diff, log, show, blame, grep, ls-files, ...). You may not '
+            'modify the git tree.')
+    rest = args[1:]
+    for flag in rest:
+        # Catch both `--output` and the `--output=<file>` form.
+        if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:
+            return f'error: the flag `{flag}` is not allowed (it writes to disk).'
+    workdir = ctx.workdir if ctx is not None else None
+    if not workdir or not os.path.isdir(workdir):
+        return 'error: git has no working directory (not run inside a repository).'
+    env = dict(os.environ)
+    env['GIT_TERMINAL_PROMPT'] = '0'  # never block on a credential prompt
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git', sub, *rest, cwd=workdir, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        out, err = await run_subprocess(proc, GIT_TIMEOUT)
+    except Exception as e:
+        return f'error: `git {sub}` could not be run (timed out or failed): {e}'
+    result = (out or '').strip()
+    errtxt = (err or '').strip()
+    if proc.returncode != 0 and not result:
+        return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'
+    if errtxt:
+        result = (result + '\n[git stderr]\n' + errtxt).strip()
+    return truncate(result, limit=GIT_RESULT_CHAR_LIMIT)
+
+
+async def notes(args, ctx=None):
+    """`notes add <text>` / `notes show` — a per-reviewer scratchpad. `notes add`
+    records a note (kept server-side, so it survives context compaction);
+    `notes show` lists the notes recorded so far. The reviewer uses this to carry
+    the concrete facts and candidate findings into its final review."""
+    if ctx is None:
+        return 'error: notes are only available in a review context.'
+    if not args:
+        return 'error: use `notes add <text>` or `notes show`.'
+    cmd = args[0]
+    if cmd == 'show':
+        if not ctx.notes:
+            return '(no notes yet — record one with `notes add <text>`)'
+        return '\n'.join(f'{i}. {n}' for i, n in enumerate(ctx.notes, 1))
+    if cmd == 'add':
+        text = ' '.join(args[1:]).strip()
+        if not text:
+            return 'error: `notes add` needs text, e.g. $ notes add "src/foo.py:12 - X"'
+        ctx.notes.append(text)
+        return f'note {len(ctx.notes)} recorded ({len(ctx.notes)} total)'
+    return f'error: unknown notes command `{cmd}` (use `notes add <text>` or `notes show`)'
+
+
 # --- the command set: agnostic base, layered per target -------------------------
 
 
 def agnostic_tool_commands(ctx=None):
     """The language-agnostic fake-terminal commands, defined once and shared by
     every target: the general web (web-search, view-web-page) and sandboxed
-    computation (calc). A target's `LanguageBackend.tool_commands()` layers its
-    registry and installed-env tools on top of this set."""
+    computation (calc), plus the review-only git and notes tools. A target's
+    `LanguageBackend.tool_commands()` layers its registry and installed-env tools
+    on top of this set. The git/notes tools carry the `git`/`notes` categories,
+    so `build_commands` surfaces them only for the `review` phase."""
     ctx = ctx or ToolContext()
     return {
         'web-search': ToolCommand('web-search', CATEGORY_WEB,
@@ -661,6 +761,16 @@ def agnostic_tool_commands(ctx=None):
                             'a `files` object of the current dir), REPL-style: the value of the '
                             'final expression is returned (use print()/console.log() for extra lines)',
                             lambda args, _c=ctx: calc(args, _c)),
+        'git': ToolCommand('git', CATEGORY_GIT,
+                           '$ git <subcommand> [args...]',
+                           'run a read-only git command in the repository (diff, log, show, '
+                           'blame, grep, ls-files, ...); mutating commands are refused',
+                           lambda args, _c=ctx: git(args, _c)),
+        'notes': ToolCommand('notes', CATEGORY_NOTES,
+                             '$ notes add <text> | notes show',
+                             'a per-reviewer scratchpad: `notes add` records a note (survives '
+                             'compaction), `notes show` lists the notes so far',
+                             lambda args, _c=ctx: notes(args, _c)),
     }
 
 
@@ -758,6 +868,49 @@ async def execute_command(commands, name, args):
         return f'error: command {name} failed: {e}'
 
 
+_TOOL_COMPACT_PROMPT = '''You are compacting a code-review exploration conversation so it fits a smaller context budget. The conversation is a reviewer probing a git repository with read-only commands (diff/log/show/blame/grep) and recording notes. Summarize it into a short state that preserves: (1) the original review task, (2) the files and line numbers examined and the concrete facts discovered, and (3) every candidate finding with its file:line location. Preserve file paths and line numbers exactly. Add nothing that is not in the conversation. Output only the summary, with no preamble.
+'''
+
+
+async def _maybe_compact_tool_history(messages, mapper, ctx, debug=False):
+    # If the accumulated tool-loop prompt would exceed the context budget, summarize it with an
+    # LLM pass and re-attach the reviewer's notes so they survive the compaction. Returns the
+    # (possibly shorter) messages. When the budget cannot be determined, returns them unchanged
+    # so the caller's existing overflow handling applies. Notes are re-attached only here —
+    # i.e. only when a compaction was actually necessary (otherwise they are already in history).
+    system = getattr(mapper, 'system', '') or ''
+    prompt_text = system + '\n' + '\n'.join(m['content'] for m in messages)
+    try:
+        client = get_client()
+        window = await resolve_context_window(model=mapper.model, client=client)
+    except Exception:
+        return messages
+    if fits(prompt_text, window):
+        return messages
+    if debug:
+        print(f'[tools] prompt ~{estimate_tokens(prompt_text)} tokens exceeds budget '
+              f'{budget_tokens(window)}; compacting tool history')
+    log(f'tools: prompt ~{estimate_tokens(prompt_text)} tokens exceeds budget '
+        f'{budget_tokens(window)}; compacting tool history')
+    transcript = '\n'.join(f"[{m['role']}]\n{m['content']}" for m in messages)
+    notes_block = '\n'.join(ctx.notes) if ctx.notes else '(none)'
+    gpt = get_mapper(_TOOL_COMPACT_PROMPT, n_results=1,
+                     model=mapper.model, label='tools-compact')
+    try:
+        summary = await gpt.run(f'# Conversation so far\n{transcript}\n\n'
+                                f'# Notes recorded so far\n{notes_block}')
+    except Exception as e:
+        log(f'tools: compaction failed: {e}')
+        return messages
+    content = f'# Summary of your review exploration so far\n{summary.strip()}\n'
+    if ctx.notes:
+        content += ('\n# Your notes (recorded so far) — these must inform your final findings\n'
+                    + '\n'.join(ctx.notes) + '\n')
+    content += ('\nContinue the review: issue another `$` command if you still need more '
+                'information, otherwise produce your findings now in the required format.')
+    return [{'role': 'user', 'content': content}]
+
+
 async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_TOOL_ROUNDS):
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
     the response's final line is a `$` command, execute it and feed the
@@ -774,6 +927,7 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
     messages = [{'role': 'user', 'content': request}]
     last_text = ''
     for round_ in range(max_rounds):
+        messages = await _maybe_compact_tool_history(messages, mapper, ctx, debug=debug)
         text = await mapper.run(messages)
         last_text = text
         pending = extract_pending_command(text)
@@ -788,8 +942,8 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '
                    'format required, with no trailing command line.')
-        messages = messages + [
+        messages.extend([
             {'role': 'assistant', 'content': text},
             {'role': 'user', 'content': block},
-        ]
+        ])
     return last_text

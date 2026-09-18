@@ -11,6 +11,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -162,13 +163,16 @@ def test_phase_scoping_no_backend_is_agnostic_only():
 
 def test_backend_layers_tools_on_the_agnostic_base():
     # The point of the per-target design: a backend supplies the language-specific
-    # tools on top of the once-defined agnostic set, each tagged by category.
+    # tools on top of the once-defined agnostic set, each tagged by category. The raw set
+    # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_INSTALLED_ENV} == ENV
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_GIT} == {'git'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
 
 
 def test_tool_instructions_lists_phase_tools():
@@ -603,6 +607,24 @@ def test_installed_env_venv_missing_is_error():
         out = asyncio.run(pypy.list_dependencies(
             [], tools.ToolContext('impl-opt', workdir='/nope')))
     assert out.startswith('error:')
+
+
+def test_git_show_uses_larger_output_cap(tmp_path):
+    # A cited file between the old 12KB cap and the git cap must be returned in full (so a
+    # reviewer sees the whole file it cites), while a file beyond the git cap is still cut.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('line\n' * 8000)   # ~40KB: under the git cap
+    (tmp_path / 'huge.txt').write_text('x' * 100_000)    # over the git cap
+    subprocess.run(['git', 'add', 'mid.py', 'huge.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    mid = asyncio.run(tools.git(['show', 'HEAD:mid.py'], ctx))
+    assert '[truncated]' not in mid and len(mid) > 12_000
+    huge = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
+    assert huge.rstrip().endswith('[truncated]')
+    assert len(huge) <= tools.GIT_RESULT_CHAR_LIMIT + 40
 
 
 # --- the tool loop -----------------------------------------------------------------

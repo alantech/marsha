@@ -223,6 +223,36 @@ def test_compact_findings_falls_back_when_not_smaller():
     assert asyncio.run(go()) is findings
 
 
+def test_consolidate_allow_empty_drops_everything():
+    # allow_empty=True (the review path) lets the pass reduce the list to zero when every
+    # finding is a non-defect, so a clean change posts nothing.
+    findings = [_finding('Ada', 'A1', 'MAJOR'), _finding('Sage', 'A2', 'MINOR')]
+
+    class FakeMapper:
+        async def run(self, req):
+            return "NO FINDINGS"
+
+    async def go():
+        with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
+            return await llm.consolidate_findings(
+                'ctx', findings, 'model', allow_empty=True)
+    assert asyncio.run(go()) == []
+
+
+def test_consolidate_default_never_returns_empty():
+    # Without allow_empty (budget compaction), an empty result is rejected so no work is lost.
+    findings = [_finding('Ada', 'A1', 'MAJOR')]
+
+    class FakeMapper:
+        async def run(self, req):
+            return "NO FINDINGS"
+
+    async def go():
+        with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
+            return await llm.consolidate_findings('ctx', findings, 'model')
+    assert asyncio.run(go()) is findings
+
+
 # --- local-backend reviewer serialization ----------------------------------
 
 def _reviewers():

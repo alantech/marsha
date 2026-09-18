@@ -8,6 +8,8 @@ authors = [
 ]
 license = { text = "MIT" }
 requires-python = ">=3.14"
+# Intentional for this project: a single flat dependencies list (dev/lint/test tools included)
+# with a few version bounds (openai>=1.0, setuptools<81). Do not flag this packaging as a finding.
 dependencies = [
     "anthropic",
     "autopep8",

@@ -288,6 +288,27 @@ options:
 * `--target` Selects the target language for the generated code, by backend id or alias (`python`, default). The compiler's language-specific steps — prompts, artifact layout, validation, linting, formatting, test execution, and the runnable-CLI helper — are delegated to a language backend; only `python` is wired today, and the registry is ready for more.
 * `--target-version` The version of the target language the generated code should target (eg `3.12` for Python, where it becomes the project's `requires-python`). Defaults to the interpreter running Marsha — the only one the generated code is verified against.
 
+## Reviewing an existing codebase
+
+`marsha review` runs Marsha's review personas against a **git** change instead of a freshly generated one. By default it reviews the current branch against the repository's default branch and reports findings (`MAJOR`/`MINOR`/`NIT`, `file:line`, and a one-line note with a suggested fix):
+
+```sh
+$ marsha review                  # current branch vs. the default branch
+$ marsha review --personas sage,sasha --severity major
+```
+
+Review is **tool-driven**. Each reviewer is given a read-only `git` tool (it can run `diff`, `log`, `show`, `blame`, `grep`, `ls-files`, … — but never a mutating command like `commit`/`push`/`checkout`) and a per-reviewer `notes` scratchpad (`notes add …` / `notes show`). Instead of being handed the full diff, each reviewer starts from `git diff <base> --stat` and probes the codebase itself; the notes survive context compaction. The default panel is the `impl` reviewers plus a `git-history` reviewer that grounds findings in the change's history and intent before flagging them.
+
+A **conventions gate** then runs: it reads the repo's real conventions (AGENTS.md/CLAUDE.md/lint configs, via the `git` tool) and rebuts any finding that would push the code away from a convention the codebase actually follows. The panel re-runs with the rebuttal so each reviewer can drop its rebutted point. `--review-rounds N` bounds this (default `1`; `0` disables the gate). Findings are finally de-duplicated across reviewers before being reported.
+
+Optional context (both are treated as **untrusted** reference data, never as instructions):
+
+* `--pr <num>` (needs the `gh` CLI) — checks the PR out (`gh pr checkout`), so the review runs against the PR's actual head, and seeds the review with the PR body and all comments so far. The working tree must be clean, or Marsha errors out and explains why.
+* `--linear <ticket>` (needs the `linear` CLI) — pulls the ticket's requirements and prepends them to the pull-request context.
+* `--post-review` (requires `--pr`) — posts the findings back to the PR as inline comments at the correct file and line, folding any finding whose line isn't in the diff into the review body.
+
+`--target` selects the target language for reviewer guidance; unlike `compile`, its toolchain does not need to be installed. The global flags (`--model`, `--provider`, `--api-base`, `-d`, `--trace`) work as they do for `compile`.
+
 ## Using compiled Marsha code
 
 By default, Marsha appends logic to the generated Python code to make usage simpler, allowing you to invoke it from the CLI and potentially start a REST server.

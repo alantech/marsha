@@ -29,13 +29,17 @@ def prettify_time_delta(delta, max_depth=2):
 
 
 def read_file(filename: str, mode: str = 'r'):
-    with open(filename, mode) as f:
+    # Pin the text encoding so reads/writes are deterministic across platforms; binary mode
+    # takes no encoding argument.
+    kwargs = {} if 'b' in mode else {'encoding': 'utf-8'}
+    with open(filename, mode, **kwargs) as f:
         content = f.read()
     return content
 
 
 def write_file(filename: str, content: str, mode: str = 'w'):
-    with open(filename, mode) as f:
+    kwargs = {} if 'b' in mode else {'encoding': 'utf-8'}
+    with open(filename, mode, **kwargs) as f:
         f.write(content)
 
 
@@ -68,13 +72,19 @@ async def run_subprocess(stream: Process, timeout: float = 60.0, input: bytes = 
     stderr = ''
     try:
         stdout, stderr = await asyncio.wait_for(stream.communicate(input), timeout)
-    except asyncio.exceptions.TimeoutError:
+    except asyncio.exceptions.TimeoutError as e:
         try:
             stream.kill()
         except OSError:
             # Ignore 'no such process' error
             pass
-        raise Exception('run_subprocess timeout...')
-    except Exception as e:
-        raise e
+        # Reap the killed child and close its pipes so it does not linger as a zombie (or leak
+        # its transports) until garbage collection; ignore a follow-up failure if it is already
+        # gone.
+        try:
+            await stream.wait()
+        except Exception:
+            pass
+        # Chain the original TimeoutError so callers can tell a timeout apart from other errors.
+        raise Exception('run_subprocess timeout...') from e
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
