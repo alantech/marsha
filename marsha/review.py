@@ -59,9 +59,16 @@ def linear_available():
 
 async def _run(cmd, *args, cwd=None, timeout=60, input=None):
     stdin = subprocess.PIPE if input is not None else subprocess.DEVNULL
-    proc = await asyncio.create_subprocess_exec(
-        cmd, *args, cwd=cwd, stdin=stdin,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cmd, *args, cwd=cwd, stdin=stdin,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        # A missing git/gh/linear binary should read as a clear setup error, not a raw
+        # FileNotFoundError traceback.
+        raise Exception(f'`{cmd}` is not installed or not on PATH.') from None
+    except OSError as e:
+        raise Exception(f'could not run `{cmd}`: {e}') from e
     out, err = await run_subprocess(proc, timeout, input=input)
     return (proc.returncode, out, err)
 
