@@ -638,6 +638,87 @@ def _verify_finding_labels(findings, threads):
     return reassigned
 
 
+def _shares_identifier(a, b):
+    # A distinctive identifier (a token containing an underscore or hyphen, e.g. a function or
+    # package name) appearing in both descriptions is strong evidence the two findings are about
+    # the same symbol/concern, even when the surrounding wording differs.
+    pat = re.compile(r'[A-Za-z][A-Za-z0-9]*[_\-][A-Za-z0-9_\-]*')
+    return bool(set(pat.findall(a)) & set(pat.findall(b)))
+
+
+def _same_concern(finding, prior):
+    # Is `finding` the same concern as `prior` (a prior thread or review-body finding), matched by
+    # concern -- same file plus a shared identifier or a moderate description overlap -- rather than
+    # by exact line, so a restatement on a shifted line, or re-anchored to another line, still
+    # counts as the same concern.
+    if not prior.get('path'):
+        return False
+    path, _line = parse_location(finding.get('location') or '')
+    if not path or path != prior['path']:
+        return False
+    a = (finding.get('desc') or '').lower()
+    b = (prior.get('desc') or '').lower()
+    if _shares_identifier(a, b):
+        return True
+    ta, tb = set(a.split()), set(b.split())
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= 0.4
+
+
+_BODY_FINDING_RE = re.compile(
+    r'^-\s+\*\*\[([A-Z]+\d+)\]\s+\w+\s*\*\*\s*`([^`]*)`\s*:\s*(.+)$', re.M)
+
+
+async def _fetch_prior_body_findings(repo, pr_num, cwd=None):
+    # Findings posted in earlier review BODIES (not inline threads) are invisible to the thread
+    # de-dup, so they re-surface on every pass; index them here so a concern already raised in a
+    # body is not re-posted. Only Marsha's own review bodies are parsed. Returns
+    # [{label, path, desc}].
+    rc, out, err = await _gh(
+        'api', f'repos/{repo}/pulls/{pr_num}/reviews?per_page=100', cwd=cwd)
+    if rc != 0 or not out.strip():
+        return []
+    try:
+        reviews = json.loads(out)
+    except ValueError:
+        return []
+    if not isinstance(reviews, list):
+        return []
+    found = []
+    for rev in reviews:
+        body = rev.get('body') or ''
+        if 'Marsha review' not in body:
+            continue
+        for m in _BODY_FINDING_RE.finditer(body):
+            label, loc, desc = m.group(1), m.group(2), m.group(3)
+            path, _line = parse_location(loc)
+            found.append({'label': label, 'path': path, 'desc': desc})
+    return found
+
+
+def _filter_duplicate_findings(findings, threads, body_findings):
+    # Drop a finding that re-raises a concern already raised in a prior pass -- a prior thread or a
+    # prior review-body finding -- matched by concern (file + description), not exact line. A
+    # finding that keeps the exact label of a prior thread is a deliberate re-raise that replies on
+    # that thread, so it is kept. Returns (kept, dropped_count).
+    prior = [{'path': t.get('path'), 'desc': t.get('desc') or ''}
+             for t in threads.values()]
+    prior += [{'path': b.get('path'), 'desc': b.get('desc') or ''}
+              for b in body_findings]
+    thread_labels = set(threads)
+    kept, dropped = [], 0
+    for f in findings:
+        if f['label'] in thread_labels:
+            kept.append(f)  # deliberate re-raise; it replies on its own thread
+            continue
+        if any(_same_concern(f, p) for p in prior):
+            dropped += 1
+            continue
+        kept.append(f)
+    return kept, dropped
+
+
 async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None):
     if not findings:
         print('No findings to post.')
@@ -657,6 +738,15 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
     if reassigned:
         log(f'review: reassigned {reassigned} finding label(s) that collided with a '
             f'prior thread')
+    # Deterministic re-raise de-dup: drop a finding that restates a concern already raised in a
+    # prior pass (a prior thread or a prior review body), matched by concern rather than exact
+    # line. This is the reliable complement to the LLM consolidation pass, which the model does not
+    # follow consistently.
+    prior_body = await _fetch_prior_body_findings(repo, pr_num, cwd)
+    findings, dup_dropped = _filter_duplicate_findings(
+        findings, threads, prior_body)
+    if dup_dropped:
+        log(f'review: dropped {dup_dropped} finding(s) that re-raised a prior concern')
     new_inline = []
     replies = []
     body_findings = []

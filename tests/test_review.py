@@ -555,6 +555,60 @@ def test_repo_name_does_not_cache_failure():
         assert asyncio.run(review._repo_name(None)) == 'acme/widget'
 
 
+def test_same_concern_matches_by_file_and_identifier():
+    # Same file + a shared identifier (or enough word overlap) is the same concern, even on a
+    # different line; a different file, or an unrelated description, is not.
+    a = {'location': 'marsha/review.py:1',
+         'desc': 'build_review_message embeds example-driven test instructions'}
+    prior = {'path': 'marsha/review.py',
+             'desc': 'build_review_message embeds detailed example-driven instructions'}
+    assert review._same_concern(a, prior)
+    assert not review._same_concern(
+        a, {'path': 'other/file.py', 'desc': prior['desc']})
+    assert not review._same_concern(
+        {'location': 'marsha/review.py:5', 'desc': 'the retry backoff is too aggressive'},
+        prior)
+
+
+def test_filter_duplicate_findings_drops_reraises():
+    threads = {'C9': {'path': 'marsha/review.py', 'line': 1,
+                      'desc': 'build_review_message embeds example-driven instructions'}}
+    body = [{'path': 'pyproject.toml',
+             'desc': 'quickjs-ng is listed but the module is quickjs'}]
+    findings = [
+        {'label': 'C9', 'location': 'marsha/review.py:1',
+         'desc': 'build_review_message embeds example-driven instructions'},
+        {'label': 'D9', 'location': 'marsha/review.py:277',
+         'desc': 'build_review_message embeds detailed example-driven instructions in tests'},
+        {'label': 'A1', 'location': 'pyproject.toml:11',
+         'desc': 'quickjs-ng is listed as a dependency but code imports quickjs'},
+        {'label': 'B2', 'location': 'marsha/tools.py:50',
+         'desc': 'the socket timeout default is too long'},
+    ]
+    kept, dropped = review._filter_duplicate_findings(findings, threads, body)
+    assert dropped == 2
+    assert [f['label'] for f in kept] == ['C9', 'B2']
+
+
+def test_fetch_prior_body_findings_parses_marsha_bodies():
+    reviews = [
+        {'body': 'Marsha review \u2014 findings:\n\n'
+                 '- **[A1] MAJOR** `pyproject.toml:9`: dev deps in runtime\n'
+                 '- **[B2] MINOR** `marsha/tools.py:517`: quickjs-ng vs quickjs\n'},
+        {'body': 'A human review with no findings.'},
+    ]
+    payload = json.dumps(reviews)
+
+    async def fake_gh(*a, **k):
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        out = asyncio.run(review._fetch_prior_body_findings('acme/widget', 123))
+    assert [f['label'] for f in out] == ['A1', 'B2']
+    assert out[0]['path'] == 'pyproject.toml'
+    assert out[1]['path'] == 'marsha/tools.py'
+
+
 def test_post_review_maps_inline_and_body():
     diff = ('diff --git a/foo.py b/foo.py\n'
             '--- a/foo.py\n'
