@@ -226,11 +226,11 @@ async def gh_pr_context(num, cwd=None):
 
 
 async def linear_context(ticket, cwd=None):
-    # Pull the ticket (title/description/requirements) to seed the review.
+    # Pull the ticket to seed the review via the linear CLI (issue view, JSON).
     rc, out, err = await _run(
-        'linear', 'issue', ticket, '--output', 'json', cwd=cwd)
+        'linear', 'issue', 'view', ticket, '--json', '--no-pager', cwd=cwd)
     if rc != 0:
-        raise Exception(f'`linear issue {ticket}` failed: {err or out}')
+        raise Exception(f'`linear issue view {ticket}` failed: {err or out}')
     return out
 
 
