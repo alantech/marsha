@@ -156,6 +156,23 @@ def test_parse_findings_no_findings():
     assert p.parse_findings('all good here', 'Ada', 1) == []
 
 
+def test_parse_findings_captures_support():
+    # A finding's one-line headline is followed by 1-2 supporting paragraphs, which are kept
+    # with the finding (internal blank lines separate paragraphs); a bare headline has no support.
+    text = ('A1 [MAJOR] foo.py:10 - missing sort\n'
+            'The spec requires sorted output, but line 10 returns it unsorted.\n'
+            'Confirmed with `git show HEAD:foo.py:10`; the oracle asserts sorted order.\n'
+            '\n'
+            'B1 [MINOR] foo.py:20 - naming\n')
+    fs = p.parse_findings(text, 'Ada', 1)
+    assert [f['label'] for f in fs] == ['A1', 'B1']
+    assert fs[0]['desc'] == 'missing sort'
+    assert fs[0]['support'] == (
+        'The spec requires sorted output, but line 10 returns it unsorted.\n'
+        'Confirmed with `git show HEAD:foo.py:10`; the oracle asserts sorted order.')
+    assert fs[1]['support'] == ''
+
+
 # --- Finding model ----------------------------------------------------------
 
 def _f(name, label, severity, desc):

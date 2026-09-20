@@ -30,9 +30,13 @@ FINDINGS_CONTRACT = '''
 
 You are review #{review_number}. Label each finding with a letter (A, then B, then C, ... in the order you report it) immediately followed by your review number, {review_number}. So your first finding is labeled A{review_number}, your second B{review_number}, and so on.
 When re-reviewing after a previous round of posted comments (shown in the context), a comment whose label ends in {review_number} is one of your own prior findings. Re-raise it (reusing its exact label) only if you still believe it is a real issue and want to push back; otherwise close it — do not re-raise it — when you verify with your tools that the code no longer has the issue, or when the user rejected it and you agree and will not push back. Give any genuinely new finding the next unused letter followed by {review_number}, skipping the labels of your prior findings so a new finding never reuses a prior label (which would collide with an old thread).
-Report each finding on its own line, in exactly this form:
+Report each finding as a one-line headline, followed by 1-2 short paragraphs of supporting information, in exactly this form:
 <LETTER>{review_number} [MAJOR|MINOR|NIT] <location> - <one-line description>
-For example: A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
+<one to two short paragraphs of supporting information: the concrete evidence you verified with the git tool (cite the specific file and lines you read), why it is a problem, and the concrete impact or risk>
+For example:
+A{review_number} [MAJOR] some_file.py:10 - the spec requires X but it is not tested
+The spec ("Behavior", lines 20-24) requires the result to be sorted, but line 10 returns the list unsorted. I confirmed with `git show HEAD:some_file.py` that no sort is applied before the return, and the oracle (tests/test_x.py:40) asserts sorted order, so an unsorted result fails the suite.
+Separate findings with a blank line.
 Severity meanings: MAJOR = violates the spec or oracle contract, or would let a wrong artifact pass; MINOR = degrades quality but not correctness; NIT = a cheap style fix.
 Report ONLY findings about the CURRENT code that you have verified with the git tool. Do not report a concern an earlier review already raised and that has since been fixed, or that the user rejected: those are settled, and re-raising them is noise, not a finding.
 A finding must be a concrete, actionable problem in the current code. Do NOT comment on or evaluate a prior fix, ask the user to confirm or verify anything, or report a mere observation that is not a problem you can point at in the code. None of those are findings.
@@ -40,7 +44,7 @@ Before reporting a robustness or error-handling concern (for example "this swall
 Do NOT report a performance or micro-optimization suggestion (precomputing, hoisting, caching, batching, parallelizing, or a complexity claim) unless you can show it is in a hot loop or works on data large enough to measurably affect overall performance; a one-off call, a pairwise pass over a single-digit-sized collection, or any complexity or allocation change with no evidence of real impact is not a finding.
 Do NOT base a finding on a project convention, style rule, or requirement unless you can point to it in a config file, the PR or issue, or the surrounding code; a rule you cannot find written in the repository is not a finding.
 If you have no new, verified finding, respond with exactly: NO FINDINGS
-Do not restate your own name. Do not add any prose outside the findings.
+Do not restate your own name. Do not add any prose outside a finding (the supporting paragraphs are part of that finding).
 '''
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -210,28 +214,48 @@ def parse_findings(text, name, review_number, prior_labels=None):
     findings = []
     used = set()
     own_label = re.compile(rf'[A-Z]+{review_number}')
-    for line in text.split('\n'):
-        m = re.match(
-            r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', line, re.IGNORECASE)
-        if not m:
-            continue
-        severity = m.group(2).upper()
-        if severity == 'NITPICK':
-            severity = 'NIT'
-        location, description = _split_location(m.group(3).strip())
-        written = (m.group(1) or '').upper()
-        if own_label.fullmatch(written) and written not in used:
-            label = written
-        else:
-            label = position_label(review_number, used | prior)
-        used.add(label)
-        findings.append({
-            'name': name,
-            'label': label,
-            'severity': severity,
-            'location': location,
-            'desc': description,
-        })
+    headline = re.compile(
+        r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', re.IGNORECASE)
+    current = None
+    support = []
+
+    def flush():
+        if current is not None:
+            # Supporting paragraphs follow the headline; drop any leading indent per line but
+            # keep internal blank lines (which separate paragraphs), then trim the ends.
+            support_text = '\n'.join(ln.lstrip() for ln in support).strip()
+            current['support'] = support_text
+            findings.append(current)
+
+    for line in (text or '').split('\n'):
+        m = headline.match(line)
+        if m:
+            flush()
+            severity = m.group(2).upper()
+            if severity == 'NITPICK':
+                severity = 'NIT'
+            location, description = _split_location(m.group(3).strip())
+            written = (m.group(1) or '').upper()
+            if own_label.fullmatch(written) and written not in used:
+                label = written
+            else:
+                label = position_label(review_number, used | prior)
+            used.add(label)
+            current = {
+                'name': name,
+                'label': label,
+                'severity': severity,
+                'location': location,
+                'desc': description,
+                'support': '',
+            }
+            support = []
+        elif line.strip() or current is not None:
+            # A non-headline line is the current finding's supporting text; blank lines are kept
+            # (they separate paragraphs) but a line before any finding is ignored.
+            if current is not None:
+                support.append(line)
+    flush()
     return findings
 
 
@@ -262,6 +286,7 @@ def parse_compacted_findings(text):
             'severity': severity,
             'location': location,
             'desc': description,
+            'support': '',
         })
     return findings
 

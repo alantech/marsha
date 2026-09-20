@@ -144,6 +144,21 @@ def test_render_findings():
     assert '(Sage)' in out
 
 
+def test_render_findings_includes_support():
+    # A finding's supporting paragraphs are rendered under its headline.
+    f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+          'location': 'foo.py:10', 'desc': 'off by one',
+          'support': 'the evidence, why it matters, and the impact'}]
+    out = review.render_findings(f, 'main')
+    assert '[MAJOR] foo.py:10 - off by one' in out
+    assert 'the evidence, why it matters, and the impact' in out
+    # A finding with no support renders just its headline (no dangling support).
+    out2 = review.render_findings(
+        [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+          'location': 'foo.py:10', 'desc': 'off by one', 'support': ''}], 'main')
+    assert 'off by one' in out2 and '\n\n' not in out2.split('\n', 2)[-1]
+
+
 def test_order_findings_by_severity_then_location():
     # The final set leads with the most severe, then is ordered by location within a severity.
     fs = [
@@ -467,6 +482,27 @@ def test_run_review_reports_findings(repo, capsys):
     out = capsys.readouterr().out
     assert 'Review findings' in out
     assert '[MAJOR] a.txt:2 - bad thing' in out
+
+
+def test_run_review_preserves_support_through_consolidation(repo, capsys):
+    # The panel finding carries supporting paragraphs; the real consolidation re-emits a
+    # one-line finding (support dropped), but the reviewer's evidence is re-attached by
+    # (name, label) so it survives into the final output.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'bad thing',
+                'support': 'verified with git show; the oracle asserts X'}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                 'location': 'a.txt:2', 'desc': 'bad thing', 'support': ''}]
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert 'verified with git show; the oracle asserts X' in out
 
 
 def test_run_review_end_to_end_with_real_personas(repo, capsys):

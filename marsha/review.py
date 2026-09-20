@@ -370,12 +370,14 @@ def order_findings(findings):
 def render_findings(findings, base_ref):
     if not findings:
         return f'No findings against {base_ref}.'
-    lines = [f'Review findings against {base_ref} ({len(findings)}):', '']
+    blocks = [f'Review findings against {base_ref} ({len(findings)}):']
     for i, f in enumerate(findings, 1):
         loc = f['location'] or '(no location)'
-        lines.append(
-            f'{i}. [{f["severity"]}] {loc} - {f["desc"]}  ({f["name"]})')
-    return '\n'.join(lines)
+        block = f'{i}. [{f["severity"]}] {loc} - {f["desc"]}  ({f["name"]})'
+        if f.get('support'):
+            block += '\n\n' + f['support']
+        blocks.append(block)
+    return '\n\n'.join(blocks)
 
 
 # The conventions gate's output contract: it rebuts findings (by [Name-Label]) that violate a
@@ -861,6 +863,8 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
     for f in findings:
         path, line = parse_location(f['location'])
         body = f"**[{f['label']}] {f['severity']}**: {f['desc']}"
+        if f.get('support'):
+            body += f"\n\n{f['support']}"
         if f['label'] in threads:
             replies.append((threads[f['label']]['root_id'], body))
         elif path and line is not None and line in touched.get(path, set()):
@@ -868,14 +872,16 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
                 {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
         else:
             loc = f['location'] or 'n/a'
-            body_findings.append(
-                f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}")
+            item = f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}"
+            if f.get('support'):
+                item += "\n\n" + f['support']
+            body_findings.append(item)
     if new_inline or body_findings:
         review = {'event': 'COMMENT', 'comments': new_inline}
         if body_findings:
             review['body'] = (
                 'Marsha review — findings that could not be placed on a diff line:\n\n'
-                + '\n'.join(body_findings))
+                + '\n\n'.join(body_findings))
         payload = json.dumps(review)
         rc, out, err = await _gh(
             'api', f'repos/{repo}/pulls/{pr_num}/reviews',
@@ -1085,6 +1091,11 @@ async def run_review(args):
         # nothing: allow_empty lets it reduce the list to zero, which a budget-driven compaction
         # must never do.
         actionable = dedup_by_location(actionable)
+        # The consolidation re-emits one-line findings (it drops non-defects and merges dupes), so
+        # the reviewer's supporting paragraphs are re-attached by (name, label) afterwards: the
+        # evidence was gathered by the reviewer with the git tools and should survive reduction.
+        support_by_label = {(f['name'], f['label']): f.get('support', '')
+                            for f in actionable}
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
@@ -1101,6 +1112,8 @@ async def run_review(args):
             reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
         actionable = dedup_findings(consolidated)
         actionable = dedup_by_location(actionable)
+        for f in actionable:
+            f['support'] = support_by_label.get((f['name'], f['label']), '')
     # Order the final set (severity, then location) before printing or posting.
     actionable = order_findings(actionable)
     print(render_findings(actionable, base_name))
