@@ -153,6 +153,14 @@ def test_parse_compacted_skips_non_finding_lines():
     assert [(f['name'], f['label']) for f in fs] == [('Ada', 'A1')]
 
 
+def test_parse_compacted_accepts_missing_leading_dash():
+    # The model sometimes omits the list bullet; a well-formed finding must still parse rather
+    # than be silently dropped (that dropped a real MAJOR in a real review run).
+    fs = parse_compacted_findings(
+        "[Sage-A3] MAJOR x.py:10 - the spec requires X\n- [Vera-B1] MINOR y.py - note")
+    assert [(f['name'], f['label']) for f in fs] == [('Sage', 'A3'), ('Vera', 'B1')]
+
+
 # --- deterministic severity trim -------------------------------------------
 
 def test_trim_drops_lowest_severity_first():
@@ -237,6 +245,30 @@ def test_consolidate_allow_empty_drops_everything():
             return await llm.consolidate_findings(
                 'ctx', findings, 'model', allow_empty=True)
     assert asyncio.run(go()) == []
+
+
+def test_consolidate_allow_empty_survives_flaky_empty():
+    # A single flaky empty response must not zero a review: if another attempt shrank to a
+    # non-empty list, keep that rather than dropping everything.
+    findings = [_finding('Ada', 'A1', 'MAJOR'),
+                _finding('Sage', 'A2', 'MINOR'),
+                _finding('Vera', 'A3', 'NIT')]
+    replies = iter([
+        "NO FINDINGS",  # flaky empty (this is what zeroed a real run)
+        "- [Ada-A1] MAJOR x.py:1 - real defect",
+        "NO FINDINGS",
+    ])
+
+    class FakeMapper:
+        async def run(self, req):
+            return next(replies)
+
+    async def go():
+        with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
+            return await llm.consolidate_findings(
+                'ctx', findings, 'model', allow_empty=True, retries=3)
+    out = asyncio.run(go())
+    assert [(f['name'], f['label']) for f in out] == [('Ada', 'A1')]
 
 
 def test_consolidate_default_never_returns_empty():

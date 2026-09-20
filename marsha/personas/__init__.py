@@ -235,8 +235,10 @@ def parse_findings(text, name, review_number, prior_labels=None):
     return findings
 
 
+# The leading "- " is optional: the model sometimes omits the list bullet, and treating a
+# well-formed finding without it as absent would silently drop it (see parse_compacted_findings).
 _COMPACTED_LINE = re.compile(
-    r'^\s*-\s*\[([^\]]+)\]\s*(MAJOR|MINOR|NIT|NITPICK)\b\s*(.*)$', re.IGNORECASE)
+    r'^\s*(?:-\s*)?\[([^\]]+)\]\s*(MAJOR|MINOR|NIT|NITPICK)\b\s*(.*)$', re.IGNORECASE)
 
 
 def parse_compacted_findings(text):

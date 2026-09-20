@@ -227,15 +227,29 @@ async def consolidate_findings(context_block, findings, model, debug=False,
 {format_findings(findings)}'''
     best = findings
     floor = 0 if allow_empty else 1
+    shrinks = []
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
             compacted = parse_compacted_findings(text)
-            if floor <= len(compacted) < len(best):
-                best = compacted
+            # A valid shrink is within the floor and strictly smaller than the ORIGINAL input;
+            # tracking against the input (not the current best) lets a later non-empty shrink be
+            # recorded even after an earlier attempt already collapsed best to empty.
+            if floor <= len(compacted) < len(findings):
+                if len(compacted) < len(best):
+                    best = compacted
+                shrinks.append(compacted)
         except Exception as e:
             if debug:
                 print(f'[Compact] attempt {attempt + 1} failed: {e!r}')
+    # A review (allow_empty) must not be zeroed by a single flaky empty response: if the smallest
+    # result is empty but some attempt shrank to a non-empty list, keep that one - surfacing a
+    # finding beats dropping it on a malformed or uncertain response. A genuine, consistent
+    # "no findings" (empty on every attempt) still returns empty.
+    if floor == 0 and not best:
+        non_empty = [c for c in shrinks if c]
+        if non_empty:
+            best = min(non_empty, key=len)
     return best
 
 
