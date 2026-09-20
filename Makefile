@@ -12,13 +12,20 @@ clean:
 	git clean -ffdx -e .env
 
 .PHONY: install
-install: ./venv
+install: ./venv uninstall
+	# Fresh install from a clean slate. `uv pip install --upgrade .` rebuilds the local wheel
+	# in-tree, but setuptools' build_py copies the package into build/lib/ without pruning, so a
+	# renamed or removed file lingers there and gets re-baked into the next wheel (and re-installed)
+	# even after a site-packages wipe. Clear the in-tree build artifacts so the wheel is built from
+	# the current source; `uninstall` (a prerequisite above) drops the prior install first.
+	rm -rf build/ dist/ *.egg-info
 	uv pip install --python ./venv/bin/python --upgrade .
 	./venv/bin/python ./make_launcher.py "$(PREFIX)/bin" "$(CURDIR)/venv"
 
 .PHONY: uninstall
 uninstall:
-	rm -f $(PREFIX)/bin/marsha
+	rm -rf "$(CURDIR)"/venv/lib*/python*/site-packages/marsha*
+	rm -f "$(PREFIX)/bin/marsha"
 
 .PHONY: format
 format:
