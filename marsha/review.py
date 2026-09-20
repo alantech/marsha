@@ -35,6 +35,12 @@ REVIEW_DIFF_LIMIT = 120_000
 # A reviewer probing the codebase with the git tool needs more rounds than a single-shot
 # lookup; this bounds each reviewer's (and the conventions gate's) tool loop.
 REVIEW_MAX_TOOL_ROUNDS = 12
+# The review runs the panel, the conventions gate, and the consolidation at a higher reasoning
+# effort than the model default (gpt-5-mini defaults to 'low') so a single pass is more reliable.
+# A fixed seed makes sampling as reproducible as the provider allows (gpt-5-mini ignores it; a
+# seed-honoring provider reproduces a pass, so consensus passes below use distinct seeds).
+REVIEW_REASONING_EFFORT = 'medium'
+REVIEW_SEED = 1
 # Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the conventions
 # review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;
 # without this, a reviewer re-raises rebutted findings (and, anchored on them, adds new noise).
@@ -386,7 +392,7 @@ Do not restate a reviewer's name. Do not add any prose outside the rebuttals.
 '''
 
 
-async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, reasoning_effort=None, seed=None):
     # The conventions gate (Norman): read the repo's real conventions (AGENTS.md/CLAUDE.md/lint
     # configs, via the git tool) and return a rebuttal preamble citing the [Name-Label]s of
     # findings that violate a convention the codebase actually follows, or '' when there are
@@ -404,7 +410,8 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
         f'convention the codebase actually follows.\n\n# Findings under review\n\n'
         + format_findings(findings))
     mapper = get_mapper(system, n_results=1, stats_stage='review',
-                        model=model, label='review:conventions-gate')
+                        model=model, label='review:conventions-gate',
+                        reasoning_effort=reasoning_effort, seed=seed)
     try:
         text = await tools.run_with_tools(
             mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
@@ -713,6 +720,26 @@ def _same_concern(finding, prior):
     return len(ta & tb) / len(ta | tb) >= 0.4
 
 
+def _corroborated(findings, passes, threshold):
+    # Keep a finding only if an equivalent concern (same file + a shared identifier or a close
+    # description) appears in at least `threshold` of the independent `passes` (one findings-list
+    # per consensus run). A real defect is re-found across independent runs; a sampling fluke is
+    # not, so requiring corroboration makes the panel's output stable even when the model's
+    # per-run recall varies. Near-duplicate survivors are merged downstream (dedup_by_location +
+    # consolidation), so this only filters, it does not merge.
+    kept = []
+    for f in findings:
+        count = 0
+        for p in passes:
+            priors = [{'path': parse_location(pf.get('location') or '')[0],
+                       'desc': pf.get('desc') or ''} for pf in p]
+            if any(_same_concern(f, pr) for pr in priors):
+                count += 1
+        if count >= threshold:
+            kept.append(f)
+    return kept
+
+
 _BODY_FINDING_RE = re.compile(
     r'^-\s+\*\*\[([A-Z]+\d+)\]\s+\w+\s*\*\*\s*`([^`]*)`\s*:\s*(.+)$', re.M)
 
@@ -890,6 +917,45 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         f'{closed} threads resolved.')
 
 
+async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, guidance, tool_ctx, prior_block_by_number, prior_labels_by_number, reasoning_effort, seed, debug):
+    # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
+    # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
+    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
+    # same-location-collapsed findings (before semantic consolidation) — ready for consensus
+    # voting across passes, or a single-pass consolidation.
+    prior_findings, prior_preamble = [], ''
+    actionable = []
+    for i in range(rounds + 1):
+        user_message = message
+        if i > 0:
+            user_message += prior_round_block(
+                prior_findings, prior_preamble, 'conventions review')
+            user_message += _REFUTE_CONFIDENCE_RULE
+        findings = await run_personas(
+            reviewers, user_message, model, 'review',
+            debug=debug, loop='review', guidance=guidance,
+            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
+            prior_block_by_number=prior_block_by_number,
+            prior_labels_by_number=prior_labels_by_number,
+            reasoning_effort=reasoning_effort, seed=seed)
+        actionable = dedup_findings(findings)
+        if i == rounds or not actionable:
+            break
+        preamble = await conventions_gate(
+            actionable, tool_ctx, model, base_name, base_ref, debug,
+            reasoning_effort=reasoning_effort, seed=seed)
+        if not preamble:
+            if debug:
+                print(
+                    '[Review] conventions gate found no convention violations; converged')
+            break
+        if debug:
+            print(
+                f'[Review] conventions gate rebutted findings; starting round {i + 2}')
+        prior_findings, prior_preamble = actionable, preamble
+    return dedup_by_location(actionable)
+
+
 async def run_review(args):
     if args.post_review and args.pr is None:
         raise Exception(
@@ -963,7 +1029,6 @@ async def run_review(args):
 
     model = resolve_model()
     guidance = backends.current().persona_guidance()
-    tool_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
     if args.debug:
         names = ', '.join(name for name, _, _ in reviewers)
         print(f'Reviewing against {base_name} with personas: {names}')
@@ -982,38 +1047,34 @@ async def run_review(args):
             prior_block_by_number[num] = _reviewer_prior_block(num, prior)
             prior_labels_by_number[num] = {f['label'] for f in prior}
 
-    # Review loop: the panel proposes findings; the conventions gate rebuts the ones that
-    # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges
-    # when the gate is quiet, the panel is clean, or the round budget is exhausted.
     rounds = max(0, args.review_rounds)
-    prior_findings, prior_preamble = [], ''
-    actionable = []
-    for i in range(rounds + 1):
-        user_message = message
-        if i > 0:
-            user_message += prior_round_block(
-                prior_findings, prior_preamble, 'conventions review')
-            user_message += _REFUTE_CONFIDENCE_RULE
-        findings = await run_personas(
-            reviewers, user_message, model, 'review',
-            debug=args.debug, loop='review', guidance=guidance,
-            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
-            prior_block_by_number=prior_block_by_number,
-            prior_labels_by_number=prior_labels_by_number)
-        actionable = dedup_findings(findings)
-        if i == rounds or not actionable:
-            break
-        preamble = await conventions_gate(
-            actionable, tool_ctx, model, base_name, base_ref, args.debug)
-        if not preamble:
-            if args.debug:
-                print(
-                    '[Review] conventions gate found no convention violations; converged')
-            break
+    consensus_n = max(0, args.consensus or 0)
+    if consensus_n > 1:
+        # Consensus: run the full panel+gate pass N times independently and keep only the findings
+        # a majority of the runs corroborate. This stabilizes the output against the model's
+        # per-run variance (which gpt-5-mini cannot be made deterministic): a real defect is
+        # re-found across runs, a sampling fluke is not. Each pass uses a fresh scratchpad and a
+        # distinct seed so a seed-honoring provider samples independently.
+        passes = []
+        for i in range(consensus_n):
+            pass_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
+            passes.append(await _review_pass(
+                reviewers, message, model, base_name, base_ref, rounds, guidance,
+                pass_ctx, prior_block_by_number, prior_labels_by_number,
+                REVIEW_REASONING_EFFORT, REVIEW_SEED + i, args.debug))
+        threshold = consensus_n // 2 + 1
+        union = dedup_findings([f for p in passes for f in p])
+        actionable = _corroborated(union, passes, threshold)
         if args.debug:
-            print(
-                f'[Review] conventions gate rebutted findings; starting round {i + 2}')
-        prior_findings, prior_preamble = actionable, preamble
+            print(f'[Review] consensus over {consensus_n} passes '
+                  f'(threshold {threshold}): {len(union)} candidate(s) -> '
+                  f'{len(actionable)} corroborated')
+    else:
+        tool_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
+        actionable = await _review_pass(
+            reviewers, message, model, base_name, base_ref, rounds, guidance,
+            tool_ctx, prior_block_by_number, prior_labels_by_number,
+            REVIEW_REASONING_EFFORT, REVIEW_SEED, args.debug)
 
     if actionable:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
@@ -1035,7 +1096,8 @@ async def run_review(args):
             context += _prior_conversations_block(
                 convs, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
-            context, actionable, model, debug=args.debug, allow_empty=True)
+            context, actionable, model, debug=args.debug, allow_empty=True,
+            reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED)
         actionable = dedup_findings(consolidated)
         actionable = dedup_by_location(actionable)
     # Order the final set (severity, then location) before printing or posting.

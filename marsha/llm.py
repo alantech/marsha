@@ -207,7 +207,8 @@ def _trim_findings_to_budget(findings, fits_check):
 
 
 async def consolidate_findings(context_block, findings, model, debug=False,
-                               retries=3, allow_empty=False):
+                               retries=3, allow_empty=False,
+                               reasoning_effort=None, seed=None):
     # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
     # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
     # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
@@ -218,7 +219,8 @@ async def consolidate_findings(context_block, findings, model, debug=False,
     # compaction, where dropping every finding would lose the work. `context_block` is the
     # surrounding context (a Marsha meta for the optimize loops; a note for `marsha review`).
     gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
-                     stats_stage='third_stage', model=model, label='compact')
+                     stats_stage='third_stage', model=model, label='compact',
+                     reasoning_effort=reasoning_effort, seed=seed)
     user = f'''{context_block}
 # Review findings to reduce
 

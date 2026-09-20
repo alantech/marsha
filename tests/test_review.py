@@ -328,7 +328,7 @@ def test_review_loop_converges_when_gate_quiet(repo, capsys):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return ''
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -352,7 +352,7 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return '[Sage-A1] - repo uses no type hints; drop it'
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -380,7 +380,7 @@ def test_review_loop_stops_at_round_budget(repo):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return '[Sage-A1] - always rebutting'
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -391,6 +391,44 @@ def test_review_loop_stops_at_round_budget(repo):
          patch.object(review, 'consolidate_findings', new=fake_consolidate):
         asyncio.run(review.run_review(_args(review_rounds=2)))
     assert len(panel_calls) == 3  # rounds 0,1,2 then the budget is exhausted
+
+
+def test_corroborated_keeps_only_recurring_concerns():
+    # A concern restated across a majority of passes survives; a one-pass fluke is dropped.
+    def f(label, loc, desc):
+        return {'name': 'Sage', 'label': label, 'severity': 'MAJOR',
+                'location': loc, 'desc': desc}
+
+    p1 = [f('A1', 'a.txt:2', 'null pointer dereference'),
+          f('B1', 'a.txt:9', 'unused variable foo')]
+    p2 = [f('A2', 'a.txt:2', 'null pointer check missing')]
+    p3 = [f('A3', 'a.txt:3', 'null pointer not checked')]
+    passes = [p1, p2, p3]
+    union = [f for p in passes for f in p]
+    kept = review._corroborated(union, passes, 2)
+    # The null-pointer concern (a.txt) recurs in all three passes; the other two are one-offs.
+    assert len(kept) == 3
+    assert all(k['location'].startswith('a.txt') for k in kept)
+    # With no corroboration required (threshold 1) every candidate is kept.
+    assert len(review._corroborated(union, passes, 1)) == len(union)
+
+
+def test_run_review_consensus_runs_panel_n_times(repo):
+    # --consensus N runs the full panel pass N times (one per independent sample).
+    panel_calls = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        panel_calls.append(1)
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args(consensus=3)))
+    assert rc == 0
+    assert len(panel_calls) == 3
 
 
 # --- the panel path end-to-end (real personas, mocked LLM) -------------------

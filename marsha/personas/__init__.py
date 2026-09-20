@@ -338,7 +338,7 @@ def prior_round_block(findings, preamble, label='implementor'):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None, prior_labels_by_number=None):
+async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None, prior_labels_by_number=None, reasoning_effort=None, seed=None):
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
@@ -350,7 +350,9 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
     # prior (labeled) findings + the user's replies, appended to that reviewer's message so it
     # reuses a label only for a concern it still stands by. `prior_labels_by_number` maps a
     # reviewer number to the set of its prior labels so parse_findings can keep a new (position-
-    # based) finding from colliding with a prior thread's label.
+    # based) finding from colliding with a prior thread's label. `reasoning_effort` and `seed`,
+    # when set, are forwarded to each reviewer's mapper (the review path passes them to make a
+    # single pass more reliable and sampling as reproducible as the provider allows).
     async def one(spec):
         name, body, review_number = spec
         system = body
@@ -370,7 +372,8 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
         prior_labels = (prior_labels_by_number or {}).get(review_number)
         try:
             mapper = get_mapper(
-                system, n_results=1, stats_stage=stats_stage, model=model, label=label)
+                system, n_results=1, stats_stage=stats_stage, model=model, label=label,
+                reasoning_effort=reasoning_effort, seed=seed)
             if rctx is not None:
                 text = await tools.run_with_tools(
                     mapper, user, rctx,

@@ -64,12 +64,13 @@ async def retry_chat_completion(query, model=None, max_tries=3, n_results=1, lab
 class ChatGPTMapper(BaseMapper):
     """ChatGPT-based mapper class"""
 
-    def __init__(self, system, model=None, max_tokens=None, reasoning_effort=None, max_retries=3, n_results=1, stats_stage=None, label=None):
+    def __init__(self, system, model=None, max_tokens=None, reasoning_effort=None, seed=None, max_retries=3, n_results=1, stats_stage=None, label=None):
         BaseMapper.__init__(self)
         self.system = system
         self.model = model
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
+        self.seed = seed
         self.max_retries = max_retries
         self.n_results = n_results
         self.stats_stage = stats_stage
@@ -90,6 +91,10 @@ class ChatGPTMapper(BaseMapper):
             query_obj['max_tokens'] = self.max_tokens
         if self.reasoning_effort is not None:
             query_obj['reasoning_effort'] = self.reasoning_effort
+        if self.seed is not None:
+            # Best-effort reproducibility. Some reasoning models (gpt-5-mini) ignore it; the
+            # parameter is harmless where it is not honored.
+            query_obj['seed'] = self.seed
         res = await retry_chat_completion(query_obj, self.model, self.max_retries, self.n_results, self.label)
 
         if self.stats_stage is not None:
