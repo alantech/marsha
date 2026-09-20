@@ -155,6 +155,41 @@ async def changed_files(base_ref, head='HEAD', cwd=None):
     return out
 
 
+async def gh_pr_head(num, cwd=None):
+    # The PR's head branch name and head commit OID, so a review can tell whether the local branch
+    # already contains the PR head (and any unpushed local commits on top of it).
+    rc, out, err = await _gh(
+        'pr', 'view', str(num), '--json', 'headRefName,headRefOid', cwd=cwd)
+    if rc != 0:
+        raise Exception(f'`gh pr view {num}` failed: {err or out}')
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        raise Exception(f'`gh pr view {num}` returned unparseable JSON: {e}')
+    return (data.get('headRefName') or '', data.get('headRefOid') or '')
+
+
+async def local_branch_ahead_of(cwd=None, head_ref='', head_oid=''):
+    # True when `head_oid` is an ancestor of (or equal to) the current HEAD, i.e. the checked-out
+    # branch already contains the PR head plus any unpushed local commits on top of it. The PR
+    # head branch is fetched first so `head_oid` is resolvable even when the local branch is not
+    # the PR branch. A fetch failure is non-fatal: if the object is already local the check still
+    # works, and if not, the ancestry test simply reports False and the caller checks out.
+    if head_ref:
+        await _git('fetch', 'origin', head_ref, '--quiet', cwd=cwd)
+    rc, _out, _err = await _git(
+        'merge-base', '--is-ancestor', head_oid, 'HEAD', cwd=cwd)
+    return rc == 0
+
+
+async def commits_ahead(cwd=None, base_oid=None):
+    # How many commits the current HEAD has on top of `base_oid` (0 when it contains none).
+    rc, out, _err = await _git('rev-list', '--count', f'{base_oid}..HEAD', cwd=cwd)
+    if rc != 0 or not out.strip().isdigit():
+        return 0
+    return int(out.strip())
+
+
 async def gh_pr_checkout(num, cwd=None):
     rc, out, err = await _gh('pr', 'checkout', str(num), cwd=cwd, timeout=300)
     if rc != 0:
@@ -867,13 +902,31 @@ async def run_review(args):
     cwd = os.getcwd()
     base_name, base_ref = await default_branch(cwd)
     if args.pr is not None:
-        if not await working_tree_clean(cwd):
-            raise Exception(
-                'Cannot review a PR: the working tree has uncommitted changes, and '
-                '`gh pr checkout` needs a clean tree. Commit or stash your changes, '
-                'or run `marsha review` without --pr.')
-        await gh_pr_checkout(args.pr, cwd)
-        print(f'Checked out PR #{args.pr}; reviewing it against {base_name}.')
+        head_ref, head_oid = await gh_pr_head(args.pr, cwd)
+        # By default, if the checked-out branch already contains the PR head (and any unpushed
+        # local commits on top of it), review the local commits as-is: checking the PR out would
+        # reset to the remote head and drop local fixes made since the last review. --remote forces
+        # the remote head.
+        review_local = (not args.remote and bool(head_oid)
+                        and await local_branch_ahead_of(cwd, head_ref, head_oid))
+        if review_local:
+            ahead = await commits_ahead(cwd, head_oid)
+            where = (f'{ahead} commit(s) ahead of PR #{args.pr} '
+                     f'(head {head_oid[:7]})' if ahead
+                     else f'matching PR #{args.pr} head')
+            note = ('' if await working_tree_clean(cwd)
+                    else ' (uncommitted changes are not included)')
+            print(
+                f'Reviewing the local branch ({where}) against {base_name}{note}.')
+        else:
+            if not await working_tree_clean(cwd):
+                raise Exception(
+                    'Cannot review a PR: the working tree has uncommitted changes, and '
+                    '`gh pr checkout` needs a clean tree. Commit or stash your changes, '
+                    'or run `marsha review` without --pr.')
+            await gh_pr_checkout(args.pr, cwd)
+            print(
+                f'Checked out PR #{args.pr}; reviewing it against {base_name}.')
 
     stat_text = await branch_diff_stat(base_ref, 'HEAD', cwd)
     if not stat_text.strip():

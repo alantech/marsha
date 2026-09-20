@@ -37,6 +37,13 @@ def _git(cwd, *args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _rev(cwd, ref):
+    out = subprocess.run(['git', 'rev-parse', ref], cwd=cwd, check=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True)
+    return out.stdout.strip()
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     r = str(tmp_path / 'repo')
@@ -58,7 +65,8 @@ def repo(tmp_path, monkeypatch):
 
 
 def _args(**kw):
-    base = dict(pr=None, linear=None, post_review=False, personas=None,
+    base = dict(pr=None, remote=False, consensus=0, linear=None,
+                post_review=False, personas=None,
                 review_rounds=0, target='python',
                 target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
@@ -458,16 +466,158 @@ def test_run_review_pr_requires_gh(repo, monkeypatch):
 
 def test_run_review_pr_dirty_tree_errors(repo, monkeypatch):
     monkeypatch.setattr(review, 'gh_available', lambda: True)
+
+    async def fake_head(num, cwd=None):
+        return ('feature', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')
+
+    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+        return False
+
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', not_ahead)
     with open(os.path.join(repo, 'dirty.txt'), 'w') as f:
         f.write('x')
     with pytest.raises(Exception, match='uncommitted changes'):
         asyncio.run(review.run_review(_args(pr=123)))
 
 
+def test_gh_pr_head_parses():
+    payload = json.dumps({'headRefName': 'feature/x', 'headRefOid': 'abc123'})
+
+    async def fake_gh(*a, **k):
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        ref, oid = asyncio.run(review.gh_pr_head(7))
+    assert ref == 'feature/x' and oid == 'abc123'
+
+
+def test_local_branch_ahead_of(repo):
+    # The checked-out feature branch is one commit ahead of main, so main's commit is an ancestor
+    # of HEAD. There is no `origin` remote in the fixture, so the fetch is best-effort (skipped
+    # when the object is already local).
+    main_oid = _rev(repo, 'main')
+    assert asyncio.run(review.local_branch_ahead_of(repo, 'main', main_oid)) is True
+    assert asyncio.run(review.commits_ahead(repo, main_oid)) == 1
+    # A commit that is not an ancestor of HEAD reports False.
+    assert asyncio.run(
+        review.local_branch_ahead_of(repo, 'main', 'f' * 40)) is False
+
+
+def _fake_review_downstream():
+    # Shared fakes so a --pr review runs end-to-end without a network or the LLM.
+    async def fake_panel(reviewers, message, model, stage, **k):
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    async def fake_gh(*a, **k):
+        if a[0] == 'repo':
+            return (0, json.dumps({'nameWithOwner': ''}), '')
+        return (0, json.dumps({'title': 't', 'body': 'b', 'comments': []}), '')
+
+    return fake_panel, fake_consolidate, fake_gh
+
+
+def test_run_review_prefers_local_when_ahead(repo, capsys, monkeypatch):
+    # The checked-out branch contains the PR head (main's commit is an ancestor of HEAD), so the
+    # local commits are reviewed instead of checking the PR out (which would drop unpushed fixes).
+    main_oid = _rev(repo, 'main')
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', main_oid)
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123)))
+    assert rc == 0
+    assert checkout_calls == []  # did not check the PR out
+    assert 'local branch' in capsys.readouterr().out
+
+
+def test_run_review_checks_out_when_not_ahead(repo, capsys, monkeypatch):
+    # The local branch does not contain the PR head, so the PR is checked out.
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', 'f' * 40)
+
+    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+        return False
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', not_ahead)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123)))
+    assert rc == 0
+    assert checkout_calls == [123]
+    assert 'Checked out PR' in capsys.readouterr().out
+
+
+def test_run_review_remote_forces_checkout(repo, capsys, monkeypatch):
+    # Even when the local branch is ahead of the PR head, --remote checks the remote head out.
+    main_oid = _rev(repo, 'main')
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', main_oid)
+
+    async def ahead(cwd=None, head_ref='', head_oid=''):
+        return True
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', ahead)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123, remote=True)))
+    assert rc == 0
+    assert checkout_calls == [123]
+    assert 'Checked out PR' in capsys.readouterr().out
+
+
 def test_run_review_linear_requires_linear(repo, monkeypatch):
     monkeypatch.setattr(review, 'linear_available', lambda: False)
     with pytest.raises(Exception, match='requires the `linear` CLI'):
         asyncio.run(review.run_review(_args(linear='ACME-1')))
+
+
+def test_linear_context_uses_issue_view_json(repo):
+    # The linear CLI (v2.x) fetches one issue with `linear issue view <id> --json`, not the
+    # older `linear issue <id> --output json`; pin the exact command we shell out to.
+    calls = {}
+
+    async def fake_run(cmd, *args, **k):
+        calls['cmd'] = cmd
+        calls['args'] = args
+        return (0, '{"identifier": "ACME-1"}', '')
+
+    with patch.object(review, '_run', new=fake_run):
+        out = asyncio.run(review.linear_context('ACME-1'))
+    assert calls['cmd'] == 'linear'
+    assert calls['args'] == ('issue', 'view', 'ACME-1', '--json', '--no-pager')
+    assert out == '{"identifier": "ACME-1"}'
 
 
 def test_gh_pr_context_flattens_reviews():
