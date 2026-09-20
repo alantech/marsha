@@ -65,7 +65,8 @@ def repo(tmp_path, monkeypatch):
 
 
 def _args(**kw):
-    base = dict(pr=None, remote=False, consensus=0, linear=None,
+    base = dict(pr=None, remote=False, consensus=0, reasoning_effort=None,
+                linear=None,
                 post_review=False, personas=None,
                 review_rounds=0, target='python',
                 target_version=None, debug=False, trace=False,
@@ -429,6 +430,24 @@ def test_run_review_consensus_runs_panel_n_times(repo):
         rc = asyncio.run(review.run_review(_args(consensus=3)))
     assert rc == 0
     assert len(panel_calls) == 3
+
+
+def test_run_review_reasoning_effort_flag(repo):
+    # --reasoning-effort overrides the default; without it the default (medium) applies.
+    seen = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        seen.append(k.get('reasoning_effort'))
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        asyncio.run(review.run_review(_args(reasoning_effort='high')))
+        asyncio.run(review.run_review(_args()))
+    assert seen == ['high', review.REVIEW_REASONING_EFFORT]
 
 
 # --- the panel path end-to-end (real personas, mocked LLM) -------------------

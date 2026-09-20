@@ -1049,6 +1049,7 @@ async def run_review(args):
 
     rounds = max(0, args.review_rounds)
     consensus_n = max(0, args.consensus or 0)
+    reasoning_effort = args.reasoning_effort or REVIEW_REASONING_EFFORT
     if consensus_n > 1:
         # Consensus: run the full panel+gate pass N times independently and keep only the findings
         # a majority of the runs corroborate. This stabilizes the output against the model's
@@ -1061,7 +1062,7 @@ async def run_review(args):
             passes.append(await _review_pass(
                 reviewers, message, model, base_name, base_ref, rounds, guidance,
                 pass_ctx, prior_block_by_number, prior_labels_by_number,
-                REVIEW_REASONING_EFFORT, REVIEW_SEED + i, args.debug))
+                reasoning_effort, REVIEW_SEED + i, args.debug))
         threshold = consensus_n // 2 + 1
         union = dedup_findings([f for p in passes for f in p])
         actionable = _corroborated(union, passes, threshold)
@@ -1074,7 +1075,7 @@ async def run_review(args):
         actionable = await _review_pass(
             reviewers, message, model, base_name, base_ref, rounds, guidance,
             tool_ctx, prior_block_by_number, prior_labels_by_number,
-            REVIEW_REASONING_EFFORT, REVIEW_SEED, args.debug)
+            reasoning_effort, REVIEW_SEED, args.debug)
 
     if actionable:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
@@ -1097,7 +1098,7 @@ async def run_review(args):
                 convs, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
             context, actionable, model, debug=args.debug, allow_empty=True,
-            reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED)
+            reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
         actionable = dedup_findings(consolidated)
         actionable = dedup_by_location(actionable)
     # Order the final set (severity, then location) before printing or posting.

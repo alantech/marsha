@@ -100,6 +100,11 @@ review_parser.add_argument('--consensus', type=int, default=0, metavar='N',
                                 'of the runs corroborate (N >= 2). Stabilizes the output against '
                                 'the model\'s run-to-run variance at ~Nx the cost. Default: 0 '
                                 '(a single pass).')
+review_parser.add_argument('--reasoning-effort',
+                           choices=['minimal', 'low', 'medium', 'high'],
+                           default=None,
+                           help='Reasoning effort for the review LLM calls. Higher is more '
+                                'thorough but slower. Default: medium.')
 review_parser.add_argument('--linear', default=None,
                            help='Linear ticket name whose requirements seed the review '
                                 '(needs the linear CLI).')
