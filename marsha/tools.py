@@ -185,27 +185,52 @@ def _git_page_result(result, sub, rest, page=None):
     # Bound a git result by explicit pagination instead of a silent truncation, so a reviewer
     # can never act on a partial view it mistakes for the whole file (the root of the "this
     # function is truncated, so the call must be missing / the file is corrupted" findings).
-    # Small outputs pass through unchanged. Large output returns the requested page (default:
-    # the first) under a header that states the total page count, that the file is complete,
-    # and the exact command to read the next page — and points presence/absence checks at
-    # `git grep`, whose output is small and never paged.
+    # Small outputs pass through unchanged. Large output is NOT shown until a page is named:
+    # a bare request returns an error stating the page count and the exact `PAGE=<n>`
+    # re-requests, so the boundaries stay unambiguous (no header buried beside the code to be
+    # misread as content). Pages are grouped by LINE (bounded by the char limit) so a page never
+    # chops a line or string in the middle, and each names its 1-based line range so the reviewer
+    # can cite real line numbers instead of guessing.
     if len(result) <= GIT_RESULT_CHAR_LIMIT:
         return result
-    total = (len(result) + GIT_RESULT_CHAR_LIMIT - 1) // GIT_RESULT_CHAR_LIMIT
+    text = result[:-1] if result.endswith('\n') else result
+    lines = text.split('\n')
+    # (first_line, last_line, page_text), 1-based line numbers
+    pages = []
+    page_start = 0
+    cur = []
+    cur_len = 0
+    for i, ln in enumerate(lines):
+        # +1 for the newline that joins this line on
+        add = len(ln) + (1 if cur else 0)
+        if cur and cur_len + add > GIT_RESULT_CHAR_LIMIT:
+            pages.append((page_start + 1, i, '\n'.join(cur)))
+            page_start, cur, cur_len = i, [ln], len(ln)
+        else:
+            cur.append(ln)
+            cur_len += add
+    if cur:
+        pages.append((page_start + 1, len(lines), '\n'.join(cur)))
+    total = len(pages)
     cmd = f'git {sub} {" ".join(rest)}'
     if not page or page < 1:
-        page = 1
+        return (
+            f'error: `{cmd}` produced {len(result)} chars across {len(lines)} lines — more '
+            f'than one page can return (limit {GIT_RESULT_CHAR_LIMIT} chars); it has {total} '
+            f'page(s) and I have shown you none of it yet. To read it, name a page '
+            f'(1..{total}):\n'
+            f'  $ PAGE=1 {cmd}\n'
+            f'  $ PAGE={total} {cmd}\n'
+            'Or, to check a symbol/call/import, search it instead of reading the file:\n'
+            f'  $ git grep <pattern> -- <path>\n'
+            'This is pagination of the tool output, not the file — the file is complete.')
     if page > total:
         return f'error: page {page} is out of range; this output has {total} page(s).'
-    start = (page - 1) * GIT_RESULT_CHAR_LIMIT
-    chunk = result[start:start + GIT_RESULT_CHAR_LIMIT]
-    header = (f'[page {page} of {total}: {len(result)} chars total; the file is complete, '
-              f'you are reading slice {page} of {total}.')
-    if page < total:
-        header += f' Next page: `$ PAGE={page + 1} {cmd}`.'
-    header += (' To check a symbol/call/import, prefer: '
-               '`$ git grep <pattern> -- <path>`.]')
-    return header + '\n' + chunk
+    lo, hi, body = pages[page - 1]
+    marker = f'[page {page} of {total}: lines {lo}-{hi} of {len(lines)}'
+    marker += (f' — more follows, next: `$ PAGE={page + 1} {cmd}`'
+               if page < total else ' — end of output') + ']'
+    return marker + '\n' + body
 
 
 def wrap_untrusted(name, content):
@@ -720,9 +745,10 @@ async def git(args, ctx=None, page=None):
     repository's working directory and return its output. Only read-only
     subcommands are permitted; mutating ones (commit/push/pull/checkout/
     reset/...) are refused, as are flags that write to disk. Output longer
-    than one page is returned page by page: prefix the command with
-    `PAGE=<n>` (e.g. `PAGE=2 git show HEAD:<path>`) to read a specific page;
-    the first page comes back by default, with the total page count named."""
+    than one page is not shown until a page is named: a bare request returns
+    an error naming the page count and the exact `PAGE=<n>` re-requests, and
+    a named page (e.g. `PAGE=2 git show HEAD:<path>`) returns that slice with
+    its 1-based line range so the total and the line numbers are unambiguous."""
     if not args:
         return 'error: git needs a subcommand, e.g. $ git diff <base>...HEAD'
     sub = args[0]
@@ -813,8 +839,9 @@ def agnostic_tool_commands(ctx=None):
                            '   (long output: prefix `PAGE=<n>`)',
                            'run a read-only git command in the repository (diff, log, show, '
                            'blame, grep, ls-files, ...); mutating commands are refused; long '
-                           'output is paged (`PAGE=<n> git ...`) — prefer `git grep` to check '
-                           'for a symbol/call/import rather than reading a whole file',
+                           'output is not shown until you name a page (`PAGE=<n> git ...`) — '
+                           'prefer `git grep` to check for a symbol/call/import rather than '
+                           'reading a whole file',
                            lambda args, _c=ctx, page=None: git(args, _c, page),
                            accepts_page=True),
         'notes': ToolCommand('notes', CATEGORY_NOTES,

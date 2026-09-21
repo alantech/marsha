@@ -635,28 +635,35 @@ def test_installed_env_venv_missing_is_error():
 
 def test_git_show_uses_larger_output_cap(tmp_path):
     # A cited file between the old 12KB cap and the git cap is returned in full (a reviewer
-    # sees the whole file it cites); a file beyond the git cap is paged — never silently
-    # truncated — and names the total page count, that the file is complete, and the next page.
+    # sees the whole file it cites); a file beyond the git cap is paged by LINE — never
+    # silently truncated, no page chops a line — and each names its 1-based line range.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
-    (tmp_path / 'mid.py').write_text('line\n' * 8000)   # ~40KB: under the git cap
-    (tmp_path / 'huge.txt').write_text('x' * 100_000)    # over the git cap
+    (tmp_path / 'mid.py').write_text('line\n' * 8000)            # ~40KB: under the git cap
+    (tmp_path / 'huge.txt').write_text('hello world\n' * 5000)   # 60KB, 5000 lines: over the cap
     subprocess.run(['git', 'add', 'mid.py', 'huge.txt'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     mid = asyncio.run(tools.git(['show', 'HEAD:mid.py'], ctx))
     assert '[truncated]' not in mid and '[page ' not in mid and len(mid) > 12_000
-    page1 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
-    assert '[truncated]' not in page1
-    assert page1.startswith('[page 1 of 3:')
-    assert 'the file is complete' in page1
-    assert 'PAGE=2 git show HEAD:huge.txt' in page1
-    assert page1.split('\n', 1)[1].startswith('x' * 1000)
-    assert len(page1) <= tools.GIT_RESULT_CHAR_LIMIT + 400
+    # A bare request for output beyond the cap returns an error naming the pages — no content.
+    nopage = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
+    assert nopage.startswith('error:')
+    assert '5000 lines' in nopage
+    assert '2 page(s)' in nopage
+    assert 'PAGE=1 git show HEAD:huge.txt' in nopage
+    assert len(nopage) < 1000
+    # A named page returns that slice with its 1-based line range, every line intact.
+    page1 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=1))
+    assert page1.startswith('[page 1 of 2: lines 1-4000 of 5000')
+    assert 'more follows' in page1
+    body1 = page1.split('\n', 1)[1]
+    assert all(ln == 'hello world' for ln in body1.split('\n'))
+    assert body1.count('hello world') == 4000
     page2 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=2))
-    assert page2.startswith('[page 2 of 3:')
-    assert 'PAGE=3 git show HEAD:huge.txt' in page2
+    assert page2.startswith('[page 2 of 2: lines 4001-5000 of 5000')
+    assert 'end of output' in page2
     beyond = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=99))
     assert beyond.startswith('error: page 99 is out of range')
 
