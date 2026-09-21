@@ -60,6 +60,18 @@ def test_extract_single_command():
     assert pending.malformed is False
 
 
+def test_extract_page_prefixed_command():
+    # A `PAGE=<n>` env-var prefix selects a page of a paged command's output; it is stripped
+    # from the name/args and surfaced on pending.page. A plain command has page None.
+    pending = tools.extract_pending_command(DOC + '\n$ PAGE=2 git show HEAD:src/x.py\n')
+    assert pending.name == 'git'
+    assert pending.args == ['show', 'HEAD:src/x.py']
+    assert pending.page == 2
+    assert pending.malformed is False
+    plain = tools.extract_pending_command(DOC + '\n$ git show HEAD:src/x.py\n')
+    assert plain.name == 'git' and plain.page is None
+
+
 def test_extract_only_last_nonempty_line_counts():
     # A $ command in the middle of the response is reasoning, not a command; only
     # the final non-empty line is read as a command.
@@ -109,6 +121,18 @@ def test_execute_known_command_runs_handler():
         out = asyncio.run(tools.execute_command(cmds, 'web-search', ['q']))
     assert out == 'OK'
     h.assert_awaited_once_with(['q'])
+
+
+def test_execute_command_forwards_page_only_to_paged_handlers():
+    # execute_command forwards `page` only to a command that paginates (accepts_page); other
+    # handlers are called with no page kwarg, so they never see it.
+    cmds = tools.build_commands(tools.ToolContext('review'))
+    with patch.object(cmds['git'], 'handler', new=AsyncMock(return_value='OK')) as h:
+        asyncio.run(tools.execute_command(cmds, 'git', ['show', 'HEAD:x'], page=3))
+        assert h.await_args.kwargs == {'page': 3}
+    with patch.object(cmds['notes'], 'handler', new=AsyncMock(return_value='OK')) as h2:
+        asyncio.run(tools.execute_command(cmds, 'notes', ['show'], page=3))
+        assert h2.await_args.kwargs == {}
 
 
 def test_execute_handler_exception_is_error_text():
@@ -610,8 +634,9 @@ def test_installed_env_venv_missing_is_error():
 
 
 def test_git_show_uses_larger_output_cap(tmp_path):
-    # A cited file between the old 12KB cap and the git cap must be returned in full (so a
-    # reviewer sees the whole file it cites), while a file beyond the git cap is still cut.
+    # A cited file between the old 12KB cap and the git cap is returned in full (a reviewer
+    # sees the whole file it cites); a file beyond the git cap is paged — never silently
+    # truncated — and names the total page count, that the file is complete, and the next page.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
@@ -621,10 +646,19 @@ def test_git_show_uses_larger_output_cap(tmp_path):
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     mid = asyncio.run(tools.git(['show', 'HEAD:mid.py'], ctx))
-    assert '[truncated]' not in mid and len(mid) > 12_000
-    huge = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
-    assert huge.rstrip().endswith('[truncated]')
-    assert len(huge) <= tools.GIT_RESULT_CHAR_LIMIT + 40
+    assert '[truncated]' not in mid and '[page ' not in mid and len(mid) > 12_000
+    page1 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
+    assert '[truncated]' not in page1
+    assert page1.startswith('[page 1 of 3:')
+    assert 'the file is complete' in page1
+    assert 'PAGE=2 git show HEAD:huge.txt' in page1
+    assert page1.split('\n', 1)[1].startswith('x' * 1000)
+    assert len(page1) <= tools.GIT_RESULT_CHAR_LIMIT + 400
+    page2 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=2))
+    assert page2.startswith('[page 2 of 3:')
+    assert 'PAGE=3 git show HEAD:huge.txt' in page2
+    beyond = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=99))
+    assert beyond.startswith('error: page 99 is out of range')
 
 
 # --- the tool loop -----------------------------------------------------------------

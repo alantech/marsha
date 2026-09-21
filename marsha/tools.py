@@ -152,6 +152,9 @@ class ToolCommand:
     usage: str
     description: str
     handler: 'callable'
+    # True for a command whose handler accepts a `page=` keyword (long output is returned
+    # page by page instead of truncated). Only the git tool uses this today.
+    accepts_page: bool = False
 
 
 @dataclasses.dataclass
@@ -161,6 +164,9 @@ class PendingCommand:
     name: str
     args: list
     malformed: bool = False
+    # A `PAGE=<n>` prefix on the command line, when present: the page of the output to
+    # return for a command that paginates long results (currently git). None otherwise.
+    page: int = None
 
 
 # --- small shared helpers -------------------------------------------------------
@@ -173,6 +179,33 @@ def truncate(text, limit=RESULT_CHAR_LIMIT):
     if len(text) <= limit:
         return text
     return text[:limit] + '\n…[truncated]'
+
+
+def _git_page_result(result, sub, rest, page=None):
+    # Bound a git result by explicit pagination instead of a silent truncation, so a reviewer
+    # can never act on a partial view it mistakes for the whole file (the root of the "this
+    # function is truncated, so the call must be missing / the file is corrupted" findings).
+    # Small outputs pass through unchanged. Large output returns the requested page (default:
+    # the first) under a header that states the total page count, that the file is complete,
+    # and the exact command to read the next page — and points presence/absence checks at
+    # `git grep`, whose output is small and never paged.
+    if len(result) <= GIT_RESULT_CHAR_LIMIT:
+        return result
+    total = (len(result) + GIT_RESULT_CHAR_LIMIT - 1) // GIT_RESULT_CHAR_LIMIT
+    cmd = f'git {sub} {" ".join(rest)}'
+    if not page or page < 1:
+        page = 1
+    if page > total:
+        return f'error: page {page} is out of range; this output has {total} page(s).'
+    start = (page - 1) * GIT_RESULT_CHAR_LIMIT
+    chunk = result[start:start + GIT_RESULT_CHAR_LIMIT]
+    header = (f'[page {page} of {total}: {len(result)} chars total; the file is complete, '
+              f'you are reading slice {page} of {total}.')
+    if page < total:
+        header += f' Next page: `$ PAGE={page + 1} {cmd}`.'
+    header += (' To check a symbol/call/import, prefer: '
+               '`$ git grep <pattern> -- <path>`.]')
+    return header + '\n' + chunk
 
 
 def wrap_untrusted(name, content):
@@ -682,11 +715,14 @@ GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
 GIT_TIMEOUT = 60
 
 
-async def git(args, ctx=None):
+async def git(args, ctx=None, page=None):
     """`git <subcommand> [args...]` — run a read-only git command in the
-    repository's working directory and return its output (truncated). Only
-    read-only subcommands are permitted; mutating ones (commit/push/pull/
-    checkout/reset/...) are refused, as are flags that write to disk."""
+    repository's working directory and return its output. Only read-only
+    subcommands are permitted; mutating ones (commit/push/pull/checkout/
+    reset/...) are refused, as are flags that write to disk. Output longer
+    than one page is returned page by page: prefix the command with
+    `PAGE=<n>` (e.g. `PAGE=2 git show HEAD:<path>`) to read a specific page;
+    the first page comes back by default, with the total page count named."""
     if not args:
         return 'error: git needs a subcommand, e.g. $ git diff <base>...HEAD'
     sub = args[0]
@@ -719,7 +755,7 @@ async def git(args, ctx=None):
         return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'
     if errtxt:
         result = (result + '\n[git stderr]\n' + errtxt).strip()
-    return truncate(result, limit=GIT_RESULT_CHAR_LIMIT)
+    return _git_page_result(result, sub, rest, page)
 
 
 async def notes(args, ctx=None):
@@ -773,10 +809,14 @@ def agnostic_tool_commands(ctx=None):
                             'final expression is returned (use print()/console.log() for extra lines)',
                             lambda args, _c=ctx: calc(args, _c)),
         'git': ToolCommand('git', CATEGORY_GIT,
-                           '$ git <subcommand> [args...]',
+                           '$ git <subcommand> [args...]'
+                           '   (long output: prefix `PAGE=<n>`)',
                            'run a read-only git command in the repository (diff, log, show, '
-                           'blame, grep, ls-files, ...); mutating commands are refused',
-                           lambda args, _c=ctx: git(args, _c)),
+                           'blame, grep, ls-files, ...); mutating commands are refused; long '
+                           'output is paged (`PAGE=<n> git ...`) — prefer `git grep` to check '
+                           'for a symbol/call/import rather than reading a whole file',
+                           lambda args, _c=ctx, page=None: git(args, _c, page),
+                           accepts_page=True),
         'notes': ToolCommand('notes', CATEGORY_NOTES,
                              '$ notes add <text> | notes show',
                              'a per-reviewer scratchpad: `notes add` records a note (survives '
@@ -836,6 +876,10 @@ def tool_instructions(ctx=None):
 
 
 _COMMAND_RE = re.compile(r'^\$\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
+# A `PAGE=<n>` prefix (env-var style) selects a page of a paged command's output, e.g.
+# `$ PAGE=2 git show HEAD:<path>`. Matched before the plain command so the prefix is stripped.
+_PAGE_COMMAND_RE = re.compile(
+    r'^\$\s+PAGE=(\d+)\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
 
 
 def extract_pending_command(text):
@@ -853,6 +897,16 @@ def extract_pending_command(text):
             last = line.strip()
     if last is None or not last.startswith('$'):
         return None
+    pm = _PAGE_COMMAND_RE.match(last)
+    if pm is not None:
+        name = pm.group(2)
+        rest = pm.group(3) or ''
+        try:
+            args = shlex.split(rest)
+        except ValueError:
+            return PendingCommand(line=last, name=name, args=[], malformed=True)
+        return PendingCommand(line=last, name=name, args=args,
+                              page=int(pm.group(1)))
     m = _COMMAND_RE.match(last)
     if m is None:
         return PendingCommand(line=last, name=last, args=[], malformed=True)
@@ -865,15 +919,18 @@ def extract_pending_command(text):
     return PendingCommand(line=last, name=name, args=args)
 
 
-async def execute_command(commands, name, args):
+async def execute_command(commands, name, args, page=None):
     """Run one fake-terminal command and return its output text. Errors are
     returned as `error: ...` text so the model can see what went wrong and
-    adapt, instead of the loop raising."""
+    adapt, instead of the loop raising. `page` is forwarded only to commands
+    that paginate long output (ToolCommand.accepts_page); others ignore it."""
     cmd = commands.get(name)
     if cmd is None:
         available = '; '.join(c.usage for c in commands.values())
         return f'error: unknown command: {name}. Available commands: {available}'
     try:
+        if cmd.accepts_page:
+            return await cmd.handler(args, page=page)
         return await cmd.handler(args)
     except Exception as e:
         return f'error: command {name} failed: {e}'
@@ -981,7 +1038,8 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
             print(f'[tools] round {round_ + 1}/{max_rounds}: {pending.name}')
         log(f'tools round {round_ + 1}/{max_rounds}: {pending.name}')
         label = pending.name if pending.name in commands else 'command'
-        result = await execute_command(commands, pending.name, pending.args)
+        result = await execute_command(commands, pending.name, pending.args,
+                                       page=pending.page)
         # Record what the reviewer actually retrieved (the command and its raw output) so the
         # evidence gate can later prove a finding was grounded in real git output, not a guess.
         if pending.name == 'git':
