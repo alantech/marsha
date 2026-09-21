@@ -43,6 +43,7 @@ A finding must be a concrete, actionable problem in the current code. Do NOT com
 Before reporting a robustness or error-handling concern (for example "this swallows an error", "this can hide a failure", or "this leaves resources open"), check with the git tool how the code is actually used; if every caller already handles the case the concern is about, it is not a finding.
 Do NOT report a performance or micro-optimization suggestion (precomputing, hoisting, caching, batching, parallelizing, or a complexity claim) unless you can show it is in a hot loop or works on data large enough to measurably affect overall performance; a one-off call, a pairwise pass over a single-digit-sized collection, or any complexity or allocation change with no evidence of real impact is not a finding.
 Do NOT base a finding on a project convention, style rule, or requirement unless you can point to it in a config file, the PR or issue, or the surrounding code; a rule you cannot find written in the repository is not a finding.
+Every variable, class, function, file path, and line you name in a finding or its support must be one you actually opened with the git tool this session — cite only symbols that exist. Do not describe, quote, or reason about code you did not open, and do not infer a file or a line number from a naming convention (for example, that a class must live in a file of its own name) without opening it to confirm. If you cannot point to a real, existing symbol or line, do NOT report the finding: an invented or unverified detail disqualifies it, and a finding whose evidence you did not actually read will be rejected.
 If you have no new, verified finding, respond with exactly: NO FINDINGS
 Do not restate your own name. Do not add any prose outside a finding (the supporting paragraphs are part of that finding).
 '''
@@ -388,8 +389,11 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
         system += FINDINGS_CONTRACT.format(review_number=review_number)
         # A fresh notes list per reviewer (the `notes` tool mutates it); the command set is the
         # same for all reviewers, so the instructions can be built from either copy.
-        rctx = dataclasses.replace(tool_ctx, notes=list(
-            tool_ctx.notes)) if tool_ctx is not None else None
+        # A fresh notes list AND a fresh evidence ledger per reviewer (the git tool appends to
+        # ctx.evidence as it runs); sharing either would leak scratchpads or retrieved code across
+        # reviewers. `dataclasses.replace` would copy the list by reference, so reset both.
+        rctx = dataclasses.replace(
+            tool_ctx, notes=list(tool_ctx.notes), evidence=[]) if tool_ctx is not None else None
         if rctx is not None:
             system += tools.tool_instructions(rctx)
         label = f'{loop}:{name}' if loop else name
@@ -412,7 +416,14 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
             return []
-        return parse_findings(text, name, review_number, prior_labels=prior_labels)
+        findings = parse_findings(
+            text, name, review_number, prior_labels=prior_labels)
+        # Attach the git evidence this reviewer actually retrieved, so the evidence gate can later
+        # verify each finding against real tool output (not the model's word for it).
+        evidence = rctx.evidence if rctx is not None else []
+        for f in findings:
+            f['evidence'] = evidence
+        return findings
     if is_local_backend():
         results = [await one(s) for s in reviewers]
     else:

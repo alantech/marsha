@@ -666,6 +666,60 @@ def test_run_with_tools_single_call_without_commands():
     assert len(mapper.calls) == 1
 
 
+def test_run_with_tools_records_git_evidence(tmp_path):
+    # Every git command the reviewer runs is captured on ctx.evidence (command line + raw output),
+    # independent of context compaction, so the review's evidence gate can later prove a finding
+    # was grounded in real git output rather than a guess. Non-git commands are not recorded.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with_cmd = 'A1 [MAJOR] mid.py:2 - beta is wrong'
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == with_cmd
+    assert len(ctx.evidence) == 1
+    line, result = ctx.evidence[0]
+    assert 'git show HEAD:mid.py' in line
+    assert 'beta' in result
+
+
+def test_run_with_tools_does_not_record_non_git_evidence():
+    # Only git output is evidence; a web-search result is not.
+    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
+    ctx = tools.ToolContext('gen')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+
+
+def test_run_with_tools_requires_probe_before_findings(tmp_path):
+    # With require_evidence set (the review panel), a findings response is bounced back until the
+    # reviewer has run a git command — the file summary alone is not a basis for a finding. The
+    # final finding is only accepted after the forced probe, which lands in the evidence ledger.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # Reports a finding (no probe yet) -> bounced -> probes -> reports again (accepted).
+    mapper = ScriptedMapper([finding, '$ git show HEAD:mid.py\n', finding])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == finding
+    assert len(ctx.evidence) == 1  # it was forced to probe before the finding was accepted
+    # A "NO FINDINGS" answer is exempt: accepted without any probe.
+    ctx2 = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    out2 = asyncio.run(
+        tools.run_with_tools(ScriptedMapper(['NO FINDINGS']), 'REQ', ctx2))
+    assert out2 == 'NO FINDINGS' and ctx2.evidence == []
+
+
 def test_run_with_tools_unknown_command_feeds_error():
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])

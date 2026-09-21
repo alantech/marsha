@@ -401,7 +401,9 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
     # none. Mirrors the editor role in the optimize loops, but it pushes back on findings.
     if not findings:
         return ''
-    gate_ctx = dataclasses.replace(tool_ctx, notes=[])
+    # The gate rebuts findings (it answers "NO OBJECTIONS" or rebuttals, not findings), so it is
+    # exempt from mandatory probing; it may still probe to check a convention.
+    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
     _name, body = load_editor('review')
     system = body + _CONVENTIONS_REBUTTAL_CONTRACT
     system += tools.tool_instructions(gate_ctx)
@@ -742,6 +744,128 @@ def _corroborated(findings, passes, threshold):
     return kept
 
 
+# A code identifier, optionally a dotted member chain (e.g. `svc.foo.bar`). Used to pull the
+# concrete symbols a finding leans on so the evidence gate can check them against real output.
+_ANCHOR_TOKEN = re.compile(
+    r'[A-Za-z_$][A-Za-z0-9_]*(?:\.[A-Za-z_$][A-Za-z0-9_]*)*')
+
+
+def _is_distinctive(tok):
+    # A code-like token rather than an English word: long enough and shaped like an identifier —
+    # it carries an underscore, a dotted member, or a camelCase hump. Anchoring the check on these
+    # (not on common words, which appear in any retrieved code) is what makes the gate discriminative.
+    return (len(tok) >= 4
+            and ('_' in tok or '.' in tok
+                 or re.search(r'[a-z][A-Z]', tok) is not None))
+
+
+def _distinctive_anchors(finding):
+    # The code-like symbols a finding leans on, drawn from its headline and support (NOT its
+    # location: the cited path is checked separately as "the file was opened", and letting it feed
+    # the symbol set would ground a finding merely because the reviewer read the cited file, even
+    # when none of the symbols the finding actually claims were in that file). For the finding to
+    # count as grounded, at least one of these must appear in the git output its reviewer actually
+    # retrieved. An empty set means the check falls back to the cited file having been opened.
+    text = ' '.join(
+        filter(None, [finding.get('desc'), finding.get('support')]))
+    anchors = set()
+    for tok in _ANCHOR_TOKEN.findall(text):
+        if _is_distinctive(tok):
+            anchors.add(tok)
+            for part in tok.split('.'):
+                if _is_distinctive(part):
+                    anchors.add(part)
+    return anchors
+
+
+def _location_file(location):
+    # A single file path from a finding's location, or None when it is not a clean single file.
+    # The file is everything before a trailing line spec — a ':' followed by a digit, whatever
+    # follows it (":12", ":12:40", ":12-40", ":1-EOF", ":12+", ":9-15,28-29"). Returns None for a
+    # multi-file location ("a.ts + b.ts") or anything with a space: those cannot be checked as one
+    # file, so the file-data backstop must not treat the raw string as a filename (doing so wrongly
+    # "fabricates" a nonexistent path and drops a real finding).
+    if not location or ' + ' in location:
+        return None
+    loc = location.strip()
+    if ' ' in loc:
+        return None
+    m = re.match(r'^(.*?):\d.*$', loc)
+    if m:
+        return m.group(1).strip()
+    return loc
+
+
+async def _file_info(path, cwd, base_ref, cache):
+    # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there.
+    # Cached per path so several findings citing the same file cost one probe each. A deleted
+    # file (present at base, absent at HEAD) still resolves against the base.
+    if path in cache:
+        return cache[path]
+    exists = False
+    line_count = None
+    for ref in ('HEAD', base_ref):
+        rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
+        if rc != 0:
+            continue
+        exists = True
+        rc, content, _err = await _git('show', f'{ref}:{path}', cwd=cwd)
+        if rc == 0 and content:
+            line_count = len(content.splitlines())
+        break
+    cache[path] = (exists, line_count)
+    return cache[path]
+
+
+async def evidence_gate(findings, cwd, base_ref, debug=False):
+    # Deterministic anti-hallucination filter, run before consolidation so the LLM only ever sees
+    # grounded findings. Mandatory probing (in the tool loop) already requires a reviewer to run a
+    # git command before it may report, so a well-formed finding carries an evidence ledger; this
+    # gate checks each finding against the code ITS reviewer actually read:
+    #   (primary) at least one symbol it names — or, when it names no symbol, the file it cites —
+    #     must appear in that reviewer's git output. A finding whose symbols were never read is a
+    #     guess, dropped even though the file data is real. A finding with no evidence at all (the
+    #     loop gave up forcing a probe) is unverified and dropped.
+    #   (backstop) a cited file must exist in the repo and a cited line be within its length, which
+    #     drops outright fabrications (a nonexistent path, or a line past the end).
+    # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
+    # reviewer read, even though the missing symbol itself is absent.
+    if not findings:
+        return findings
+    file_cache = {}
+    kept = []
+    for f in findings:
+        location = f.get('location') or ''
+        _path, line = parse_location(location)
+        file_path = _location_file(location)
+        evidence = f.get('evidence') or []
+        anchors = _distinctive_anchors(f)
+        scope = '\n'.join(f'{cmd}\n{out}' for cmd, out in evidence)
+        ok, reason = True, ''
+        if not evidence:
+            ok, reason = False, 'no git verification: reported without reading the code'
+        elif anchors:
+            if not any(a in scope for a in anchors):
+                ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
+        elif file_path:
+            base = file_path.rsplit('/', 1)[-1]
+            if file_path not in scope and base not in scope:
+                ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
+        if ok and file_path:
+            exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
+            if not exists:
+                ok, reason = False, f'cited file {file_path} does not exist at HEAD or {base_ref}'
+            elif line is not None and line_count is not None and line > line_count:
+                ok, reason = False, (f'cited line {line} is beyond the file '
+                                     f'({line_count} lines at HEAD)')
+        if ok:
+            kept.append(f)
+        elif debug:
+            print(f'[Review] evidence gate dropped '
+                  f'[{f.get("name")}-{f.get("label")}] {f.get("location")}: {reason}')
+    return kept
+
+
 _BODY_FINDING_RE = re.compile(
     r'^-\s+\*\*\[([A-Z]+\d+)\]\s+\w+\s*\*\*\s*`([^`]*)`\s*:\s*(.+)$', re.M)
 
@@ -931,6 +1055,7 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
     # voting across passes, or a single-pass consolidation.
     prior_findings, prior_preamble = [], ''
     actionable = []
+    evidence_by_number = {}
     for i in range(rounds + 1):
         user_message = message
         if i > 0:
@@ -944,6 +1069,14 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
             reasoning_effort=reasoning_effort, seed=seed)
+        # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
+        # verifies with git in an early round and may re-state the finding in a later round without
+        # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
+        # just the one that emitted a given finding. The gate must judge a finding against the code
+        # the reviewer actually read over the whole pass.
+        for f in findings:
+            evidence_by_number.setdefault(
+                _label_reviewer_number(f['label']), []).extend(f.get('evidence') or [])
         actionable = dedup_findings(findings)
         if i == rounds or not actionable:
             break
@@ -959,6 +1092,9 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
             print(
                 f'[Review] conventions gate rebutted findings; starting round {i + 2}')
         prior_findings, prior_preamble = actionable, preamble
+    for f in actionable:
+        f['evidence'] = evidence_by_number.get(
+            _label_reviewer_number(f['label']), list(f.get('evidence') or []))
     return dedup_by_location(actionable)
 
 
@@ -1064,7 +1200,8 @@ async def run_review(args):
         # distinct seed so a seed-honoring provider samples independently.
         passes = []
         for i in range(consensus_n):
-            pass_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
+            pass_ctx = tools.ToolContext(
+                phase='review', workdir=cwd, notes=[], require_evidence=True)
             passes.append(await _review_pass(
                 reviewers, message, model, base_name, base_ref, rounds, guidance,
                 pass_ctx, prior_block_by_number, prior_labels_by_number,
@@ -1072,16 +1209,35 @@ async def run_review(args):
         threshold = consensus_n // 2 + 1
         union = dedup_findings([f for p in passes for f in p])
         actionable = _corroborated(union, passes, threshold)
+        # A corroborated finding is raised by several independent passes, each with its OWN git
+        # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
+        # for the same (name, label) so the evidence gate sees all the code the panel actually read.
+        evidence_by_key = {}
+        for p in passes:
+            for pf in p:
+                evidence_by_key.setdefault(
+                    (pf['name'], pf['label']), []).extend(pf.get('evidence') or [])
+        for f in actionable:
+            f['evidence'] = evidence_by_key.get(
+                (f['name'], f['label']), list(f.get('evidence') or []))
         if args.debug:
             print(f'[Review] consensus over {consensus_n} passes '
                   f'(threshold {threshold}): {len(union)} candidate(s) -> '
                   f'{len(actionable)} corroborated')
     else:
-        tool_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
+        tool_ctx = tools.ToolContext(
+            phase='review', workdir=cwd, notes=[], require_evidence=True)
         actionable = await _review_pass(
             reviewers, message, model, base_name, base_ref, rounds, guidance,
             tool_ctx, prior_block_by_number, prior_labels_by_number,
             reasoning_effort, REVIEW_SEED, args.debug)
+
+    # Deterministic anti-hallucination gate (before consolidation): drop a finding whose concrete
+    # references do not hold up — a named symbol or cited file the reviewer never actually read,
+    # a finding reported without any probe, a file that does not exist, or a line past the end of
+    # the file. Runs on both the single-pass and consensus paths, so the consolidator only ever
+    # sees grounded findings.
+    actionable = await evidence_gate(actionable, cwd, base_ref, debug=args.debug)
 
     if actionable:
         # Collapse same-location findings first (model-independent), run the semantic pass on the

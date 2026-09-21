@@ -127,6 +127,17 @@ class ToolContext:
     # Per-reviewer scratchpad (the `notes` tool). A fresh list per reviewer; on a
     # context compaction the notes are re-attached so they survive. Empty elsewhere.
     notes: list = dataclasses.field(default_factory=list)
+    # Per-reviewer evidence ledger: the (command line, raw output) of every git command the
+    # reviewer actually ran, captured as the tool loop executes. Unlike the message history it is
+    # NOT summarized away by context compaction, so it is the faithful record of what the reviewer
+    # really retrieved — the basis for the review's anti-hallucination evidence gate. A fresh list
+    # per reviewer so their ledgers do not leak across reviewers.
+    evidence: list = dataclasses.field(default_factory=list)
+    # When True (the review panel), the loop will not accept a findings response until the
+    # reviewer has actually run a git command — the changed-file summary (names + line counts) is
+    # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
+    # conventions gate) so a stage is never blocked from answering.
+    require_evidence: bool = False
 
 
 @dataclasses.dataclass
@@ -911,6 +922,18 @@ async def _maybe_compact_tool_history(messages, mapper, ctx, debug=False):
     return [{'role': 'user', 'content': content}]
 
 
+# A finding headline carries a severity tag, e.g. "A1 [MAJOR] ...". A response with none of these
+# is a "no findings" answer (exempt from mandatory probing) rather than a findings report.
+_FINDING_SEVERITY_RE = re.compile(
+    r'\[(?:MAJOR|MINOR|NIT|NITPICK)\]', re.IGNORECASE)
+
+
+def _is_no_findings_response(text):
+    # True when a tool-loop response reports no findings (so it needs no git probe to back up):
+    # it contains no finding headline. A report of any finding (any severity tag) is not exempt.
+    return _FINDING_SEVERITY_RE.search(text or '') is None
+
+
 async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_TOOL_ROUNDS):
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
     the response's final line is a `$` command, execute it and feed the
@@ -932,12 +955,37 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
         last_text = text
         pending = extract_pending_command(text)
         if pending is None:
+            # Mandatory probing: a findings response is only accepted once the reviewer has
+            # actually run a git command. The changed-file summary (file names + line counts) is
+            # not a basis for a finding, so a report made without reading the code is bounced back
+            # with an instruction to probe. "NO FINDINGS" is exempt — there is nothing to verify.
+            if (ctx.require_evidence and not ctx.evidence
+                    and not _is_no_findings_response(text)):
+                if debug:
+                    print(
+                        '[tools] findings reported without a git probe; requesting one')
+                block = (
+                    'You reported findings but you have not run a single `git` command, and the '
+                    'changed-file summary (file names and line counts) is not a basis for a '
+                    'finding. Before you report, read the code: for each finding you will keep, '
+                    '`git show HEAD:<path>` the exact lines you cite, and `git grep` for any logic '
+                    'you claim is missing or duplicated. Then re-issue your findings. If, after '
+                    'reading the code, you have no real finding, respond with exactly: NO FINDINGS')
+                messages.extend([
+                    {'role': 'assistant', 'content': text},
+                    {'role': 'user', 'content': block},
+                ])
+                continue
             return text
         if debug:
             print(f'[tools] round {round_ + 1}/{max_rounds}: {pending.name}')
         log(f'tools round {round_ + 1}/{max_rounds}: {pending.name}')
         label = pending.name if pending.name in commands else 'command'
         result = await execute_command(commands, pending.name, pending.args)
+        # Record what the reviewer actually retrieved (the command and its raw output) so the
+        # evidence gate can later prove a finding was grounded in real git output, not a guess.
+        if pending.name == 'git':
+            ctx.evidence.append((pending.line, result))
         block = (wrap_untrusted(label, result)
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '
