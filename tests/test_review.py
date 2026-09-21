@@ -32,6 +32,21 @@ def _clear_repo_name_cache():
     review._repo_name_cache.clear()
 
 
+# The review loop runs a critic gate (Vera) alongside the conventions gate. The tests no-op it by
+# default so no integration test makes a real critic LLM call (matching the "gates are mocked"
+# intent); the critic's own tests call the real function, captured here before the fixture patches
+# the module attribute.
+_CRITIC_GATE = review.critic_gate
+
+
+@pytest.fixture(autouse=True)
+def _critic_quiet():
+    async def _quiet(*a, **k):
+        return ''
+    with patch.object(review, 'critic_gate', new=_quiet):
+        yield
+
+
 def _git(cwd, *args):
     subprocess.run(['git', *args], cwd=cwd, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -355,6 +370,18 @@ def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_drops_finding_grounded_only_in_grep_query(repo):
+    # A reviewer greps for a symbol that does not exist (git grep returns nothing) and reads a
+    # file that lacks it. The symbol appears only in the grep QUERY, not in any retrieved output,
+    # so the finding is a fabrication and is dropped — the query string is not evidence.
+    ev = [
+        ('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour'),
+        ('$ git grep -n "phantomHandler"', ''),
+    ]
+    f = _gate_finding('phantomHandler leaks memory', 'a.txt:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_keeps_absence_finding_on_read_file(repo):
     # "no maxItems": the missing symbol is absent from the evidence, but a co-cited real symbol
     # (minItems) that the reviewer read is present, so the finding survives on at least one anchor.
@@ -502,6 +529,46 @@ def test_conventions_gate_rebuts_and_noobjections(repo):
     assert out == ''
 
 
+def test_critic_gate_refutes_and_noobjections(repo):
+    # The critic refutes a finding whose claim the code contradicts (citing counter-evidence),
+    # or reports NO OBJECTIONS when every finding holds up.
+    class RefuteMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *a, **k):
+            return '[Sage-A1] - compute_total is called at calc.py:40'
+
+    class QuietMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *a, **k):
+            return 'NO OBJECTIONS'
+
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'compute_total is never called'}]
+    ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
+
+    async def no_compact(messages, mapper, ctx, debug=False):
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: RefuteMapper()):
+        out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
+    assert 'Sage-A1' in out and 'calc.py:40' in out
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
+        out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
+    assert out == ''
+
+
 # --- the multi-round review loop ---------------------------------------------
 
 
@@ -562,6 +629,36 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
     # The revision round tells the reviewer to drop rebutted findings unless very confident.
     assert 'Handling the conventions review' in panel_calls[1]
     assert 'very confident' in panel_calls[1]
+
+
+def test_review_loop_revises_when_critic_refutes(repo, capsys):
+    # The conventions gate is quiet but the critic refutes a finding -> the panel re-runs (round 2)
+    # with the refutation, so each reviewer can drop the finding the code contradicts.
+    panel_calls = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        panel_calls.append(message)
+        return _finding()
+
+    async def fake_conv(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+        return ''  # conventions gate is quiet
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+        return '[Sage-A1] - the claimed-missing call is present at a.txt:5'
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'conventions_gate', new=fake_conv), \
+         patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args(review_rounds=1)))
+    assert rc == 0
+    assert len(panel_calls) == 2  # initial round + one revision round driven by the critic
+    assert 'Previous review round' in panel_calls[1]
+    assert 'critic' in panel_calls[1]
+    assert '[Sage-A1]' in panel_calls[1]
 
 
 def test_review_loop_stops_at_round_budget(repo):

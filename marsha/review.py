@@ -22,8 +22,9 @@ from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
 from marsha.personas import (build_registry, dedup_by_location, dedup_findings,
-                             format_findings, load_editor, position_label,
-                             prior_round_block, resolve_loop_reviewers, run_personas)
+                             format_findings, load_editor, load_persona,
+                             personas_dir, position_label, prior_round_block,
+                             resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
@@ -45,13 +46,13 @@ REVIEW_SEED = 1
 # review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;
 # without this, a reviewer re-raises rebutted findings (and, anchored on them, adds new noise).
 _REFUTE_CONFIDENCE_RULE = (
-    '\n# Handling the conventions review\n'
-    'You are re-reviewing after the conventions review pushed back on some of your findings. '
-    'For each of your findings from last round that it rebutted, DROP it. Re-raise it only if '
-    'you are very confident the rebuttal misreads the codebase, and only after re-verifying your '
-    'position with the git tool (git show / git grep). When in doubt, drop the finding. Keep the '
-    'findings it did not rebut, and add a new one only if you have verified it with the git tool. '
-    'Do not re-raise a rebutted finding on a hunch.')
+    '\n# Handling the conventions review and the critic\n'
+    'You are re-reviewing after the conventions review and the critic pushed back on some of '
+    'your findings. For each of your findings from last round that they rebutted, DROP it. '
+    'Re-raise it only if you are very confident the rebuttal misreads the codebase, and only '
+    'after re-verifying your position with the git tool (git show / git grep). When in doubt, '
+    'drop the finding. Keep the findings they did not rebut, and add a new one only if you have '
+    'verified it with the git tool. Do not re-raise a rebutted finding on a hunch.')
 
 
 def gh_available():
@@ -421,6 +422,59 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
             mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
     except Exception as e:
         log(f'review: conventions gate failed: {e}')
+        return ''
+    text = (text or '').strip()
+    if not text or text.upper().startswith('NO OBJECTIONS'):
+        return ''
+    return text
+
+
+# The critic's output contract: it refutes findings (by [Name-Label]) whose central claim the
+# code contradicts, or it reports NO OBJECTIONS. Like the conventions gate it pushes back on
+# findings instead of editing code, but on counter-evidence (is the claimed-missing code
+# actually present?) rather than on conventions.
+_CRITIC_REBUTTAL_CONTRACT = '''
+
+You are checking a set of code-review FINDINGS (not the code directly) for whether their central claims hold up against the actual code. Your only job is to REFUTE the findings the code contradicts. Cite each refuted finding by its exact [Name-Label], with the concrete counter-evidence (a file:line).
+Do NOT re-raise findings, add new ones, or restate agreement with a finding.
+If every finding holds up against the code, respond with exactly: NO OBJECTIONS
+Otherwise respond with one refutation per line, in exactly this form:
+[Name-Label] - <one-line reason the code contradicts it, citing the file:line counter-evidence>
+Do not restate a reviewer's name. Do not add any prose outside the refutations.
+'''
+
+
+async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=False,
+                      reasoning_effort=None, seed=None):
+    # The critic (Vera): actively search the code for counter-evidence to each finding — a
+    # claimed-missing call/import that is present, a claimed-undefined symbol that is defined, a
+    # "corrupted" file that is actually valid — and return refutations citing the [Name-Label]s,
+    # or '' when every finding holds up. Complements conventions_gate (which only checks
+    # conventions): together they push back on findings that are wrong for any reason, and the
+    # panel revises against both in the same round.
+    if not findings:
+        return ''
+    # The critic refutes findings (it answers NO OBJECTIONS or refutations, not findings), so it
+    # is exempt from mandatory probing; it still probes with git to find counter-evidence.
+    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
+    _name, body = load_persona(os.path.join(
+        personas_dir(), '_review-critic.md'))
+    system = body + _CRITIC_REBUTTAL_CONTRACT
+    system += tools.tool_instructions(gate_ctx)
+    user = (
+        f'Check the findings below against the actual code (default branch `{base_name}`, '
+        f'diff base ref `{base_ref}`). For each finding, use the git tool to look for '
+        f'counter-evidence: `git grep` the exact symbol it hinges on, and `git show HEAD:<path>` '
+        f'the lines it cites. Refute only the findings the code plainly contradicts, citing the '
+        f'counter-evidence.\n\n# Findings under review\n\n' + format_findings(findings))
+    mapper = get_mapper(system, n_results=1, stats_stage='review',
+                        model=model, label='review:critic',
+                        reasoning_effort=reasoning_effort, seed=seed)
+    try:
+        text = await tools.run_with_tools(
+            mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
+    except Exception as e:
+        log(f'review: critic failed: {e}')
         return ''
     text = (text or '').strip()
     if not text or text.upper().startswith('NO OBJECTIONS'):
@@ -840,16 +894,23 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
         file_path = _location_file(location)
         evidence = f.get('evidence') or []
         anchors = _distinctive_anchors(f)
-        scope = '\n'.join(f'{cmd}\n{out}' for cmd, out in evidence)
+        # The symbol check matches against the git OUTPUT only, never the command text: a reviewer
+        # can grep for a symbol that does not exist (git grep returns nothing), and counting the
+        # query string as evidence would ground a fabricated symbol in its own lookup. A symbol is
+        # "read" only if it appears in code the reviewer actually retrieved.
+        output_scope = '\n'.join(out for _cmd, out in evidence)
+        # The file-opened check (for a finding that names no symbol) matches against the COMMAND
+        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output.
+        command_scope = '\n'.join(cmd for cmd, _out in evidence)
         ok, reason = True, ''
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
         elif anchors:
-            if not any(a in scope for a in anchors):
+            if not any(a in output_scope for a in anchors):
                 ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
         elif file_path:
             base = file_path.rsplit('/', 1)[-1]
-            if file_path not in scope and base not in scope:
+            if file_path not in command_scope and base not in command_scope:
                 ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
         if ok and file_path:
             exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
@@ -1060,7 +1121,7 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
         user_message = message
         if i > 0:
             user_message += prior_round_block(
-                prior_findings, prior_preamble, 'conventions review')
+                prior_findings, prior_preamble, 'conventions review and the critic')
             user_message += _REFUTE_CONFIDENCE_RULE
         findings = await run_personas(
             reviewers, user_message, model, 'review',
@@ -1080,17 +1141,28 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
         actionable = dedup_findings(findings)
         if i == rounds or not actionable:
             break
-        preamble = await conventions_gate(
-            actionable, tool_ctx, model, base_name, base_ref, debug,
-            reasoning_effort=reasoning_effort, seed=seed)
+        # The conventions gate (does a finding violate a real convention?) and the critic (does
+        # the code contradict a finding?) run in parallel and their rebuttals are combined, so the
+        # panel revises against every kind of push-back in the same round.
+        conv_preamble, critic_preamble = await asyncio.gather(
+            conventions_gate(
+                actionable, tool_ctx, model, base_name, base_ref, debug,
+                reasoning_effort=reasoning_effort, seed=seed),
+            critic_gate(
+                actionable, tool_ctx, model, base_name, base_ref, debug,
+                reasoning_effort=reasoning_effort, seed=seed))
+        preamble = '\n'.join(p for p in (conv_preamble, critic_preamble) if p)
         if not preamble:
             if debug:
                 print(
-                    '[Review] conventions gate found no convention violations; converged')
+                    '[Review] conventions gate and critic found no issues; converged')
             break
         if debug:
-            print(
-                f'[Review] conventions gate rebutted findings; starting round {i + 2}')
+            n_conv = 0 if not conv_preamble else conv_preamble.count('\n') + 1
+            n_crit = 0 if not critic_preamble else critic_preamble.count(
+                '\n') + 1
+            print(f'[Review] conventions gate ({n_conv}) and critic ({n_crit}) '
+                  f'rebutted findings; starting round {i + 2}')
         prior_findings, prior_preamble = actionable, preamble
     for f in actionable:
         f['evidence'] = evidence_by_number.get(
