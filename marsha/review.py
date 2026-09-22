@@ -33,9 +33,12 @@ from marsha.utils import run_subprocess
 # dropping the whole change. Both are char counts, truncated before the reviewer ever sees them.
 REVIEW_CONTEXT_LIMIT = 48_000
 REVIEW_DIFF_LIMIT = 120_000
-# A reviewer probing the codebase with the git tool needs more rounds than a single-shot
-# lookup; this bounds each reviewer's (and the conventions gate's) tool loop.
-REVIEW_MAX_TOOL_ROUNDS = 12
+# A reviewer probing a large codebase with the git tool needs many rounds to map a diff against
+# the code it touches; a tight cap cut reviewers off mid-inspection on big PRs, so they finished
+# with no findings at all. 75 lets a reviewer walk the relevant call graph and read the files it
+# actually needs before it decides. This is a cap, not a target — a small diff still finishes in
+# a few rounds — and it bounds each reviewer's, the critic's, and the conventions gate's loop.
+REVIEW_MAX_TOOL_ROUNDS = 75
 # The review runs the panel, the conventions gate, and the consolidation at 'high' reasoning —
 # above gpt-6-luna's 'medium' default — so a single pass is more reliable.
 # A fixed seed makes sampling as reproducible as the provider allows (a seed-honoring provider
