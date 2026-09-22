@@ -421,6 +421,10 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
         text = await tools.run_with_tools(
             mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
     except Exception as e:
+        # log() is a no-op unless --trace, so a failed gate would otherwise fail open (findings
+        # proceed unexamined) with no visible trace; surface it at debug verbosity.
+        if debug:
+            print(f'[Review] conventions gate failed; findings proceed unexamined: {e}')
         log(f'review: conventions gate failed: {e}')
         return ''
     text = (text or '').strip()
@@ -492,6 +496,10 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
             mapper, user, gate_ctx, debug=debug,
             max_rounds=max_rounds or REVIEW_MAX_TOOL_ROUNDS)
     except Exception as e:
+        # log() is a no-op unless --trace, so a failed critic would otherwise silently skip the
+        # anti-hallucination backstop with no visible trace; surface it at debug verbosity.
+        if debug:
+            print(f'[Review] critic failed; findings proceed without critique: {e}')
         log(f'review: critic failed: {e}')
         return ''
     text = (text or '').strip()
@@ -982,6 +990,10 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     if not findings:
         return findings
     file_cache = {}
+    # Shared across findings (like file_cache): whether a symbol is present in the tree is a
+    # property of the symbol, not the finding, so the same symbol is grepped once, not once per
+    # finding that names it.
+    symbol_cache = {}
     kept = []
     for f in findings:
         location = f.get('location') or ''
@@ -1021,13 +1033,12 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             # reviewed tree, that identifier is a fabrication and the finding is dropped. Absence
             # findings legitimately name a missing symbol, so asserted-absent symbols are exempt.
             absent = _asserted_absent_symbols(f)
-            present = {}
             for a in sorted(anchors):
                 if a in absent or '_' not in a:
                     continue
                 if a in output_scope:
                     continue
-                if await _symbol_present(a, cwd, present):
+                if await _symbol_present(a, cwd, symbol_cache):
                     continue
                 ok, reason = (False,
                               f'names {a}, which appears in neither the reviewer\'s git '
@@ -1036,9 +1047,8 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         if ok:
             # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
             # present in the tree: the claim is falsified, so the finding is dropped.
-            present = {}
             for symbol in _asserted_absent_symbols(f):
-                if await _symbol_present(symbol, cwd, present):
+                if await _symbol_present(symbol, cwd, symbol_cache):
                     ok, reason = (False,
                                   f'asserts {symbol} is undefined or absent, but '
                                   f'it is present in the reviewed tree')
@@ -1183,7 +1193,11 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
             loc = f['location'] or 'n/a'
             item = f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}"
             if f.get('support'):
-                item += "\n\n" + f['support']
+                # A blank line before the support would end the list item (CommonMark), detaching
+                # it into a standalone paragraph; indent it under the bullet instead so it stays
+                # part of the item.
+                item += '\n' + '\n'.join(
+                    '  ' + ln for ln in f['support'].split('\n'))
             body_findings.append(item)
     if new_inline or body_findings:
         review = {'event': 'COMMENT', 'comments': new_inline}

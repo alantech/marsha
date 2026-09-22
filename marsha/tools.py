@@ -734,6 +734,10 @@ GIT_READONLY_COMMANDS = {
     'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
     'remote',
 }
+# `git remote` is read-only only for listing (bare `remote`, `remote -v`,
+# `remote show`, `remote get-url`); these subcommands rewrite .git/config, so
+# they are refused even though `remote` itself is on the allowlist.
+GIT_REMOTE_MUTATING = {'add', 'remove', 'rename', 'set-url', 'set-head'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
@@ -758,6 +762,15 @@ async def git(args, ctx=None, page=None):
             'commands (diff, log, show, blame, grep, ls-files, ...). You may not '
             'modify the git tree.')
     rest = args[1:]
+    if sub == 'remote':
+        # `git remote` lists, but `git remote add/remove/rename/set-url/set-head`
+        # mutate .git/config — refuse those so the allowlist stays read-only.
+        for arg in rest:
+            if arg in GIT_REMOTE_MUTATING:
+                return (
+                    f'error: `git remote {arg}` is not allowed (it would modify the '
+                    'git configuration); only `git remote`, `git remote -v`, '
+                    '`git remote show` and `git remote get-url` are permitted.')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:
@@ -960,7 +973,9 @@ async def execute_command(commands, name, args, page=None):
             return await cmd.handler(args, page=page)
         return await cmd.handler(args)
     except Exception as e:
-        return f'error: command {name} failed: {e}'
+        # Include the exception type: some exceptions stringify to the empty string, in which
+        # case `failed: ` alone would give the model (and a debugger) nothing to go on.
+        return f'error: command {name} failed ({type(e).__name__}): {e}'
 
 
 _TOOL_COMPACT_PROMPT = '''You are compacting a code-review exploration conversation so it fits a smaller context budget. The conversation is a reviewer probing a git repository with read-only commands (diff/log/show/blame/grep) and recording notes. Summarize it into a short state that preserves: (1) the original review task, (2) the files and line numbers examined and the concrete facts discovered, and (3) every candidate finding with its file:line location. Preserve file paths and line numbers exactly. Add nothing that is not in the conversation. Output only the summary, with no preamble.
@@ -1069,7 +1084,11 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
                                        page=pending.page)
         # Record what the reviewer actually retrieved (the command and its raw output) so the
         # evidence gate can later prove a finding was grounded in real git output, not a guess.
-        if pending.name == 'git':
+        # An `error:` result carries no code — a git failure, or the "name a page" reply for a
+        # file too large to show at once — so it is not evidence: recording it would let the
+        # mandatory-probing and file-opened checks pass on a command whose basename merely
+        # appears in the echoed command line, with no code actually read.
+        if pending.name == 'git' and not result.startswith('error:'):
             ctx.evidence.append((pending.line, result))
         block = (wrap_untrusted(label, result)
                  + '\n\nIf you need more information, end your next response with another '

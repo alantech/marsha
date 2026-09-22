@@ -140,7 +140,15 @@ def test_execute_handler_exception_is_error_text():
         raise Exception('kaput')
     cmds = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=boom: _h(args))}
     out = asyncio.run(tools.execute_command(cmds, 'kapow', []))
-    assert out == 'error: command kapow failed: kaput'
+    # The exception type is included: some exceptions stringify to '', so the type is what
+    # distinguishes the failure when the message is empty.
+    assert out == 'error: command kapow failed (Exception): kaput'
+
+    async def silent(args, ctx=None):
+        raise KeyError()
+    cmds2 = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=silent: _h(args))}
+    out2 = asyncio.run(tools.execute_command(cmds2, 'kapow', []))
+    assert out2 == 'error: command kapow failed (KeyError): '
 
 
 # --- phase scoping ---------------------------------------------------------------
@@ -666,6 +674,46 @@ def test_git_show_uses_larger_output_cap(tmp_path):
     assert 'end of output' in page2
     beyond = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=99))
     assert beyond.startswith('error: page 99 is out of range')
+
+
+def test_git_remote_mutating_subcommands_refused(tmp_path):
+    # `git remote` is on the read-only allowlist, but its mutating subcommands rewrite
+    # .git/config, so they are refused even though `remote` itself is permitted; the plain
+    # listing forms are not refused.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    for mutating in ('add', 'remove', 'rename', 'set-url', 'set-head'):
+        out = asyncio.run(tools.git(['remote', mutating, 'origin'], ctx))
+        assert out.startswith('error:') and 'would modify the git configuration' in out
+    for listing in (['remote'], ['remote', '-v']):
+        out = asyncio.run(tools.git(listing, ctx))
+        assert 'would modify the git configuration' not in out
+
+
+def test_run_with_tools_does_not_record_error_evidence(tmp_path):
+    # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
+    # too large to show at once), so it is not recorded as evidence: only actual output grounds a
+    # finding. A real page result IS recorded.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'huge.txt').write_text('hello world\n' * 5000)
+    subprocess.run(['git', 'add', 'huge.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    # Bare request for a file over the cap -> "name a page" error (no content) -> not recorded.
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    asyncio.run(tools.run_with_tools(
+        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC]), 'REQ', ctx))
+    assert ctx.evidence == []
+    # A named page -> real content -> recorded.
+    ctx2 = tools.ToolContext('review', workdir=str(tmp_path))
+    asyncio.run(tools.run_with_tools(
+        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC]), 'REQ', ctx2))
+    assert len(ctx2.evidence) == 1
+    assert 'hello world' in ctx2.evidence[0][1]
 
 
 # --- the tool loop -----------------------------------------------------------------
