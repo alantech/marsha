@@ -382,6 +382,38 @@ def test_gate_drops_finding_grounded_only_in_grep_query(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def _add_code_file(repo, name, content):
+    with open(f'{repo}/{name}', 'w') as fh:
+        fh.write(content)
+    _git(repo, 'add', name)
+    _git(repo, 'commit', '-q', '-m', f'add {name}')
+
+
+def test_gate_drops_finding_falsified_by_present_symbol(repo):
+    # A finding asserts a symbol is undefined, yet the symbol is present in the tree (and in the
+    # reviewer's own evidence, so it clears the grounding check). The contradiction check drops it,
+    # because the claim and the code cannot both be true.
+    _add_code_file(repo, 'impl.py', 'def presentHelper():\n    return 1\n')
+    ev = [('$ git show HEAD:impl.py', 'def presentHelper():\n    return 1')]
+    f = _gate_finding('presentHelper is undefined and will raise a NameError',
+                      'impl.py:1', ev,
+                      support='git grep -n "presentHelper" returns no matches; '
+                              'presentHelper is not defined')
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_absence_claim_not_falsified(repo):
+    # "missingThing is undefined, though presentHelper is defined": the accused symbol is genuinely
+    # absent from the tree, so nothing contradicts the claim; the co-cited present symbol (nearest
+    # to its own, positive "is defined") is never mistaken for the one the finding says is absent.
+    _add_code_file(repo, 'impl.py', 'def presentHelper():\n    return 1\n')
+    ev = [('$ git show HEAD:impl.py', 'def presentHelper():\n    return 1')]
+    f = _gate_finding('missingThing is undefined; add a guard', 'impl.py:1', ev,
+                      support='missingThing is not defined, though presentHelper is defined')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_gate_keeps_absence_finding_on_read_file(repo):
     # "no maxItems": the missing symbol is absent from the evidence, but a co-cited real symbol
     # (minItems) that the reviewer read is present, so the finding survives on at least one anchor.

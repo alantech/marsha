@@ -429,18 +429,22 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
     return text
 
 
-# The critic's output contract: it refutes findings (by [Name-Label]) whose central claim the
-# code contradicts, or it reports NO OBJECTIONS. Like the conventions gate it pushes back on
-# findings instead of editing code, but on counter-evidence (is the claimed-missing code
-# actually present?) rather than on conventions.
+# The critic's output contract. The persona (Vera) carries the role, the method, and the
+# epistemic standard; this fixes only the machine-readable form of her report. She refutes
+# findings by their [Name-Label], or reports NO OBJECTIONS when every finding survives.
 _CRITIC_REBUTTAL_CONTRACT = '''
 
-You are checking a set of code-review FINDINGS (not the code directly) for whether their central claims hold up against the actual code. Your only job is to REFUTE the findings the code contradicts. Cite each refuted finding by its exact [Name-Label], with the concrete counter-evidence (a file:line).
-Do NOT re-raise findings, add new ones, or restate agreement with a finding.
-If every finding holds up against the code, respond with exactly: NO OBJECTIONS
-Otherwise respond with one refutation per line, in exactly this form:
-[Name-Label] - <one-line reason the code contradicts it, citing the file:line counter-evidence>
-Do not restate a reviewer's name. Do not add any prose outside the refutations.
+Your output is consumed mechanically, so its form is fixed; here you only report the work you have
+already done.
+
+If every finding survives your attempt to falsify it, reply with the single line, exactly:
+NO OBJECTIONS
+
+Otherwise reply with one line per finding you refuted, and nothing else, each in exactly this form:
+[Name-Label] - <one sentence stating the contradiction, citing the file:line of the counter-evidence>
+
+Use each finding's exact [Name-Label]. Do not restate a reviewer's name, do not re-raise or add
+findings, do not restate agreement, and write no prose outside those lines.
 '''
 
 
@@ -462,11 +466,12 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
     system = body + _CRITIC_REBUTTAL_CONTRACT
     system += tools.tool_instructions(gate_ctx)
     user = (
-        f'Check the findings below against the actual code (default branch `{base_name}`, '
-        f'diff base ref `{base_ref}`). For each finding, use the git tool to look for '
-        f'counter-evidence: `git grep` the exact symbol it hinges on, and `git show HEAD:<path>` '
-        f'the lines it cites. Refute only the findings the code plainly contradicts, citing the '
-        f'counter-evidence.\n\n# Findings under review\n\n' + format_findings(findings))
+        f'Falsify the findings below against the actual code (default branch `{base_name}`, '
+        f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
+        f'symbols as whole words, with no language-specific definition keyword assumed, and read '
+        f'the cited lines with `git show HEAD:<path>`. Report, in the fixed form, only the '
+        f'findings the code plainly contradicts.\n\n# Findings under review\n\n'
+        + format_findings(findings))
     mapper = get_mapper(system, n_results=1, stats_stage='review',
                         model=model, label='review:critic',
                         reasoning_effort=reasoning_effort, seed=seed)
@@ -871,6 +876,66 @@ async def _file_info(path, cwd, base_ref, cache):
     return cache[path]
 
 
+# A finding may assert that a symbol does not exist ("is undefined", "not defined", "no such
+# function", ...). That is the one claim the gate can falsify without interpreting the code: if
+# the asserted-absent symbol is actually present in the tree, the finding's central claim is
+# contradicted. The cues are limited to unambiguous existence negations — not usage claims such as
+# "never called" (a present symbol does not refute those), and not the broad "missing" (which
+# usually attaches to a non-symbol concern). Findings are written in English whatever the language
+# under review, so English cues are language-agnostic.
+_EXISTENCE_ABSENCE_RE = re.compile(
+    r'(does\s+not\s+exist|do\s+not\s+exist|doesn\'t\s+exist'
+    r'|is\s+undefined|is\s+not\s+defined|is\s+not\s+declared|is\s+not\s+present'
+    r'|are\s+not\s+defined|are\s+not\s+declared'
+    r'|no\s+such\s+(?:function|method|symbol|variable|attribute|property|field'
+    r'|class|type|identifier|member|element|entry|key|constant)'
+    r'|non[-\s]?existent|has\s+no\s+definition|no\s+definition'
+    r'|not\s+defined\b|not\s+declared\b'
+    r'|returns?\s+no\s+matches|cannot\s+(?:be\s+)?found)',
+    re.I)
+
+
+def _asserted_absent_symbols(finding):
+    # The distinctive symbols a finding asserts do not exist. For each existence-absence cue the
+    # accused symbol is the distinctive token nearest to it (a few characters either side), so
+    # "X is not defined, though Y is defined" accuses only X and a co-cited, genuinely-present
+    # symbol is never mistaken for the one the finding claims is absent.
+    text = ' '.join(
+        filter(None, [finding.get('desc'), finding.get('support')]))
+    absent = set()
+    for cue in _EXISTENCE_ABSENCE_RE.finditer(text):
+        lo, hi = max(0, cue.start() - 40), min(len(text), cue.end() + 40)
+        nearest, nearest_dist = None, None
+        for tok in _ANCHOR_TOKEN.finditer(text, lo, hi):
+            if not _is_distinctive(tok.group(0)):
+                continue
+            if tok.start() < cue.end() and cue.start() < tok.end():
+                dist = 0
+            else:
+                dist = min(abs(cue.start() - tok.end()),
+                           abs(cue.end() - tok.start()))
+            if nearest_dist is None or dist < nearest_dist:
+                nearest, nearest_dist = tok.group(0), dist
+        if nearest is not None and nearest_dist <= 40:
+            absent.add(nearest)
+            for part in nearest.split('.'):
+                if _is_distinctive(part):
+                    absent.add(part)
+    return absent
+
+
+async def _symbol_present(symbol, cwd, cache):
+    # Whether `symbol` occurs anywhere in the reviewed tree. Searched as a whole-word literal on
+    # its last dotted component, with no language-specific definition keyword assumed, so the check
+    # holds for any language. Cached per symbol so several findings cost one probe each.
+    leaf = symbol.rsplit('.', 1)[-1]
+    if leaf in cache:
+        return cache[leaf]
+    rc, _out, _err = await _git('grep', '-F', '-w', leaf, cwd=cwd)
+    cache[leaf] = rc == 0
+    return cache[leaf]
+
+
 async def evidence_gate(findings, cwd, base_ref, debug=False):
     # Deterministic anti-hallucination filter, run before consolidation so the LLM only ever sees
     # grounded findings. Mandatory probing (in the tool loop) already requires a reviewer to run a
@@ -882,6 +947,10 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
     #     loop gave up forcing a probe) is unverified and dropped.
     #   (backstop) a cited file must exist in the repo and a cited line be within its length, which
     #     drops outright fabrications (a nonexistent path, or a line past the end).
+    #   (contradiction) a finding that asserts a symbol is undefined / does not exist is dropped
+    #     when that symbol is present in the reviewed tree — the claim and the code cannot both be
+    #     true. The symbol is searched as a whole-word literal, with no language-specific keyword,
+    #     so the check holds for any language.
     # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
     # reviewer read, even though the missing symbol itself is absent.
     if not findings:
@@ -919,6 +988,16 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
             elif line is not None and line_count is not None and line > line_count:
                 ok, reason = False, (f'cited line {line} is beyond the file '
                                      f'({line_count} lines at HEAD)')
+        if ok:
+            # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
+            # present in the tree: the claim is falsified, so the finding is dropped.
+            present = {}
+            for symbol in _asserted_absent_symbols(f):
+                if await _symbol_present(symbol, cwd, present):
+                    ok, reason = (False,
+                                  f'asserts {symbol} is undefined or absent, but '
+                                  f'it is present in the reviewed tree')
+                    break
         if ok:
             kept.append(f)
         elif debug:
