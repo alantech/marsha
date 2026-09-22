@@ -951,13 +951,14 @@ def _asserted_absent_symbols(finding):
 
 
 async def _symbol_present(symbol, cwd, cache):
-    # Whether `symbol` occurs anywhere in the reviewed tree. Searched as a whole-word literal on
-    # its last dotted component, with no language-specific definition keyword assumed, so the check
-    # holds for any language. Cached per symbol so several findings cost one probe each.
+    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word literal on its
+    # last dotted component (no language-specific keyword, so any language works). Pinned to
+    # HEAD rather than the working tree, so uncommitted changes — which a local review
+    # excludes — cannot falsify a finding about the committed code. Cached per symbol.
     leaf = symbol.rsplit('.', 1)[-1]
     if leaf in cache:
         return cache[leaf]
-    rc, _out, _err = await _git('grep', '-F', '-w', leaf, cwd=cwd)
+    rc, _out, _err = await _git('grep', '-F', '-w', leaf, 'HEAD', cwd=cwd)
     cache[leaf] = rc == 0
     return cache[leaf]
 

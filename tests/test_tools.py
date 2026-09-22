@@ -676,6 +676,26 @@ def test_git_show_uses_larger_output_cap(tmp_path):
     assert beyond.startswith('error: page 99 is out of range')
 
 
+def test_git_single_oversized_line_is_truncated(tmp_path):
+    # A single line longer than the page bound (a minified or generated file) must not be
+    # returned whole: it is truncated so a page stays bounded even when one line alone
+    # exceeds the limit.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'blob.txt').write_text('x' * 100_000 + '\n')  # one line, 100KB
+    subprocess.run(['git', 'add', 'blob.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    nopage = asyncio.run(tools.git(['show', 'HEAD:blob.txt'], ctx))
+    assert nopage.startswith('error:') and '1 page(s)' in nopage
+    page1 = asyncio.run(tools.git(['show', 'HEAD:blob.txt'], ctx, page=1))
+    assert page1.startswith('[page 1 of 1: lines 1-1 of 1')
+    body = page1.split('\n', 1)[1]
+    assert '[line truncated]' in body
+    assert len(body) <= tools.GIT_RESULT_CHAR_LIMIT
+
+
 def test_git_remote_mutating_subcommands_refused(tmp_path):
     # `git remote` is on the read-only allowlist, but its mutating subcommands rewrite
     # .git/config, so they are refused even though `remote` itself is permitted; the plain
@@ -685,12 +705,13 @@ def test_git_remote_mutating_subcommands_refused(tmp_path):
     subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
-    for mutating in ('add', 'remove', 'rename', 'set-url', 'set-head'):
+    for mutating in (
+            'add', 'remove', 'rename', 'set-url', 'set-head', 'update', 'prune'):
         out = asyncio.run(tools.git(['remote', mutating, 'origin'], ctx))
-        assert out.startswith('error:') and 'would modify the git configuration' in out
+        assert out.startswith('error:') and 'would modify the repository' in out
     for listing in (['remote'], ['remote', '-v']):
         out = asyncio.run(tools.git(listing, ctx))
-        assert 'would modify the git configuration' not in out
+        assert 'would modify the repository' not in out
 
 
 def test_run_with_tools_does_not_record_error_evidence(tmp_path):

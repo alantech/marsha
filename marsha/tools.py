@@ -200,7 +200,13 @@ def _git_page_result(result, sub, rest, page=None):
     page_start = 0
     cur = []
     cur_len = 0
+    _line_trunc = '…[line truncated]'
     for i, ln in enumerate(lines):
+        # A single line longer than the whole page bound (a minified or generated file)
+        # would otherwise be returned intact, defeating the limit; truncate it so a page
+        # stays bounded even when one line alone exceeds it.
+        if len(ln) > GIT_RESULT_CHAR_LIMIT:
+            ln = ln[:GIT_RESULT_CHAR_LIMIT - len(_line_trunc)] + _line_trunc
         # +1 for the newline that joins this line on
         add = len(ln) + (1 if cur else 0)
         if cur and cur_len + add > GIT_RESULT_CHAR_LIMIT:
@@ -734,10 +740,12 @@ GIT_READONLY_COMMANDS = {
     'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
     'remote',
 }
-# `git remote` is read-only only for listing (bare `remote`, `remote -v`,
-# `remote show`, `remote get-url`); these subcommands rewrite .git/config, so
-# they are refused even though `remote` itself is on the allowlist.
-GIT_REMOTE_MUTATING = {'add', 'remove', 'rename', 'set-url', 'set-head'}
+# `git remote` is read-only only for listing (bare `remote`, `remote -v`, `remote
+# show`, `remote get-url`); the other subcommands mutate the repo — they rewrite
+# .git/config or update remote-tracking refs — so they are refused even though
+# `remote` itself is on the allowlist.
+GIT_REMOTE_MUTATING = {
+    'add', 'remove', 'rename', 'set-url', 'set-head', 'update', 'prune'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
@@ -769,7 +777,7 @@ async def git(args, ctx=None, page=None):
             if arg in GIT_REMOTE_MUTATING:
                 return (
                     f'error: `git remote {arg}` is not allowed (it would modify the '
-                    'git configuration); only `git remote`, `git remote -v`, '
+                    'repository); only `git remote`, `git remote -v`, '
                     '`git remote show` and `git remote get-url` are permitted.')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
