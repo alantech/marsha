@@ -449,13 +449,12 @@ findings, do not restate agreement, and write no prose outside those lines.
 
 
 async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=False,
-                      reasoning_effort=None, seed=None):
+                      reasoning_effort=None, seed=None, max_rounds=None):
     # The critic (Vera): actively search the code for counter-evidence to each finding — a
     # claimed-missing call/import that is present, a claimed-undefined symbol that is defined, a
     # "corrupted" file that is actually valid — and return refutations citing the [Name-Label]s,
     # or '' when every finding holds up. Complements conventions_gate (which only checks
-    # conventions): together they push back on findings that are wrong for any reason, and the
-    # panel revises against both in the same round.
+    # conventions): it pushes back on findings that are wrong for any reason.
     if not findings:
         return ''
     # The critic refutes findings (it answers NO OBJECTIONS or refutations, not findings), so it
@@ -465,19 +464,33 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
         personas_dir(), '_review-critic.md'))
     system = body + _CRITIC_REBUTTAL_CONTRACT
     system += tools.tool_instructions(gate_ctx)
+    # The code the reviewer already retrieved, so the critic verifies against it and probes only
+    # what it still needs instead of re-deriving every finding from scratch (the per-persona call
+    # passes one reviewer's ledger, so this is exactly the code that reviewer read).
+    evidence_lines, seen = [], set()
+    for f in findings:
+        for cmd, out in (f.get('evidence') or []):
+            if (cmd, out) not in seen:
+                seen.add((cmd, out))
+                evidence_lines.append(f'$ {cmd}\n{out}')
+    evidence_block = ('\n\n# Code the reviewer already read\n\n'
+                      + '\n\n'.join(evidence_lines)
+                      if evidence_lines else '')
     user = (
         f'Falsify the findings below against the actual code (default branch `{base_name}`, '
         f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
         f'symbols as whole words, with no language-specific definition keyword assumed, and read '
-        f'the cited lines with `git show HEAD:<path>`. Report, in the fixed form, only the '
-        f'findings the code plainly contradicts.\n\n# Findings under review\n\n'
-        + format_findings(findings))
+        f'the cited lines with `git show HEAD:<path>`. Use the code the reviewer already read '
+        f'below as your starting point and probe only what you still need. Report, in the fixed '
+        f'form, only the findings the code plainly contradicts.\n\n# Findings under review\n\n'
+        + format_findings(findings) + evidence_block)
     mapper = get_mapper(system, n_results=1, stats_stage='review',
                         model=model, label='review:critic',
                         reasoning_effort=reasoning_effort, seed=seed)
     try:
         text = await tools.run_with_tools(
-            mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
+            mapper, user, gate_ctx, debug=debug,
+            max_rounds=max_rounds or REVIEW_MAX_TOOL_ROUNDS)
     except Exception as e:
         log(f'review: critic failed: {e}')
         return ''
@@ -1219,6 +1232,51 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         f'{closed} threads resolved.')
 
 
+async def _per_persona_critique(reviewers, findings, message, model, base_name, base_ref,
+                                guidance, tool_ctx, prior_labels_by_number,
+                                reasoning_effort, seed, debug):
+    # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
+    # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
+    # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
+    # caught here by an LLM that actually reads the code, before the findings are pooled. A pooled
+    # critic dilutes its attention across the whole panel; per-reviewer it holds each reviewer to
+    # its own claims.
+    by_reviewer = {}
+    for f in findings:
+        by_reviewer.setdefault(f['name'], []).append(f)
+    specs = {s[0]: s for s in reviewers}
+
+    async def handle(name, group):
+        refutation = await critic_gate(
+            group, tool_ctx, model, base_name, base_ref, debug=debug,
+            reasoning_effort=reasoning_effort, seed=seed)
+        if not refutation:
+            return group
+        if debug:
+            print(
+                f'[Review] critic refuted {name}\'s finding(s); one revision pass')
+        spec = specs[name]
+        rev_message = (message + prior_round_block(group, refutation, 'the critic')
+                       + _REFUTE_CONFIDENCE_RULE)
+        # A fresh ledger for the revision so it re-verifies rather than trusting round 0.
+        rev_ctx = dataclasses.replace(
+            tool_ctx, notes=list(tool_ctx.notes), evidence=[])
+        revised = await run_personas(
+            [spec], rev_message, model, 'review', debug=debug, loop='review',
+            guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
+            prior_block_by_number=None, prior_labels_by_number=prior_labels_by_number,
+            reasoning_effort=reasoning_effort, seed=seed)
+        # A finding the reviewer verified in round 0 but merely re-states in the revision would
+        # otherwise sit on an empty revision-round ledger; merge the code it already read so the
+        # evidence gate still grounds it.
+        base_evidence = list(group[0].get('evidence') or [])
+        for f in revised:
+            f['evidence'] = list(f.get('evidence') or []) + base_evidence
+        return revised
+    results = await asyncio.gather(*(handle(n, g) for n, g in by_reviewer.items()))
+    return [f for sub in results for f in sub]
+
+
 async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, guidance, tool_ctx, prior_block_by_number, prior_labels_by_number, reasoning_effort, seed, debug):
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
@@ -1232,7 +1290,7 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
         user_message = message
         if i > 0:
             user_message += prior_round_block(
-                prior_findings, prior_preamble, 'conventions review and the critic')
+                prior_findings, prior_preamble, 'the conventions review')
             user_message += _REFUTE_CONFIDENCE_RULE
         findings = await run_personas(
             reviewers, user_message, model, 'review',
@@ -1241,6 +1299,14 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
             reasoning_effort=reasoning_effort, seed=seed)
+        # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
+        # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
+        # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already
+        # revising against push-back.
+        if i == 0 and findings:
+            findings = await _per_persona_critique(
+                reviewers, findings, message, model, base_name, base_ref, guidance,
+                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug)
         # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
         # verifies with git in an early round and may re-state the finding in a later round without
         # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
@@ -1252,29 +1318,21 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
         actionable = dedup_findings(findings)
         if i == rounds or not actionable:
             break
-        # The conventions gate (does a finding violate a real convention?) and the critic (does
-        # the code contradict a finding?) run in parallel and their rebuttals are combined, so the
-        # panel revises against every kind of push-back in the same round.
-        conv_preamble, critic_preamble = await asyncio.gather(
-            conventions_gate(
-                actionable, tool_ctx, model, base_name, base_ref, debug,
-                reasoning_effort=reasoning_effort, seed=seed),
-            critic_gate(
-                actionable, tool_ctx, model, base_name, base_ref, debug,
-                reasoning_effort=reasoning_effort, seed=seed))
-        preamble = '\n'.join(p for p in (conv_preamble, critic_preamble) if p)
-        if not preamble:
+        # The conventions gate rebuts findings that violate a real convention; the panel revises
+        # against that push-back. The critic no longer runs pooled here — it critiques each
+        # reviewer in isolation (above), before the findings are pooled.
+        conv_preamble = await conventions_gate(
+            actionable, tool_ctx, model, base_name, base_ref, debug,
+            reasoning_effort=reasoning_effort, seed=seed)
+        if not conv_preamble:
             if debug:
-                print(
-                    '[Review] conventions gate and critic found no issues; converged')
+                print('[Review] conventions gate found no issues; converged')
             break
         if debug:
-            n_conv = 0 if not conv_preamble else conv_preamble.count('\n') + 1
-            n_crit = 0 if not critic_preamble else critic_preamble.count(
-                '\n') + 1
-            print(f'[Review] conventions gate ({n_conv}) and critic ({n_crit}) '
-                  f'rebutted findings; starting round {i + 2}')
-        prior_findings, prior_preamble = actionable, preamble
+            n_conv = conv_preamble.count('\n') + 1
+            print(f'[Review] conventions gate ({n_conv}) rebutted findings; '
+                  f'starting round {i + 2}')
+        prior_findings, prior_preamble = actionable, conv_preamble
     for f in actionable:
         f['evidence'] = evidence_by_number.get(
             _label_reviewer_number(f['label']), list(f.get('evidence') or []))

@@ -751,6 +751,55 @@ def test_review_loop_stops_at_round_budget(repo):
     assert len(panel_calls) == 3  # rounds 0,1,2 then the budget is exhausted
 
 
+def test_per_persona_critique_revises_refuted_reviewer(repo):
+    # A reviewer's finding is refuted by the critic; _per_persona_critique gives that reviewer one
+    # revision pass and keeps the corrected findings, merging the code it read in round 0 so a
+    # re-stated finding is still grounded by the evidence gate.
+    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'phantomThing is undefined', 'support': '',
+                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]}]
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+        return '[Sage-A1] - phantomThing is defined at a.txt:3'
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        assert 'the critic' in message and '[Sage-A1]' in message  # it saw the refutation
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'corrected finding', 'support': '',
+                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO')]}]
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'run_personas', new=fake_panel):
+        out = asyncio.run(review._per_persona_critique(
+            [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
+            ctx, None, None, None, False))
+    assert [f['desc'] for f in out] == ['corrected finding']
+    # The revision-round evidence is merged with what the reviewer read in round 0.
+    assert ('$ git show HEAD:a.txt', 'one\nTWO') in out[0]['evidence']
+    assert ('$ git show HEAD:a.txt', 'one\nTWO\nthree') in out[0]['evidence']
+
+
+def test_per_persona_critique_keeps_unrefuted_reviewer(repo):
+    # Nothing refuted -> the reviewer's findings pass through unchanged and no revision runs.
+    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'a real finding', 'support': '', 'evidence': []}]
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+        return ''
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        raise AssertionError('no revision should run when nothing is refuted')
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'run_personas', new=fake_panel):
+        out = asyncio.run(review._per_persona_critique(
+            [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
+            ctx, None, None, None, False))
+    assert out == findings
+
+
 def test_corroborated_keeps_only_recurring_concerns():
     # A concern restated across a majority of passes survives; a one-pass fluke is dropped.
     def f(label, loc, desc):
