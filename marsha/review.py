@@ -424,7 +424,8 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
         # log() is a no-op unless --trace, so a failed gate would otherwise fail open (findings
         # proceed unexamined) with no visible trace; surface it at debug verbosity.
         if debug:
-            print(f'[Review] conventions gate failed; findings proceed unexamined: {e}')
+            print(
+                f'[Review] conventions gate failed; findings proceed unexamined: {e}')
         log(f'review: conventions gate failed: {e}')
         return ''
     text = (text or '').strip()
@@ -499,7 +500,8 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
         # log() is a no-op unless --trace, so a failed critic would otherwise silently skip the
         # anti-hallucination backstop with no visible trace; surface it at debug verbosity.
         if debug:
-            print(f'[Review] critic failed; findings proceed without critique: {e}')
+            print(
+                f'[Review] critic failed; findings proceed without critique: {e}')
         log(f'review: critic failed: {e}')
         return ''
     text = (text or '').strip()

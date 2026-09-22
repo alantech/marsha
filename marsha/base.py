@@ -101,7 +101,8 @@ review_parser.add_argument('--consensus', type=int, default=0, metavar='N',
                                 'the model\'s run-to-run variance at ~Nx the cost. Default: 0 '
                                 '(a single pass).')
 review_parser.add_argument('--reasoning-effort',
-                           choices=['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+                           choices=['none', 'low', 'medium',
+                                    'high', 'xhigh', 'max'],
                            default=None,
                            help='Reasoning effort for the review LLM calls. Higher is more '
                                 'thorough but slower. GPT-6 accepts none/low/medium/high/'
