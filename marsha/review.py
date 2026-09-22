@@ -936,7 +936,7 @@ async def _symbol_present(symbol, cwd, cache):
     return cache[leaf]
 
 
-async def evidence_gate(findings, cwd, base_ref, debug=False):
+async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation=False):
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
     # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
@@ -960,6 +960,12 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
     #     ("schema.json") and camelCase builtins ("NameError") are never mistaken for subjects.
     # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
     # reviewer read, even though the missing symbol itself is absent.
+    # With post_consolidation=True the finding has already been grounded by the reviewer (the gate
+    # ran on the original); the consolidator merely REWRITTEN it. So the two "did the reviewer read
+    # this" checks (primary symbol-in-evidence and file-never-opened) are skipped — the rewrite
+    # legitimately rephrases and its symbols need not literally match the reviewer's output — while
+    # the fabrication checks (no-evidence, backstop, invented subject, contradiction) still run so a
+    # symbol the consolidator invented is still dropped.
     if not findings:
         return findings
     file_cache = {}
@@ -981,10 +987,10 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
         ok, reason = True, ''
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
-        elif anchors:
+        elif not post_consolidation and anchors:
             if not any(a in output_scope for a in anchors):
                 ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
-        elif file_path:
+        elif not post_consolidation and file_path:
             base = file_path.rsplit('/', 1)[-1]
             if file_path not in command_scope and base not in command_scope:
                 ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
@@ -1455,7 +1461,8 @@ async def run_review(args):
             key = (f['name'], f['label'])
             f['support'] = support_by_label.get(key, '')
             f['evidence'] = evidence_by_label.get(key, [])
-        actionable = await evidence_gate(actionable, cwd, base_ref, debug=args.debug)
+        actionable = await evidence_gate(
+            actionable, cwd, base_ref, debug=args.debug, post_consolidation=True)
         actionable = dedup_findings(actionable)
         actionable = dedup_by_location(actionable)
     # Order the final set (severity, then location) before printing or posting.

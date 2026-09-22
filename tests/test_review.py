@@ -448,6 +448,19 @@ def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
     assert kept == [f]
 
 
+def test_gate_post_consolidation_keeps_rephrased_real_finding(repo):
+    # The consolidator rewords a finding to name a symbol the reviewer did not literally retrieve
+    # (compute_total is in the tree but not in this finding's git output). Pre-consolidation the
+    # "at least one symbol in the reviewer's evidence" check drops it; post_consolidation skips that
+    # check, so a real symbol (grounded in the tree) is kept rather than mistaken for ungrounded.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def add_pair():\n    return x + y')]
+    f = _gate_finding('compute_total drops an operand', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main', post_consolidation=True))
+    assert kept == [f]
+
+
 def test_gate_drops_finding_whose_file_was_never_opened(repo):
     # No distinctive symbol and a cited file the reviewer never opened -> not grounded -> dropped.
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
