@@ -937,10 +937,11 @@ async def _symbol_present(symbol, cwd, cache):
 
 
 async def evidence_gate(findings, cwd, base_ref, debug=False):
-    # Deterministic anti-hallucination filter, run before consolidation so the LLM only ever sees
-    # grounded findings. Mandatory probing (in the tool loop) already requires a reviewer to run a
-    # git command before it may report, so a well-formed finding carries an evidence ledger; this
-    # gate checks each finding against the code ITS reviewer actually read:
+    # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
+    # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
+    # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
+    # a reviewer to run a git command before it may report, so a well-formed finding carries an
+    # evidence ledger; this gate checks each finding against the code ITS reviewer actually read:
     #   (primary) at least one symbol it names — or, when it names no symbol, the file it cites —
     #     must appear in that reviewer's git output. A finding whose symbols were never read is a
     #     guess, dropped even though the file data is real. A finding with no evidence at all (the
@@ -951,6 +952,12 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
     #     when that symbol is present in the reviewed tree — the claim and the code cannot both be
     #     true. The symbol is searched as a whole-word literal, with no language-specific keyword,
     #     so the check holds for any language.
+    #   (fabricated subject) the "at least one" primary check passes a finding that co-cites a real
+    #     symbol next to an invented one. If it names an underscored identifier that appears in
+    #     neither the reviewer's git output nor the reviewed tree, that identifier is a
+    #     fabrication and the finding is dropped. Underscored symbols are the shape of an invented
+    #     subject (a real one is always in the tree); dotted tokens are excluded so filenames
+    #     ("schema.json") and camelCase builtins ("NameError") are never mistaken for subjects.
     # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
     # reviewer read, even though the missing symbol itself is absent.
     if not findings:
@@ -988,6 +995,25 @@ async def evidence_gate(findings, cwd, base_ref, debug=False):
             elif line is not None and line_count is not None and line > line_count:
                 ok, reason = False, (f'cited line {line} is beyond the file '
                                      f'({line_count} lines at HEAD)')
+        if ok and anchors:
+            # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
+            # invented one; the "at least one" primary check above passes on the real one. If any
+            # underscored identifier it names is in neither the code the reviewer read nor the
+            # reviewed tree, that identifier is a fabrication and the finding is dropped. Absence
+            # findings legitimately name a missing symbol, so asserted-absent symbols are exempt.
+            absent = _asserted_absent_symbols(f)
+            present = {}
+            for a in sorted(anchors):
+                if a in absent or '_' not in a:
+                    continue
+                if a in output_scope:
+                    continue
+                if await _symbol_present(a, cwd, present):
+                    continue
+                ok, reason = (False,
+                              f'names {a}, which appears in neither the reviewer\'s git '
+                              f'evidence nor the reviewed tree')
+                break
         if ok:
             # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
             # present in the tree: the claim is falsified, so the finding is dropped.
@@ -1403,6 +1429,8 @@ async def run_review(args):
         # evidence was gathered by the reviewer with the git tools and should survive reduction.
         support_by_label = {(f['name'], f['label']): f.get('support', '')
                             for f in actionable}
+        evidence_by_label = {(f['name'], f['label']): list(f.get('evidence') or [])
+                             for f in actionable}
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
@@ -1418,9 +1446,18 @@ async def run_review(args):
             context, actionable, model, debug=args.debug, allow_empty=True,
             reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
         actionable = dedup_findings(consolidated)
-        actionable = dedup_by_location(actionable)
+        # The consolidator rewrites each finding's description and is only guaranteed to preserve
+        # its [Name-Label] — so it can name a symbol the reviewers never read (an invented
+        # function, say). Re-attach the reviewer's support and git evidence by (name, label), then
+        # re-run the deterministic gate on the REWRITTEN findings so a post-consolidation
+        # hallucination is dropped instead of posted.
         for f in actionable:
-            f['support'] = support_by_label.get((f['name'], f['label']), '')
+            key = (f['name'], f['label'])
+            f['support'] = support_by_label.get(key, '')
+            f['evidence'] = evidence_by_label.get(key, [])
+        actionable = await evidence_gate(actionable, cwd, base_ref, debug=args.debug)
+        actionable = dedup_findings(actionable)
+        actionable = dedup_by_location(actionable)
     # Order the final set (severity, then location) before printing or posting.
     actionable = order_findings(actionable)
     print(render_findings(actionable, base_name))

@@ -424,6 +424,30 @@ def test_gate_keeps_absence_finding_on_read_file(repo):
     assert kept == [f]
 
 
+def test_gate_drops_finding_with_invented_subject_co_cited(repo):
+    # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented one
+    # (expand_globs) that is in neither the evidence nor the tree. The "at least one" primary check
+    # passes on compute_total, but the fabricated-subject tripwire trips on expand_globs.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total calls expand_globs which never resolves',
+                      'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
+    # Two real snake_case symbols: compute_total is in the reviewer's evidence, helper_fn is in the
+    # tree but not in this finding's evidence. The tripwire grounds helper_fn on the tree (a real
+    # symbol is never a fabrication), so the finding is kept rather than dropped.
+    _add_code_file(repo, 'calc.py',
+                   'def compute_total():\n    return x + y\n\n'
+                   'def helper_fn():\n    return z\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total and helper_fn disagree on z', 'calc.py:2', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_gate_drops_finding_whose_file_was_never_opened(repo):
     # No distinctive symbol and a cited file the reviewer never opened -> not grounded -> dropped.
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
@@ -826,6 +850,28 @@ def test_run_review_evidence_gate_keeps_grounded(repo, capsys):
         rc = asyncio.run(review.run_review(_args()))
     assert rc == 0
     assert 'compute_total' in capsys.readouterr().out
+
+
+def test_run_review_drops_symbol_invented_by_consolidator(repo, capsys):
+    # The panel's finding is grounded and passes the pre-consolidation gate; consolidation then
+    # rewrites its description to name a function the reviewers never read and that is not in the
+    # tree. The post-consolidation evidence gate drops it, so the invented name is never posted.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'the value here is wrong',
+                'support': '',
+                'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                 'location': 'a.txt:2', 'desc': 'ensure_tool_probing can spin forever',
+                 'support': ''}]
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    assert rc == 0
+    assert 'ensure_tool_probing' not in capsys.readouterr().out
 
 
 def test_run_review_preserves_support_through_consolidation(repo, capsys):
