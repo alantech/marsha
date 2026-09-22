@@ -16,6 +16,8 @@ from marsha import context
 from marsha import llm
 from marsha import personas
 from marsha.personas import parse_compacted_findings
+from marsha.mappers.chatgpt import uses_completion_tokens
+from marsha.stats import price_for
 
 
 @pytest.fixture(autouse=True)
@@ -49,8 +51,32 @@ def test_budget_tokens_and_fits():
 def test_known_context_fallback():
     assert context.known_context('claude-opus-5') == 200000
     assert context.known_context('gpt-5-mini') == 400000
+    # GPT-6 and GPT-5.6 both document a 1.05M window; the longer 'gpt-5.6' prefix must win over
+    # the 'gpt-5' (400k) prefix for gpt-5.6-* models.
+    assert context.known_context('gpt-6-luna') == 1050000
+    assert context.known_context('gpt-5.6-terra') == 1050000
     assert context.known_context(
         'mystery-model') == context.DEFAULT_CONTEXT_WINDOW
+
+
+def test_reasoning_models_require_completion_tokens():
+    # GPT-5, GPT-5.6 and GPT-6 are all reasoning models: they reject max_tokens and require
+    # max_completion_tokens. gpt-5.6-*/gpt-6-* do not match the 'gpt-5' prefix, so each family
+    # must be detected explicitly (a miss silently sends max_tokens and the API rejects it).
+    for model in ('gpt-5', 'gpt-5-mini', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-sol'):
+        assert uses_completion_tokens(model) is True
+    assert uses_completion_tokens('claude-sonnet-5') is False
+
+
+def test_pricing_prefix_precedence():
+    # Pricing is matched by longest model-name prefix, so a gpt-5.6-* model must resolve to its
+    # own entry, not the shorter 'gpt-5' one.
+    luna_in, luna_out = price_for('gpt-6-luna')
+    assert (luna_in, luna_out) == (0.00009765625, 0.00048828125)  # $0.10 / $0.50 per 1M
+    terra_in, terra_out = price_for('gpt-5.6-terra')
+    assert (terra_in, terra_out) == (0.001953125, 0.01171875)  # $2 / $12 per 1M
+    # The bare gpt-5 entry still applies to old gpt-5 (not shadowed by the gpt-5.6 prefix).
+    assert price_for('gpt-5') == (0.001220703125, 0.009765625)
 
 
 def test_resolve_override_wins():

@@ -24,6 +24,11 @@ from marsha.llm_client import get_client
 from marsha.mappers import get_mapper
 from marsha.mappers.chatgpt import uses_completion_tokens
 
+# The strong model (default gpt-5.6-terra) runs the impl/correction review loops and the
+# test-fixing calls at extra-high reasoning: those are the highest-stakes edits (they may rewrite
+# code or the oracle), so they get the most reasoning budget the model offers.
+STRONG_REASONING_EFFORT = 'xhigh'
+
 
 def parse_spec_check(text):
     """Parse the structured spec check response; raise on anything malformed"""
@@ -80,9 +85,10 @@ def parse_diagnosis(text):
 
 
 async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
-    # Reasoning models need a larger budget for their chain of thought
+    # Reasoning models need a larger budget for their chain of thought. GPT-6 has no 'minimal'
+    # tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that still reasons.
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        answer = {'max_tokens': 8192, 'reasoning_effort': 'minimal'}
+        answer = {'max_tokens': 8192, 'reasoning_effort': 'low'}
     elif resolve_provider() == 'anthropic':
         answer = {'max_tokens': 4096}
     else:
@@ -489,7 +495,8 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
-                                      loop='impl', guidance=b.persona_guidance(), tool_ctx=tool_ctx)
+                                      loop='impl', guidance=b.persona_guidance(), tool_ctx=tool_ctx,
+                                      reasoning_effort=STRONG_REASONING_EFFORT)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
@@ -619,6 +626,7 @@ async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: s
     # part of the editable output, so this path structurally cannot touch the test suite.
     b = backends.current()
     gpt_fix = get_mapper(b.fix_impl_prompt(meta), model=resolve_strong_model(),
+                         reasoning_effort=STRONG_REASONING_EFFORT,
                          stats_stage='third_stage', label='impl-fix')
     user_request = f'''{format_marsha_for_llm(meta)}
 
@@ -658,6 +666,7 @@ async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, re
     # correct (so a misrouted diagnosis degrades to a no-op rather than a bent test).
     b = backends.current()
     gpt_fix = get_mapper(b.correct_test_prompt(meta), model=resolve_strong_model(),
+                         reasoning_effort=STRONG_REASONING_EFFORT,
                          stats_stage='third_stage', label='test-correct')
     user_request = f'''{format_marsha_for_llm(meta)}
 
@@ -754,7 +763,7 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
                                       loop='correction', guidance=backends.current().persona_guidance(),
-                                      tool_ctx=tool_ctx)
+                                      tool_ctx=tool_ctx, reasoning_effort=STRONG_REASONING_EFFORT)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:

@@ -36,11 +36,11 @@ REVIEW_DIFF_LIMIT = 120_000
 # A reviewer probing the codebase with the git tool needs more rounds than a single-shot
 # lookup; this bounds each reviewer's (and the conventions gate's) tool loop.
 REVIEW_MAX_TOOL_ROUNDS = 12
-# The review runs the panel, the conventions gate, and the consolidation at a higher reasoning
-# effort than the model default (gpt-5-mini defaults to 'low') so a single pass is more reliable.
-# A fixed seed makes sampling as reproducible as the provider allows (gpt-5-mini ignores it; a
-# seed-honoring provider reproduces a pass, so consensus passes below use distinct seeds).
-REVIEW_REASONING_EFFORT = 'medium'
+# The review runs the panel, the conventions gate, and the consolidation at 'high' reasoning —
+# above gpt-6-luna's 'medium' default — so a single pass is more reliable.
+# A fixed seed makes sampling as reproducible as the provider allows (a seed-honoring provider
+# reproduces a pass, so consensus passes below use distinct seeds).
+REVIEW_REASONING_EFFORT = 'high'
 REVIEW_SEED = 1
 # Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the conventions
 # review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;

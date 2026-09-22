@@ -14,8 +14,11 @@ t0 = time.time()
 
 
 def uses_completion_tokens(model):
-    # Reasoning models reject max_tokens and require max_completion_tokens
-    return model.startswith('gpt-5') or model.startswith('o')
+    # Reasoning models reject max_tokens and require max_completion_tokens. GPT-5, GPT-5.6 and
+    # GPT-6 are all reasoning models (gpt-5.6-*/gpt-6-* do not match the 'gpt-5' prefix, so the
+    # gpt-6 family is listed explicitly).
+    return (model.startswith('gpt-5') or model.startswith('gpt-6')
+            or model.startswith('o'))
 
 
 async def retry_chat_completion(query, model=None, max_tries=3, n_results=1, label=None):

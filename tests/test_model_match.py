@@ -133,9 +133,9 @@ def test_rank_empty_or_unknown_role():
 # --- per-role remap against a multi-model backend ---------------------------
 
 def test_apply_remaps_each_role_to_its_closest_match():
-    # gpt-5-mini documents a 400k window, so the standard role wants >= 400k: 'medium' is
-    # the smallest that fits; the strong role takes the largest.
-    models = [_m('small', 131072), _m('medium', 400000), _m('large', 1048576)]
+    # The default gpt-6-luna documents a 1.05M window, so the standard role (smallest-fitting)
+    # wants >= 1.05M: 'medium' is the smallest that fits; the strong role takes the largest.
+    models = [_m('small', 131072), _m('medium', 1_500_000), _m('large', 2_000_000)]
     notes = model_match.apply_available_models(models)
     assert cfg.resolve_model() == 'medium'
     assert cfg.resolve_strong_model() == 'large'
