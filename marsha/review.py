@@ -1253,8 +1253,11 @@ async def _per_persona_critique(reviewers, findings, message, model, base_name, 
         if not refutation:
             return group
         if debug:
-            print(
-                f'[Review] critic refuted {name}\'s finding(s); one revision pass')
+            print(f'[Review] critic examined {name}\'s finding(s):')
+            for gf in group:
+                print(f'  [examined] [{name}-{gf.get("label")}] '
+                      f'{gf.get("location")}: {gf.get("desc")}')
+            print(f'  [refuted] {refutation.strip()}')
         spec = specs[name]
         rev_message = (message + prior_round_block(group, refutation, 'the critic')
                        + _REFUTE_CONFIDENCE_RULE)
