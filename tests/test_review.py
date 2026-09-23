@@ -577,6 +577,19 @@ def test_gate_keeps_finding_with_line_spec_suffixes(repo):
         assert kept == [f], loc
 
 
+def test_gate_drops_out_of_range_line_range_location(repo):
+    # A line RANGE past the end of a real file is out of bounds: parse_location returns the
+    # largest number in the range (the end), so the backstop bounds-checks it rather than skipping
+    # ranges (which previously returned no line and let a fabricated range through).
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]  # a.txt has 4 lines
+    f = _gate_finding('the value here is wrong', 'a.txt:3-9', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+    # A range whose end is within the file is kept.
+    f = _gate_finding('the value here is wrong', 'a.txt:2-4', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_review_pass_merges_evidence_across_rounds(repo):
     # A reviewer that verifies with git in round 1 and re-states the finding in round 2 (without
     # re-probing) must keep its round-1 evidence on the final finding, so the gate can verify it
@@ -888,6 +901,14 @@ def test_run_review_consensus_runs_panel_n_times(repo):
         rc = asyncio.run(review.run_review(_args(consensus=3)))
     assert rc == 0
     assert len(panel_calls) == 3
+
+
+def test_run_review_rejects_invalid_consensus(repo):
+    # --consensus must be 0 (single pass) or >= 2; 1 and negatives are rejected rather than being
+    # silently clamped to a single pass.
+    for bad in (1, -2):
+        with pytest.raises(Exception, match='--consensus must be 0'):
+            asyncio.run(review.run_review(_args(consensus=bad)))
 
 
 def test_run_review_reasoning_effort_flag(repo):

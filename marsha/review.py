@@ -280,14 +280,23 @@ async def linear_context(ticket, cwd=None):
 
 
 def parse_location(location):
-    # "path/file.py:12" -> ('path/file.py', 12); "path/file.py:12:40" drops the column;
-    # a bare "path/file.py" -> ('path/file.py', None).
+    # "path/file.py:12" -> ('path/file.py', 12). The line is the largest number in a range
+    # (":12-40" -> 40, ":9-15,28-29" -> 29) so the file-data backstop bounds-checks a range at its
+    # end; a "line:column" spec (":12:40") keeps the line (12) and drops the column; an open-ended
+    # tail (":12+", ":12-EOF") keeps the last concrete number; a bare "path/file.py" -> None line.
     if not location:
         return ('', None)
-    m = re.match(r'^(.*?):(\d+)(?::\d+)?\s*$', location.strip())
-    if m:
-        return (m.group(1).strip(), int(m.group(2)))
-    return (location.strip(), None)
+    loc = location.strip()
+    m = re.search(r':\d', loc)
+    if not m:
+        return (loc, None)
+    file_part = loc[:m.start()].strip()
+    spec = loc[m.start():]  # from the first ':<digit>' to the end
+    if re.match(r'^:\d+:', spec):
+        # "line:column" — the line is the first number; the column is dropped.
+        return (file_part, int(re.findall(r'\d+', spec)[0]))
+    nums = [int(n) for n in re.findall(r'\d+', spec)]
+    return (file_part, max(nums) if nums else None)
 
 
 def diff_new_lines(diff_text):
@@ -1395,6 +1404,11 @@ async def run_review(args):
         raise Exception('--pr requires the `gh` CLI to be on PATH.')
     if args.linear is not None and not linear_available():
         raise Exception('--linear requires the `linear` CLI to be on PATH.')
+    if args.consensus and args.consensus < 2:
+        # 0 is the documented single-pass default; 1 and negatives are not valid, so reject them
+        # rather than silently running a single pass when the user asked for a consensus mode.
+        raise Exception(
+            f'--consensus must be 0 (a single pass) or at least 2; got {args.consensus}.')
 
     cwd = os.getcwd()
     base_name, base_ref = await default_branch(cwd)
