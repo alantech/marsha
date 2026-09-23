@@ -82,9 +82,9 @@ async def _run(cmd, *args, cwd=None, timeout=60, input=None):
     return (proc.returncode, out, err)
 
 
-async def _git(*args, cwd=None, timeout=60, input=None, strip=True):
+async def _git(*args, cwd=None, timeout=60, input=None):
     rc, out, err = await _run('git', *args, cwd=cwd, timeout=timeout, input=input)
-    return (rc, out.strip() if strip else out, err.strip())
+    return (rc, out.strip(), err.strip())
 
 
 async def _gh(*args, cwd=None, timeout=120, input=None):
@@ -908,6 +908,37 @@ def _location_file(location):
     return loc
 
 
+async def _git_line_count(ref, path, cwd):
+    # The line count of <ref>:<path>, streamed in chunks and counted by newline bytes so a large
+    # cited file is never buffered whole (and held as a list of lines) just to validate a citation's
+    # line bound. Matches str.splitlines(): a final line without a trailing newline still counts,
+    # and blank lines count. Returns None if the object cannot be read.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'show', f'{ref}:{path}', cwd=cwd,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, OSError):
+        return None
+    count = 0
+    last = None
+    try:
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
+            count += chunk.count(b'\n')
+            last = chunk[-1:]
+        await proc.wait()
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    if last is not None and last != b'\n':
+        count += 1
+    return count
+
+
 async def _file_info(path, cwd, base_ref, cache):
     # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
     # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
@@ -922,11 +953,9 @@ async def _file_info(path, cwd, base_ref, cache):
         if rc != 0:
             continue
         exists = True
-        # strip=False: count lines from the raw content so blank lines at the file's start or end
-        # are counted (a stripped read would undercount them and mis-drop a valid citation).
-        rc, content, _err = await _git('show', f'{ref}:{path}', cwd=cwd, strip=False)
-        if rc == 0:
-            line_count = len(content.splitlines())
+        # Stream the line count rather than buffering the whole blob and splitting it, so a large
+        # cited file is not held in memory just to validate a citation's line bound.
+        line_count = await _git_line_count(ref, path, cwd)
         break
     cache[path] = (exists, line_count)
     return cache[path]

@@ -676,6 +676,25 @@ def test_git_show_uses_larger_output_cap(tmp_path):
     assert beyond.startswith('error: page 99 is out of range')
 
 
+def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path):
+    # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
+    # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first
+    # non-blank line (a .strip() would drop them and shift every cited line number).
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'lead.txt').write_text('\n' * 50 + 'hello world\n' * 5000)  # 5050 lines
+    subprocess.run(['git', 'add', 'lead.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    nopage = asyncio.run(tools.git(['show', 'HEAD:lead.txt'], ctx))
+    assert '5050 lines' in nopage  # the 50 leading blanks are counted, not dropped
+    page1 = asyncio.run(tools.git(['show', 'HEAD:lead.txt'], ctx, page=1))
+    assert 'lines 1-' in page1  # page 1 starts at the real first (blank) line
+    body1 = page1.split('\n', 1)[1].split('\n')
+    assert body1[:50] == [''] * 50  # the leading blanks are present at lines 1-50
+
+
 def test_git_single_oversized_line_is_truncated(tmp_path):
     # A single line longer than the page bound (a minified or generated file) must not be
     # returned whole: it is truncated so a page stays bounded even when one line alone

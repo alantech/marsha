@@ -857,7 +857,10 @@ async def git(args, ctx=None, page=None):
         out, err = await run_subprocess(proc, GIT_TIMEOUT)
     except Exception as e:
         return f'error: `git {sub}` could not be run (timed out or failed): {e}'
-    result = (out or '').strip()
+    # rstrip (not strip): only drop the trailing newline, never leading blank lines, so the
+    # 1-based line ranges _git_page_result reports match the file's real lines (a file that
+    # begins with blank lines would otherwise have its page ranges shifted).
+    result = (out or '').rstrip()
     errtxt = (err or '').strip()
     if proc.returncode != 0 and not result:
         return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'

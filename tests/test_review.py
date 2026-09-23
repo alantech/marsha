@@ -544,6 +544,17 @@ def test_gate_counts_blank_boundary_lines_in_file(repo):
     assert kept == [f]
 
 
+def test_git_line_count_matches_splitlines(repo):
+    # _git_line_count streams the file (no whole-file buffer) and must agree with splitlines() —
+    # counting blank boundary lines and a final line with no trailing newline.
+    cases = {'plain.txt': 'a\nb\nc\n', 'lead.txt': '\n\na\n',
+             'trail.txt': 'a\n\n\n', 'noeol.txt': 'a\nb', 'empty.txt': ''}
+    for name, content in cases.items():
+        _add_code_file(repo, name, content)
+        got = asyncio.run(review._git_line_count('HEAD', name, repo))
+        assert got == len(content.splitlines()), (name, got, content)
+
+
 def test_gate_drops_finding_with_no_evidence(repo):
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
