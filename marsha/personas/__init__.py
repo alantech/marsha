@@ -189,7 +189,7 @@ def _split_location(rest: str) -> tuple[str, str]:
     return '', rest
 
 
-def position_label(review_number: int, used: set[str]) -> str:
+def position_label(review_number: int | None, used: set[str]) -> str:
     # The first position-based label (A<n>, B<n>, ...) not already used, so a fallback label can
     # never collide with a reused one. Beyond the 26 single letters (a degenerate 27th+ finding
     # from one reviewer) it extends to two letters (AA<n>, AB<n>, ...) so the label always stays

@@ -70,7 +70,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
     module = [
         "marsha.base",
-        "marsha.review",
         "marsha.__main__",
     # tests/ has no __init__.py, so mypy names these top-level modules (not tests.test_*).
     "test_backend",

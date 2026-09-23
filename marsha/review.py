@@ -7,6 +7,8 @@ untrusted reference data, and `--post-review` posts the findings back to the PR 
 comments (falling back to the review body where a finding's line is not in the diff).
 """
 
+from __future__ import annotations
+
 import asyncio
 import dataclasses
 import json
@@ -14,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+from typing import Any
 
 from marsha import backends
 from marsha import tools
@@ -58,15 +61,15 @@ _REFUTE_CONFIDENCE_RULE = (
     'verified it with the git tool. Do not re-raise a rebutted finding on a hunch.')
 
 
-def gh_available():
+def gh_available() -> bool:
     return shutil.which('gh') is not None
 
 
-def linear_available():
+def linear_available() -> bool:
     return shutil.which('linear') is not None
 
 
-async def _run(cmd, *args, cwd=None, timeout=60, input=None):
+async def _run(cmd: str, *args: str, cwd: str | None = None, timeout: float = 60, input: bytes | None = None) -> tuple[int | None, str, str]:
     stdin = subprocess.PIPE if input is not None else subprocess.DEVNULL
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -82,28 +85,28 @@ async def _run(cmd, *args, cwd=None, timeout=60, input=None):
     return (proc.returncode, out, err)
 
 
-async def _git(*args, cwd=None, timeout=60, input=None):
+async def _git(*args: str, cwd: str | None = None, timeout: float = 60, input: bytes | None = None) -> tuple[int | None, str, str]:
     rc, out, err = await _run('git', *args, cwd=cwd, timeout=timeout, input=input)
     return (rc, out.strip(), err.strip())
 
 
-async def _gh(*args, cwd=None, timeout=120, input=None):
+async def _gh(*args: str, cwd: str | None = None, timeout: float = 120, input: bytes | None = None) -> tuple[int | None, str, str]:
     rc, out, err = await _run('gh', *args, cwd=cwd, timeout=timeout, input=input)
     return (rc, out.strip(), err.strip())
 
 
 # Resolved once per cwd and cached: several helpers each need the repo's owner/name, and the CLI
 # resolves it for a single repo, so this avoids the redundant `gh repo view` subprocess calls.
-_repo_name_cache = {}
+_repo_name_cache: dict[str | None, str] = {}
 
 
-async def _repo_name(cwd):
+async def _repo_name(cwd: str | None) -> str:
     # The current repository's `owner/name`, resolved once per cwd (only a successful result is
     # cached, so a transient failure is retried on the next call). Returns '' if unresolvable.
     if cwd in _repo_name_cache:
         return _repo_name_cache[cwd]
     rc, out, err = await _gh('repo', 'view', '--json', 'nameWithOwner', cwd=cwd)
-    repo = ''
+    repo: str = ''
     if rc == 0 and out.strip():
         try:
             repo = json.loads(out).get('nameWithOwner', '')
@@ -114,7 +117,7 @@ async def _repo_name(cwd):
     return repo
 
 
-async def default_branch(cwd=None):
+async def default_branch(cwd: str | None = None) -> tuple[str, str]:
     # (name, ref) of the repository default branch, e.g. ('main', 'origin/main').
     rc, out, _ = await _git(
         'symbolic-ref', '--short', 'refs/remotes/origin/HEAD', cwd=cwd)
@@ -130,14 +133,14 @@ async def default_branch(cwd=None):
     raise Exception('Could not determine the repository default branch.')
 
 
-async def working_tree_clean(cwd=None):
+async def working_tree_clean(cwd: str | None = None) -> bool:
     rc, out, err = await _git('status', '--porcelain', cwd=cwd)
     if rc != 0:
         raise Exception(f'git status failed: {err}')
     return out == ''
 
 
-async def branch_diff(base_ref, head='HEAD', cwd=None, context=3):
+async def branch_diff(base_ref: str, head: str = 'HEAD', cwd: str | None = None, context: int = 3) -> str:
     # Three-dot (base...head): symmetric diff from the merge-base — exactly what `head` changed
     # relative to `base` (the default branch), excluding changes that landed on `base` itself.
     rc, out, err = await _git(
@@ -147,7 +150,7 @@ async def branch_diff(base_ref, head='HEAD', cwd=None, context=3):
     return out
 
 
-async def branch_diff_stat(base_ref, head='HEAD', cwd=None):
+async def branch_diff_stat(base_ref: str, head: str = 'HEAD', cwd: str | None = None) -> str:
     # The changed-file summary (which files changed and by how much) — the starting map a
     # reviewer probes from, instead of the full unified diff.
     rc, out, err = await _git('diff', '--stat', f'{base_ref}...{head}', cwd=cwd)
@@ -156,7 +159,7 @@ async def branch_diff_stat(base_ref, head='HEAD', cwd=None):
     return out
 
 
-async def changed_files(base_ref, head='HEAD', cwd=None):
+async def changed_files(base_ref: str, head: str = 'HEAD', cwd: str | None = None) -> str:
     rc, out, err = await _git(
         'diff', '--name-status', f'{base_ref}...{head}', cwd=cwd)
     if rc != 0:
@@ -165,7 +168,7 @@ async def changed_files(base_ref, head='HEAD', cwd=None):
     return out
 
 
-async def gh_pr_head(num, cwd=None):
+async def gh_pr_head(num: int, cwd: str | None = None) -> tuple[str, str]:
     # The PR's head branch name and head commit OID, so a review can tell whether the local branch
     # already contains the PR head (and any unpushed local commits on top of it).
     rc, out, err = await _gh(
@@ -179,7 +182,7 @@ async def gh_pr_head(num, cwd=None):
     return (data.get('headRefName') or '', data.get('headRefOid') or '')
 
 
-async def local_branch_ahead_of(cwd=None, head_ref='', head_oid=''):
+async def local_branch_ahead_of(cwd: str | None = None, head_ref: str = '', head_oid: str = '') -> bool:
     # True when `head_oid` is an ancestor of (or equal to) the current HEAD, i.e. the checked-out
     # branch already contains the PR head plus any unpushed local commits on top of it. The PR
     # head branch is fetched first so `head_oid` is resolvable even when the local branch is not
@@ -192,7 +195,7 @@ async def local_branch_ahead_of(cwd=None, head_ref='', head_oid=''):
     return rc == 0
 
 
-async def commits_ahead(cwd=None, base_oid=None):
+async def commits_ahead(cwd: str | None = None, base_oid: str | None = None) -> int:
     # How many commits the current HEAD has on top of `base_oid` (0 when it contains none).
     rc, out, _err = await _git('rev-list', '--count', f'{base_oid}..HEAD', cwd=cwd)
     if rc != 0 or not out.strip().isdigit():
@@ -200,13 +203,13 @@ async def commits_ahead(cwd=None, base_oid=None):
     return int(out.strip())
 
 
-async def gh_pr_checkout(num, cwd=None):
+async def gh_pr_checkout(num: int, cwd: str | None = None) -> None:
     rc, out, err = await _gh('pr', 'checkout', str(num), cwd=cwd, timeout=300)
     if rc != 0:
         raise Exception(f'`gh pr checkout {num}` failed: {err or out}')
 
 
-async def gh_pr_context(num, cwd=None):
+async def gh_pr_context(num: int, cwd: str | None = None) -> str:
     # Pull the PR title, body, issue comments, and every inline review comment (with its
     # replies) so far, to seed the review with the prior round of review.
     fields = 'title,body,comments'
@@ -270,7 +273,7 @@ async def gh_pr_context(num, cwd=None):
     return '\n\n'.join(parts)
 
 
-async def linear_context(ticket, cwd=None):
+async def linear_context(ticket: str, cwd: str | None = None) -> str:
     # Pull the ticket to seed the review via the linear CLI (issue view, JSON).
     rc, out, err = await _run(
         'linear', 'issue', 'view', ticket, '--json', '--no-pager', cwd=cwd)
@@ -279,7 +282,7 @@ async def linear_context(ticket, cwd=None):
     return out
 
 
-def parse_location(location):
+def parse_location(location: str) -> tuple[str, int | None]:
     # "path/file.py:12" -> ('path/file.py', 12). The line is the largest number in a range
     # (":12-40" -> 40, ":9-15,28-29" -> 29) so the file-data backstop bounds-checks a range at its
     # end; a "line:column" spec (":12:40") keeps the line (12) and drops the column; an open-ended
@@ -299,12 +302,12 @@ def parse_location(location):
     return (file_part, max(nums) if nums else None)
 
 
-def diff_new_lines(diff_text):
+def diff_new_lines(diff_text: str) -> dict[str, set[int]]:
     # Map each path to the set of new-side line numbers the diff actually touches (added or
     # context lines). A finding is only inlined where the PR diff touches that line; otherwise
     # it is folded into the review body. New-side line numbers advance on ' ' and '+' lines
     # and hold on '-' (old-side) lines.
-    touched = {}
+    touched: dict[str, set[int]] = {}
     path = None
     new_lineno = 0
     for raw in diff_text.splitlines():
@@ -329,7 +332,7 @@ def diff_new_lines(diff_text):
     return touched
 
 
-def build_review_message(stat_text, base_name, base_ref, context_blocks):
+def build_review_message(stat_text: str, base_name: str, base_ref: str, context_blocks: list[str]) -> str:
     parts = [
         f'You are reviewing a change to an existing codebase: the currently checked-out '
         f'branch, diffed against the default branch `{base_name}` (ref `{base_ref}`). There '
@@ -368,11 +371,11 @@ def build_review_message(stat_text, base_name, base_ref, context_blocks):
     return '\n\n'.join(parts)
 
 
-def order_findings(findings):
+def order_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Order the final set by severity, then by location.
     order = {'MAJOR': 0, 'MINOR': 1, 'NIT': 2}
 
-    def key(f):
+    def key(f: dict[str, Any]) -> tuple[int, str, int]:
         path, line = parse_location(f.get('location') or '')
         return (order.get(f['severity'], 3), path or '',
                 -1 if line is None else line)
@@ -380,7 +383,7 @@ def order_findings(findings):
     return sorted(findings, key=key)
 
 
-def render_findings(findings, base_ref):
+def render_findings(findings: list[dict[str, Any]], base_ref: str) -> str:
     if not findings:
         return f'No findings against {base_ref}.'
     blocks = [f'Review findings against {base_ref} ({len(findings)}):']
@@ -407,7 +410,7 @@ Do not restate a reviewer's name. Do not add any prose outside the rebuttals.
 '''
 
 
-async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, reasoning_effort=None, seed=None):
+async def conventions_gate(findings: list[dict[str, Any]], tool_ctx: tools.ToolContext, model: str | None, base_name: str, base_ref: str, debug: bool = False, reasoning_effort: str | None = None, seed: int | None = None) -> str:
     # The conventions gate (Norman): read the repo's real conventions (AGENTS.md/CLAUDE.md/lint
     # configs, via the git tool) and return a rebuttal preamble citing the [Name-Label]s of
     # findings that violate a convention the codebase actually follows, or '' when there are
@@ -440,7 +443,7 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
                 f'[Review] conventions gate failed; findings proceed unexamined: {e}')
         log(f'review: conventions gate failed: {e}')
         return ''
-    text = (text or '').strip()
+    text = str((text or '').strip())
     if not text or text.upper().startswith('NO OBJECTIONS'):
         return ''
     return text
@@ -465,8 +468,10 @@ findings, do not restate agreement, and write no prose outside those lines.
 '''
 
 
-async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=False,
-                      reasoning_effort=None, seed=None, max_rounds=None):
+async def critic_gate(findings: list[dict[str, Any]], tool_ctx: tools.ToolContext,
+                      model: str | None, base_name: str, base_ref: str, debug: bool = False,
+                      reasoning_effort: str | None = None, seed: int | None = None,
+                      max_rounds: int | None = None) -> str:
     # The critic (Vera): actively search the code for counter-evidence to each finding — a
     # claimed-missing call/import that is present, a claimed-undefined symbol that is defined, a
     # "corrupted" file that is actually valid — and return refutations citing the [Name-Label]s,
@@ -484,7 +489,8 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
     # The code the reviewer already retrieved, so the critic verifies against it and probes only
     # what it still needs instead of re-deriving every finding from scratch (the per-persona call
     # passes one reviewer's ledger, so this is exactly the code that reviewer read).
-    evidence_lines, seen = [], set()
+    evidence_lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
     for f in findings:
         for cmd, out in (f.get('evidence') or []):
             if (cmd, out) not in seen:
@@ -516,7 +522,7 @@ async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=Fals
                 f'[Review] critic failed; findings proceed without critique: {e}')
         log(f'review: critic failed: {e}')
         return ''
-    text = (text or '').strip()
+    text = str((text or '').strip())
     if not text or text.upper().startswith('NO OBJECTIONS'):
         return ''
     return text
@@ -531,13 +537,13 @@ _POSTED_FINDING_RE = re.compile(
     r'^\*\*\[([A-Za-z]+\d+)\]\s*([A-Z]+)\*\*\s*:\s*(.*)$')
 
 
-def _label_reviewer_number(label):
+def _label_reviewer_number(label: str) -> int | None:
     # The trailing digits of a finding label (e.g. "A2" -> 2): the review number that owns it.
     m = re.search(r'(\d+)$', label or '')
     return int(m.group(1)) if m else None
 
 
-async def _fetch_review_threads(repo, pr_num, cwd=None):
+async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) -> dict[str, dict[str, Any]]:
     # Map a posted finding's [label] (e.g. "A2") -> its review thread, so a re-run can reply on
     # the thread the finding opened, or resolve it if the finding is no longer raised. Only
     # threads whose root comment leads with a [label] (i.e. ones Marsha posted) are matched;
@@ -562,7 +568,7 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
     pr = ((data.get('data') or {}).get('repository')
           or {}).get('pullRequest') or {}
     nodes = (pr.get('reviewThreads') or {}).get('nodes') or []
-    threads = {}
+    threads: dict[str, dict[str, Any]] = {}
     for node in nodes:
         comments = (node.get('comments') or {}).get('nodes') or []
         if not comments:
@@ -584,7 +590,7 @@ async def _fetch_review_threads(repo, pr_num, cwd=None):
     return threads
 
 
-async def _prior_conversations(repo, pr_num, cwd=None):
+async def _prior_conversations(repo: str, pr_num: int, cwd: str | None = None) -> list[dict[str, Any]]:
     # Every prior Marsha thread as a full conversation — the finding, the replies, and whether it
     # was resolved — so the consolidation pass can see a concern's whole history and drop a finding
     # that re-opens an already-settled conversation. Returns
@@ -606,7 +612,7 @@ async def _prior_conversations(repo, pr_num, cwd=None):
         return []
     nodes = (((data.get('data') or {}).get('repository')
               or {}).get('pullRequest') or {}).get('reviewThreads') or {}
-    convs = []
+    convs: list[dict[str, Any]] = []
     for node in (nodes.get('nodes') or []):
         comments = (node.get('comments') or {}).get('nodes') or []
         if not comments:
@@ -628,7 +634,7 @@ async def _prior_conversations(repo, pr_num, cwd=None):
     return convs
 
 
-async def _prior_findings_by_reviewer(pr_num, cwd=None):
+async def _prior_findings_by_reviewer(pr_num: int, cwd: str | None = None) -> dict[int | None, list[dict[str, Any]]]:
     # Group this PR's prior Marsha review threads by the reviewer number that owns them, so each
     # reviewer can be shown its OWN prior findings (plus the user's replies) and decide, per
     # finding, whether to re-raise (reusing the exact label) or concede. Returns
@@ -652,7 +658,7 @@ async def _prior_findings_by_reviewer(pr_num, cwd=None):
         return {}
     nodes = (((data.get('data') or {}).get('repository')
               or {}).get('pullRequest') or {}).get('reviewThreads') or {}
-    by_number = {}
+    by_number: dict[int | None, list[dict[str, Any]]] = {}
     for node in (nodes.get('nodes') or []):
         if node.get('isResolved'):
             continue
@@ -677,7 +683,7 @@ async def _prior_findings_by_reviewer(pr_num, cwd=None):
     return by_number
 
 
-def _reviewer_prior_block(number, prior):
+def _reviewer_prior_block(number: int | None, prior: list[dict[str, Any]]) -> str:
     # The per-reviewer prior-findings context: show this reviewer its OWN prior findings and the
     # user's replies, and tell it to re-raise (reusing the exact label) only what it still stands
     # by and to drop what it concedes — so a label tracks a concern across runs instead of a
@@ -704,7 +710,7 @@ def _reviewer_prior_block(number, prior):
     return '\n'.join(lines)
 
 
-def _prior_conversations_block(convs, raised_labels):
+def _prior_conversations_block(convs: list[dict[str, Any]], raised_labels: set[str]) -> str:
     # The full history of prior Marsha threads (finding + replies + resolution) that are not
     # re-raised this pass, handed to the consolidation pass. With the conversation in front of it,
     # the pass can drop a finding that re-opens an already-settled conversation (same concern under
@@ -729,7 +735,7 @@ def _prior_conversations_block(convs, raised_labels):
     return '\n'.join(lines)
 
 
-async def _resolve_thread(thread_id, cwd=None):
+async def _resolve_thread(thread_id: str | None, cwd: str | None = None) -> bool:
     # Close a review thread (mark it resolved) once the finding that opened it is conceded.
     if not thread_id:
         return False
@@ -741,7 +747,7 @@ async def _resolve_thread(thread_id, cwd=None):
     return rc == 0
 
 
-def _desc_similar(a, b):
+def _desc_similar(a: str, b: str) -> bool:
     # Token overlap of two finding descriptions. A re-raised finding restates a prior one with
     # nearly the same words, so a high Jaccard means it is the same concern (used only when the
     # line shifted between runs and can no longer be matched by position).
@@ -751,7 +757,7 @@ def _desc_similar(a, b):
     return len(ta & tb) / len(ta | tb) >= 0.75
 
 
-def _finding_matches_thread(finding, thread):
+def _finding_matches_thread(finding: dict[str, Any], thread: dict[str, Any]) -> bool:
     # Is `finding` the same concern as the prior thread's finding? Same file at the same line is
     # conclusive; the same file with a shifted/missing line needs a near-identical description.
     # Anything else is treated as a different concern so it never replies on an unrelated thread.
@@ -764,17 +770,17 @@ def _finding_matches_thread(finding, thread):
     return _desc_similar(finding['desc'], thread.get('desc') or '')
 
 
-def _verify_finding_labels(findings, threads):
+def _verify_finding_labels(findings: list[dict[str, Any]], threads: dict[str, dict[str, Any]]) -> int:
     # Reassign any finding that wears a prior thread's label without matching that thread's
     # finding (a new finding colliding with an unrelated old thread), plus any in-run label
     # duplicate, so each label maps to exactly one concern and one thread. Returns how many
     # labels were reassigned. A reassignment frees the old label, so the concede pass below can
     # resolve the thread it collided with.
-    prior_by_number = {}
+    prior_by_number: dict[int | None, dict[str, dict[str, Any]]] = {}
     for label, thread in threads.items():
         num = _label_reviewer_number(label)
         prior_by_number.setdefault(num, {})[label] = thread
-    used_by_number = {}
+    used_by_number: dict[int | None, set[str]] = {}
     reassigned = 0
     for f in findings:
         num = _label_reviewer_number(f['label'])
@@ -790,7 +796,7 @@ def _verify_finding_labels(findings, threads):
     return reassigned
 
 
-def _shares_identifier(a, b):
+def _shares_identifier(a: str, b: str) -> bool:
     # A distinctive identifier (a token containing an underscore or hyphen, e.g. a function or
     # package name) appearing in both descriptions is strong evidence the two findings are about
     # the same symbol/concern, even when the surrounding wording differs.
@@ -798,7 +804,7 @@ def _shares_identifier(a, b):
     return bool(set(pat.findall(a)) & set(pat.findall(b)))
 
 
-def _same_concern(finding, prior):
+def _same_concern(finding: dict[str, Any], prior: dict[str, Any]) -> bool:
     # Is `finding` the same concern as `prior` (a prior thread or review-body finding), matched by
     # concern -- same file plus a shared identifier or a moderate description overlap -- rather than
     # by exact line, so a restatement on a shifted line, or re-anchored to another line, still
@@ -818,14 +824,14 @@ def _same_concern(finding, prior):
     return len(ta & tb) / len(ta | tb) >= 0.4
 
 
-def _corroborated(findings, passes, threshold):
+def _corroborated(findings: list[dict[str, Any]], passes: list[list[dict[str, Any]]], threshold: int) -> list[dict[str, Any]]:
     # Keep a finding only if an equivalent concern (same file + a shared identifier or a close
     # description) appears in at least `threshold` of the independent `passes` (one findings-list
     # per consensus run). A real defect is re-found across independent runs; a sampling fluke is
     # not, so requiring corroboration makes the panel's output stable even when the model's
     # per-run recall varies. Near-duplicate survivors are merged downstream (dedup_by_location +
     # consolidation), so this only filters, it does not merge.
-    kept = []
+    kept: list[dict[str, Any]] = []
     for f in findings:
         count = 0
         for p in passes:
@@ -848,16 +854,16 @@ _ANCHOR_TOKEN = re.compile(
 # probing the repo instead of guessing at extensions (which would miss names like archive.tar.gz
 # or extensionless files). The base is included too: a finding may be about a file the change
 # deleted (present at the base, absent at HEAD), and _file_info resolves that against the base.
-_file_basenames_cache = {}
+_file_basenames_cache: dict[tuple[str, str], set[str]] = {}
 
 
-async def _repo_file_basenames(cwd, base_ref):
+async def _repo_file_basenames(cwd: str, base_ref: str) -> set[str]:
     # The basenames of every file at HEAD or the base (one `git ls-tree` per ref, cached per
     # (cwd, base_ref)). A token in this set is a file the reviewer could open, not a code symbol.
     key = (cwd, base_ref)
     if key in _file_basenames_cache:
         return _file_basenames_cache[key]
-    basenames = set()
+    basenames: set[str] = set()
     for ref in ('HEAD', base_ref):
         rc, out, _err = await _git('ls-tree', '-r', '--name-only', ref, cwd=cwd)
         if rc == 0:
@@ -867,7 +873,7 @@ async def _repo_file_basenames(cwd, base_ref):
     return basenames
 
 
-def _is_distinctive(tok):
+def _is_distinctive(tok: str) -> bool:
     # A code-like token rather than an English word: long enough and shaped like an identifier —
     # it carries an underscore, a dotted member, or a camelCase hump. Anchoring the check on these
     # (not on common words, which appear in any retrieved code) is what makes the gate discriminative.
@@ -876,7 +882,7 @@ def _is_distinctive(tok):
                  or re.search(r'[a-z][A-Z]', tok) is not None))
 
 
-def _distinctive_anchors(finding, file_basenames):
+def _distinctive_anchors(finding: dict[str, Any], file_basenames: set[str]) -> set[str]:
     # The code-like symbols a finding leans on, drawn from its headline and support (NOT its
     # location: the cited path is checked separately as "the file was opened", and letting it feed
     # the symbol set would ground a finding merely because the reviewer read the cited file, even
@@ -896,7 +902,7 @@ def _distinctive_anchors(finding, file_basenames):
     return anchors
 
 
-def _location_file(location):
+def _location_file(location: str) -> str | None:
     # A single file path from a finding's location, or None when it is not a clean single file.
     # The file is everything before a trailing line spec — a ':' followed by a digit, whatever
     # follows it (":12", ":12:40", ":12-40", ":1-EOF", ":12+", ":9-15,28-29"). Returns None for a
@@ -914,7 +920,7 @@ def _location_file(location):
     return loc
 
 
-async def _git_line_count(ref, path, cwd):
+async def _git_line_count(ref: str, path: str, cwd: str | None) -> int | None:
     # The line count of <ref>:<path>, streamed in chunks and counted by newline bytes so a large
     # cited file is never buffered whole (and held as a list of lines) just to validate a citation's
     # line bound. Matches str.splitlines(): a final line without a trailing newline still counts,
@@ -927,10 +933,13 @@ async def _git_line_count(ref, path, cwd):
     except (FileNotFoundError, OSError):
         return None
     count = 0
-    last = None
+    last: bytes | None = None
+    stdout = proc.stdout
+    if stdout is None:
+        return None
     try:
         while True:
-            chunk = await proc.stdout.read(65536)
+            chunk = await stdout.read(65536)
             if not chunk:
                 break
             count += chunk.count(b'\n')
@@ -945,7 +954,7 @@ async def _git_line_count(ref, path, cwd):
     return count
 
 
-async def _file_info(path, cwd, base_ref, cache):
+async def _file_info(path: str, cwd: str | None, base_ref: str, cache: dict[str, tuple[bool, int | None]]) -> tuple[bool, int | None]:
     # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
     # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
     # path so several findings citing the same file cost one probe each. A deleted file (present
@@ -987,7 +996,7 @@ _EXISTENCE_ABSENCE_RE = re.compile(
     re.I)
 
 
-def _asserted_absent_symbols(finding):
+def _asserted_absent_symbols(finding: dict[str, Any]) -> set[str]:
     # The distinctive symbols a finding asserts do not exist. For each existence-absence cue the
     # accused symbol is the distinctive token nearest to it (a few characters either side), so
     # "X is not defined, though Y is defined" accuses only X and a co-cited, genuinely-present
@@ -997,7 +1006,8 @@ def _asserted_absent_symbols(finding):
     absent = set()
     for cue in _EXISTENCE_ABSENCE_RE.finditer(text):
         lo, hi = max(0, cue.start() - 40), min(len(text), cue.end() + 40)
-        nearest, nearest_dist = None, None
+        nearest: str | None = None
+        nearest_dist: int | None = None
         for tok in _ANCHOR_TOKEN.finditer(text, lo, hi):
             if not _is_distinctive(tok.group(0)):
                 continue
@@ -1008,7 +1018,7 @@ def _asserted_absent_symbols(finding):
                            abs(cue.end() - tok.start()))
             if nearest_dist is None or dist < nearest_dist:
                 nearest, nearest_dist = tok.group(0), dist
-        if nearest is not None and nearest_dist <= 40:
+        if nearest is not None and nearest_dist is not None and nearest_dist <= 40:
             absent.add(nearest)
             for part in nearest.split('.'):
                 if _is_distinctive(part):
@@ -1016,14 +1026,14 @@ def _asserted_absent_symbols(finding):
     return absent
 
 
-def _symbol_in_text(text, symbol):
+def _symbol_in_text(text: str, symbol: str) -> bool:
     # Whether `symbol` appears in `text` as a whole word (not a substring of a longer identifier),
     # so a shorter invented name cannot ground itself on a longer one the reviewer actually read
     # (e.g. `phantomHand` on `phantomHandler`). Dotted names match as a whole token.
     return re.search(rf'\b{re.escape(symbol)}\b', text) is not None
 
 
-async def _symbol_present(symbol, cwd, cache):
+async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | None]) -> bool | None:
     # Whether `symbol` occurs in the reviewed commit, matched as a whole-word fixed string (no
     # language-specific keyword, so any language works). A dotted name is grepped in full, so an
     # invented chain such as svc.foo.bar is "present" only if that exact chain is, never on the
@@ -1039,7 +1049,7 @@ async def _symbol_present(symbol, cwd, cache):
     return present
 
 
-def _path_token_match(command_scope, file_path):
+def _path_token_match(command_scope: str, file_path: str) -> bool:
     # Whether `file_path` appears in the command text as a whole path component, not as a substring
     # of a longer name. The commands are split on whitespace and the ':' ref separator (so
     # `git show HEAD:src/a.py` yields the path `src/a.py` as a token). A full path (one with a
@@ -1054,7 +1064,7 @@ def _path_token_match(command_scope, file_path):
     return False
 
 
-def _opened_command_scope(evidence):
+def _opened_command_scope(evidence: list[tuple[str, str]]) -> str:
     # The command text that establishes a file was OPENED (git show, git cat-file, a pathspec).
     # A `git grep` is a SEARCH, not a file open: even with a pathspec it returns only matching
     # lines (or nothing at all on a clean no-match), so a location-only finding must be grounded on
@@ -1067,7 +1077,7 @@ def _opened_command_scope(evidence):
     return '\n'.join(lines)
 
 
-async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation=False):
+async def evidence_gate(findings: list[dict[str, Any]], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False) -> list[dict[str, Any]]:
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
     # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
@@ -1100,13 +1110,13 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     # symbol the consolidator invented is still dropped.
     if not findings:
         return findings
-    file_cache = {}
+    file_cache: dict[str, tuple[bool, int | None]] = {}
     # Shared across findings (like file_cache): whether a symbol is present in the tree is a
     # property of the symbol, not the finding, so the same symbol is grepped once, not once per
     # finding that names it.
-    symbol_cache = {}
+    symbol_cache: dict[str, bool | None] = {}
     file_basenames = await _repo_file_basenames(cwd, base_ref)
-    kept = []
+    kept: list[dict[str, Any]] = []
     for f in findings:
         location = f.get('location') or ''
         _path, line = parse_location(location)
@@ -1149,7 +1159,7 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
                 # citation pass an unverified backstop.
                 ok, reason = False, (f'cited line {line} could not be verified: the line count '
                                      f'of {file_path} could not be determined')
-            elif line is not None and (line < 1 or line > line_count):
+            elif line is not None and line_count is not None and (line < 1 or line > line_count):
                 # Citations are 1-based, so a line below 1 (a 0-based :0) is invalid as well as
                 # one past the end of the file.
                 ok, reason = False, (f'cited line {line} is not a valid line of {file_path} '
@@ -1203,7 +1213,7 @@ _BODY_FINDING_RE = re.compile(
     r'^-\s+\*\*\[([A-Z]+\d+)\]\s+\w+\s*\*\*\s*`([^`]*)`\s*:\s*(.+)$', re.M)
 
 
-async def _fetch_prior_body_findings(repo, pr_num, cwd=None):
+async def _fetch_prior_body_findings(repo: str, pr_num: int, cwd: str | None = None) -> list[dict[str, str]]:
     # Findings posted in earlier review BODIES (not inline threads) are invisible to the thread
     # de-dup, so they re-surface on every pass; index them here so a concern already raised in a
     # body is not re-posted. Only Marsha's own review bodies are parsed. Returns
@@ -1218,7 +1228,7 @@ async def _fetch_prior_body_findings(repo, pr_num, cwd=None):
         return []
     if not isinstance(reviews, list):
         return []
-    found = []
+    found: list[dict[str, str]] = []
     for rev in reviews:
         body = rev.get('body') or ''
         if 'Marsha review' not in body:
@@ -1230,7 +1240,7 @@ async def _fetch_prior_body_findings(repo, pr_num, cwd=None):
     return found
 
 
-def _thread_settled(conv):
+def _thread_settled(conv: dict[str, Any]) -> bool:
     # A prior thread is settled (the user already weighed in) if it is resolved, or if it has any
     # reply that is not a Marsha re-raise -- a human reply such as a rejection, a "fixed" note, or
     # a "false positive" answer. Re-raising a settled thread is noise, so it is dropped.
@@ -1240,19 +1250,20 @@ def _thread_settled(conv):
                for r in (conv.get('replies') or []))
 
 
-def _filter_duplicate_findings(findings, threads, body_findings, settled_labels=None):
+def _filter_duplicate_findings(findings: list[dict[str, Any]], threads: dict[str, dict[str, Any]], body_findings: list[dict[str, str]], settled_labels: set[str] | None = None) -> tuple[list[dict[str, Any]], int]:
     # Drop a finding that restates a concern already raised in a prior pass (a prior thread or a
     # prior review-body finding), matched by concern (file + description) rather than exact line,
     # or that re-raises a thread the user already settled. A finding that keeps the exact label of
     # an OPEN prior thread is a deliberate re-raise that replies on that thread, so it is kept.
     # Returns (kept, dropped_count).
     settled = set(settled_labels or ())
-    prior = [{'path': t.get('path'), 'desc': t.get('desc') or ''}
-             for t in threads.values()]
+    prior: list[dict[str, Any]] = [{'path': t.get('path'), 'desc': t.get('desc') or ''}
+                                   for t in threads.values()]
     prior += [{'path': b.get('path'), 'desc': b.get('desc') or ''}
               for b in body_findings]
     thread_labels = set(threads)
-    kept, dropped = [], 0
+    kept: list[dict[str, Any]] = []
+    dropped = 0
     for f in findings:
         if f['label'] in settled:
             # Re-raising a concern the user already settled (rejected/fixed/resolved) is noise.
@@ -1269,7 +1280,7 @@ def _filter_duplicate_findings(findings, threads, body_findings, settled_labels=
     return kept, dropped
 
 
-async def _post_all_clear(repo, pr_num, cwd=None):
+async def _post_all_clear(repo: str, pr_num: int, cwd: str | None = None) -> None:
     # A no-finding --post-review still posts a short all-clear note to the PR.
     payload = json.dumps(
         {'event': 'COMMENT', 'body': 'Marsha review — no issues found.'})
@@ -1282,7 +1293,7 @@ async def _post_all_clear(repo, pr_num, cwd=None):
             f'Failed to post the all-clear to PR #{pr_num}: {err or out}')
 
 
-async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None):
+async def post_review(pr_num: int, findings: list[dict[str, Any]], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None) -> None:
     repo = await _repo_name(cwd)
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
@@ -1314,9 +1325,9 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         findings, threads, prior_body, settled_labels=settled)
     if dup_dropped:
         log(f'review: dropped {dup_dropped} finding(s) that re-raised a prior concern')
-    new_inline = []
-    replies = []
-    body_findings = []
+    new_inline: list[dict[str, Any]] = []
+    replies: list[tuple[Any, str]] = []
+    body_findings: list[str] = []
     for f in findings:
         path, line = parse_location(f['location'])
         body = f"**[{f['label']}] {f['severity']}**: {f['desc']}"
@@ -1384,21 +1395,25 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         f'{closed} threads resolved.')
 
 
-async def _per_persona_critique(reviewers, findings, message, model, base_name, base_ref,
-                                guidance, tool_ctx, prior_labels_by_number,
-                                reasoning_effort, seed, debug):
+async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
+                                findings: list[dict[str, Any]], message: str,
+                                model: str | None, base_name: str, base_ref: str,
+                                guidance: str, tool_ctx: tools.ToolContext,
+                                prior_labels_by_number: dict[int, set[str]],
+                                reasoning_effort: str | None, seed: int | None,
+                                debug: bool) -> list[dict[str, Any]]:
     # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
     # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
     # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
     # caught here by an LLM that actually reads the code, before the findings are pooled. A pooled
     # critic dilutes its attention across the whole panel; per-reviewer it holds each reviewer to
     # its own claims.
-    by_reviewer = {}
+    by_reviewer: dict[str, list[dict[str, Any]]] = {}
     for f in findings:
         by_reviewer.setdefault(f['name'], []).append(f)
     specs = {s[0]: s for s in reviewers}
 
-    async def handle(name, group):
+    async def handle(name: str, group: list[dict[str, Any]]) -> list[dict[str, Any]]:
         refutation = await critic_gate(
             group, tool_ctx, model, base_name, base_ref, debug=debug,
             reasoning_effort=reasoning_effort, seed=seed)
@@ -1432,15 +1447,21 @@ async def _per_persona_critique(reviewers, findings, message, model, base_name, 
     return [f for sub in results for f in sub]
 
 
-async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, guidance, tool_ctx, prior_block_by_number, prior_labels_by_number, reasoning_effort, seed, debug):
+async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
+                       model: str | None, base_name: str, base_ref: str, rounds: int,
+                       guidance: str, tool_ctx: tools.ToolContext,
+                       prior_block_by_number: dict[int, str],
+                       prior_labels_by_number: dict[int, set[str]],
+                       reasoning_effort: str | None, seed: int, debug: bool) -> list[dict[str, Any]]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
     # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
     # same-location-collapsed findings (before semantic consolidation) — ready for consensus
     # voting across passes, or a single-pass consolidation.
-    prior_findings, prior_preamble = [], ''
-    actionable = []
-    evidence_by_number = {}
+    prior_findings: list[dict[str, Any]] = []
+    prior_preamble: str = ''
+    actionable: list[dict[str, Any]] = []
+    evidence_by_number: dict[int | None, list[tuple[str, str]]] = {}
     for i in range(rounds + 1):
         user_message = message
         if i > 0:
@@ -1494,7 +1515,7 @@ async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, g
     return dedup_by_location(actionable)
 
 
-async def run_review(args):
+async def run_review(args: Any) -> int:
     if args.post_review and args.pr is None:
         raise Exception(
             '--post-review requires --pr <num> (there is no PR to post to).')
@@ -1546,7 +1567,7 @@ async def run_review(args):
         await branch_diff(base_ref, 'HEAD', cwd), limit=REVIEW_DIFF_LIMIT)
         if args.post_review else '')
 
-    context_blocks = []
+    context_blocks: list[str] = []
     if args.linear is not None:
         lin = await linear_context(args.linear, cwd)
         context_blocks.append(tools.wrap_untrusted(
@@ -1579,13 +1600,15 @@ async def run_review(args):
     # Show each reviewer its OWN prior findings (labeled) plus the user's replies, so it reuses a
     # label only for a concern it still stands by. A label then tracks a concern across runs, and
     # post_review can reply on (or resolve) the right thread for it.
-    prior_block_by_number = {}
-    prior_labels_by_number = {}
-    by_number = {}
+    prior_block_by_number: dict[int, str] = {}
+    prior_labels_by_number: dict[int, set[str]] = {}
+    by_number: dict[int | None, list[dict[str, Any]]] = {}
     if args.pr is not None:
         by_number = await _prior_findings_by_reviewer(args.pr, cwd)
         for num, prior in by_number.items():
             if not prior:
+                continue
+            if num is None:
                 continue
             prior_block_by_number[num] = _reviewer_prior_block(num, prior)
             prior_labels_by_number[num] = {f['label'] for f in prior}
@@ -1599,7 +1622,7 @@ async def run_review(args):
         # per-run variance (which gpt-5-mini cannot be made deterministic): a real defect is
         # re-found across runs, a sampling fluke is not. Each pass uses a fresh scratchpad and a
         # distinct seed so a seed-honoring provider samples independently.
-        passes = []
+        passes: list[list[dict[str, Any]]] = []
         for i in range(consensus_n):
             pass_ctx = tools.ToolContext(
                 phase='review', workdir=cwd, notes=[], require_evidence=True)
@@ -1613,7 +1636,7 @@ async def run_review(args):
         # A corroborated finding is raised by several independent passes, each with its OWN git
         # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
         # for the same (name, label) so the evidence gate sees all the code the panel actually read.
-        evidence_by_key = {}
+        evidence_by_key: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for p in passes:
             for pf in p:
                 evidence_by_key.setdefault(
@@ -1651,10 +1674,10 @@ async def run_review(args):
         # The consolidation re-emits one-line findings (it drops non-defects and merges dupes), so
         # the reviewer's supporting paragraphs are re-attached by (name, label) afterwards: the
         # evidence was gathered by the reviewer with the git tools and should survive reduction.
-        support_by_label = {(f['name'], f['label']): f.get('support', '')
-                            for f in actionable}
-        evidence_by_label = {(f['name'], f['label']): list(f.get('evidence') or [])
-                             for f in actionable}
+        support_by_label: dict[tuple[str, str], str] = {(f['name'], f['label']): f.get('support', '')
+                                                        for f in actionable}
+        evidence_by_label: dict[tuple[str, str], list[tuple[str, str]]] = {(f['name'], f['label']): list(f.get('evidence') or [])
+                                                                           for f in actionable}
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
