@@ -260,6 +260,14 @@ def parse_findings(text, name, review_number, prior_labels=None):
     return findings
 
 
+def drop_unsupported(findings):
+    # The contract (FINDINGS_CONTRACT) requires 1-2 supporting paragraphs per finding; a headline
+    # with no support is a bare, unverified claim, so it is not reported. Applied where findings
+    # are ready to report (not in parse_findings, which stays lenient so its labeling/positioning
+    # logic can be tested with minimal headline-only fixtures).
+    return [f for f in findings if f.get('support')]
+
+
 # The leading "- " is optional: the model sometimes omits the list bullet, and treating a
 # well-formed finding without it as absent would silently drop it (see parse_compacted_findings).
 _COMPACTED_LINE = re.compile(
@@ -418,6 +426,9 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
             return []
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
+        # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
+        # unverified claim, so it is not reported.
+        findings = drop_unsupported(findings)
         # Attach the git evidence this reviewer actually retrieved, so the evidence gate can later
         # verify each finding against real tool output (not the model's word for it).
         evidence = rctx.evidence if rctx is not None else []

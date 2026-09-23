@@ -283,7 +283,7 @@ def test_run_personas_attaches_evidence_to_findings():
     async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
                                   max_rounds=tools.MAX_TOOL_ROUNDS):
         ctx.evidence.extend(ev)
-        return 'A1 [MAJOR] a.txt:2 - bad thing'
+        return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
 
     with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
          patch.object(personas, 'get_mapper',
@@ -1069,7 +1069,7 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
             self.n += 1
             if self.n == 1:
                 return '$ git show HEAD:a.txt'
-            return 'A1 [MAJOR] a.txt:2 - bad thing'
+            return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
 
     async def no_compact(messages, mapper, ctx, debug=False):
         return messages

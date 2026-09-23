@@ -173,6 +173,17 @@ def test_parse_findings_captures_support():
     assert fs[1]['support'] == ''
 
 
+def test_drop_unsupported_findings():
+    # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
+    # unverified claim and is dropped before it is reported (the parser itself stays lenient so
+    # its labeling logic can be tested with minimal fixtures).
+    bare = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
+            'desc': 'd', 'support': ''}
+    backed = dict(bare, label='B1', support='The spec requires it.')
+    assert p.drop_unsupported([]) == []
+    assert p.drop_unsupported([bare, backed]) == [backed]
+
+
 # --- Finding model ----------------------------------------------------------
 
 def _f(name, label, severity, desc):
@@ -268,7 +279,7 @@ def test_run_personas_ignores_failing_persona():
         async def run(self, user_message):
             if 'review #1' in self.system:
                 raise Exception('boom')
-            return 'A2 [MAJOR] x - ok\n'
+            return 'A2 [MAJOR] x - ok\nI confirmed the defect with git show HEAD:x.'
 
     async def scenario():
         reviewers = [('Ada', 'body', 1), ('Vera', 'body', 2)]
