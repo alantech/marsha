@@ -757,6 +757,10 @@ GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
 # (e.g. `git diff --no-index /etc/passwd /etc/shadow`); rejected so the reviewer cannot pull
 # local secrets or arbitrary files into the LLM context.
 GIT_EXTERNAL_FILE_FLAGS = {'--no-index'}
+# Flags that make an otherwise-read-only command run an EXTERNAL program (e.g. `git diff --ext-diff`
+# shells out to the configured $diff.external tool); rejected so a configured external helper cannot
+# be executed by the read-only tool. The `--no-ext-diff` negation is safe and is not blocked.
+GIT_EXTERNAL_EXEC_FLAGS = {'--ext-diff'}
 GIT_TIMEOUT = 60
 
 
@@ -838,6 +842,9 @@ async def git(args, ctx=None, page=None):
         if flag.split('=', 1)[0] in GIT_EXTERNAL_FILE_FLAGS:
             return (f'error: the flag `{flag}` is not allowed (it would read files '
                     f'outside the repository).')
+        if flag.split('=', 1)[0] in GIT_EXTERNAL_EXEC_FLAGS:
+            return (f'error: the flag `{flag}` is not allowed (it would run an external '
+                    f'program).')
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: git has no working directory (not run inside a repository).'

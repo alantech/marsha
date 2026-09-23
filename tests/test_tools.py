@@ -788,6 +788,23 @@ def test_git_grep_no_match_is_not_an_error(tmp_path):
     assert not miss.startswith('error:') and miss == ''
 
 
+def test_git_refuses_ext_diff_external_program(tmp_path):
+    # `git diff --ext-diff` shells out to the configured external diff tool ($diff.external), which
+    # would let the read-only tool execute an arbitrary program; the flag is refused. The
+    # --no-ext-diff negation (which merely disables the external tool) is not blocked.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'f.txt').write_text('a\n')
+    subprocess.run(['git', 'add', 'f.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.git(['diff', '--ext-diff'], ctx))
+    assert out.startswith('error:') and 'external program' in out
+    assert not asyncio.run(
+        tools.git(['diff', '--no-ext-diff'], ctx)).startswith('error:')
+
+
 def test_run_with_tools_does_not_record_error_evidence(tmp_path):
     # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
     # too large to show at once), so it is not recorded as evidence: only actual output grounds a

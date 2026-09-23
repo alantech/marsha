@@ -1054,6 +1054,24 @@ def _path_token_match(command_scope, file_path):
     return False
 
 
+def _opened_command_scope(evidence):
+    # The command text that establishes a file was OPENED, with a `git grep` PATTERN removed: the
+    # first non-flag argument of a grep is a search term, not a path, so grepping for a symbol must
+    # not make that symbol look like an opened file (which would let a grep'd-but-absent name pass a
+    # file-opened check). A `PAGE=n` prefix (a paged re-request) is tolerated.
+    lines = []
+    for cmd, _out in evidence:
+        parts = cmd.split()
+        if 'grep' in parts:
+            i = parts.index('grep') + 1
+            while i < len(parts) and parts[i].startswith('-'):
+                i += 1
+            if i < len(parts):  # drop the pattern (the first non-flag argument)
+                parts = parts[:i] + parts[i + 1:]
+        lines.append(' '.join(parts))
+    return '\n'.join(lines)
+
+
 async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation=False):
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
@@ -1074,8 +1092,9 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     #     symbol next to an invented one. If it names an identifier that appears in neither the
     #     reviewer's git output nor the reviewed tree, that identifier is a fabrication and the
     #     finding is dropped. Dotted names are matched in full (an invented chain cannot ground on
-    #     its leaf); a name that is a file the reviewer opened — a whole path in a recorded command
-    #     — is a filename, not a subject, so it is exempt; asserted-absent symbols are exempt too.
+    #     its leaf). A real filename is never an anchor (the repo's file list is excluded up front),
+    #     so no command-text exemption is needed — and one would be wrong, since a `git grep <name>`
+    #     query is a search term, not an opened file; asserted-absent symbols are exempt too.
     # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
     # reviewer read, even though the missing symbol itself is absent.
     # With post_consolidation=True the finding has already been grounded by the reviewer (the gate
@@ -1105,8 +1124,10 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         # "read" only if it appears in code the reviewer actually retrieved.
         output_scope = '\n'.join(out for _cmd, out in evidence)
         # The file-opened check (for a finding that names no symbol) matches against the COMMAND
-        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output.
-        command_scope = '\n'.join(cmd for cmd, _out in evidence)
+        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output. The
+        # grep PATTERN is dropped from that scope (a search term is not a path), so grepping for a
+        # file's name is not treated as having opened it.
+        command_scope = _opened_command_scope(evidence)
         ok, reason = True, ''
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
@@ -1142,13 +1163,15 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             # invented one; the "at least one" primary check above passes on the real one. If any
             # identifier it names is in neither the code the reviewer read nor the reviewed tree,
             # that identifier is a fabrication and the finding is dropped. Dotted names are checked
-            # in full (an invented chain cannot ground on its leaf); a name that is a file the
-            # reviewer opened (a whole path in a recorded command) is a filename, not a subject,
-            # and is exempt; asserted-absent symbols are exempt because an absence finding
-            # legitimately names the missing symbol (see _asserted_absent_symbols).
+            # in full (an invented chain cannot ground on its leaf). A real filename is never an
+            # anchor to begin with (_distinctive_anchors excludes the repo's file list), so there is
+            # no command-text exemption here — one would be dangerous, since a `git grep <name>`
+            # argument is a search term, not an opened file, and would let a grep'd-but-absent
+            # invented name evade the check. Asserted-absent symbols are exempt because an absence
+            # finding legitimately names the missing symbol (see _asserted_absent_symbols).
             absent = _asserted_absent_symbols(f)
             for a in sorted(anchors):
-                if a in absent or _path_token_match(command_scope, a):
+                if a in absent:
                     continue
                 if _symbol_in_text(output_scope, a):
                     continue

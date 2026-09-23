@@ -426,6 +426,8 @@ def test_gate_keeps_absence_claim_not_falsified(repo):
 def test_gate_keeps_absence_finding_on_read_file(repo):
     # "no maxItems": the missing symbol is absent from the evidence, but a co-cited real symbol
     # (minItems) that the reviewer read is present, so the finding survives on at least one anchor.
+    # schema.json is a real file, so it is excluded from the anchor set (a filename, not a symbol).
+    _add_code_file(repo, 'schema.json', 'impressions: { minItems: 1 }\n')
     ev = [('$ git show HEAD:schema.json', 'impressions: { minItems: 1 }')]
     f = _gate_finding('impressions has no maxItems cap', 'a.txt:1', ev,
                       support='schema.json declares only minItems, no maxItems')
@@ -680,6 +682,18 @@ def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
     _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n\nbar = 1\n')
     ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
     f = _gate_finding('compute_total routes through svc.foo.bar', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
+def test_gate_post_consolidation_drops_grepped_invented_symbol(repo):
+    # Post-consolidation, an invented symbol the reviewer only GREPPED for (a query, not an opened
+    # file) is still dropped: the fabricated-subject check has no command-text exemption (a
+    # `git grep <name>` argument is a search term, not a path), so a grep'd-but-absent invented
+    # name cannot ground itself in its own lookup.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git grep -F phantomHandler HEAD', '')]
+    f = _gate_finding('compute_total routes through phantomHandler', 'calc.py:2', ev)
     assert asyncio.run(review.evidence_gate(
         [f], repo, 'main', post_consolidation=True)) == []
 
