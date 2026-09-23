@@ -843,21 +843,27 @@ def _corroborated(findings, passes, threshold):
 _ANCHOR_TOKEN = re.compile(
     r'[A-Za-z_$][A-Za-z0-9_]*(?:\.[A-Za-z_$][A-Za-z0-9_]*)*')
 
-# Cached per cwd: the basenames of every file at HEAD, so the anchor set can tell a filename (a
-# token naming a real file in the repo) from a dotted code symbol by probing the repo instead of
-# guessing at extensions (which would miss names like archive.tar.gz or extensionless files).
+# Cached per (cwd, base_ref): the basenames of every file at HEAD OR the base, so the anchor set
+# can tell a filename (a token naming a real file in the repo) from a dotted code symbol by
+# probing the repo instead of guessing at extensions (which would miss names like archive.tar.gz
+# or extensionless files). The base is included too: a finding may be about a file the change
+# deleted (present at the base, absent at HEAD), and _file_info resolves that against the base.
 _file_basenames_cache = {}
 
 
-async def _repo_file_basenames(cwd):
-    # The basenames of every file at HEAD (one `git ls-tree` per cwd, cached). A token in this set
-    # is a file the reviewer could open, not a code symbol.
-    if cwd in _file_basenames_cache:
-        return _file_basenames_cache[cwd]
-    rc, out, _err = await _git('ls-tree', '-r', '--name-only', 'HEAD', cwd=cwd)
-    basenames = ({ln.rsplit('/', 1)[-1] for ln in out.splitlines() if ln}
-                 if rc == 0 else set())
-    _file_basenames_cache[cwd] = basenames
+async def _repo_file_basenames(cwd, base_ref):
+    # The basenames of every file at HEAD or the base (one `git ls-tree` per ref, cached per
+    # (cwd, base_ref)). A token in this set is a file the reviewer could open, not a code symbol.
+    key = (cwd, base_ref)
+    if key in _file_basenames_cache:
+        return _file_basenames_cache[key]
+    basenames = set()
+    for ref in ('HEAD', base_ref):
+        rc, out, _err = await _git('ls-tree', '-r', '--name-only', ref, cwd=cwd)
+        if rc == 0:
+            basenames.update(ln.rsplit('/', 1)[-1]
+                             for ln in out.splitlines() if ln)
+    _file_basenames_cache[key] = basenames
     return basenames
 
 
@@ -1018,16 +1024,32 @@ def _symbol_in_text(text, symbol):
 
 
 async def _symbol_present(symbol, cwd, cache):
-    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word literal on its
-    # last dotted component (no language-specific keyword, so any language works). Pinned to
-    # HEAD rather than the working tree, so uncommitted changes — which a local review
-    # excludes — cannot falsify a finding about the committed code. Cached per symbol.
-    leaf = symbol.rsplit('.', 1)[-1]
-    if leaf in cache:
-        return cache[leaf]
-    rc, _out, _err = await _git('grep', '-F', '-w', leaf, 'HEAD', cwd=cwd)
-    cache[leaf] = rc == 0
-    return cache[leaf]
+    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word fixed string (no
+    # language-specific keyword, so any language works). A dotted name is grepped in full, so an
+    # invented chain such as svc.foo.bar is "present" only if that exact chain is, never on the
+    # strength of its `bar` leaf alone. Pinned to HEAD rather than the working tree, so uncommitted
+    # changes — which a local review excludes — cannot falsify a finding about the committed code.
+    # Returns True (a match), False (a clean no-match), or None (the grep itself failed — an error
+    # is not proof of absence). Cached per symbol.
+    if symbol in cache:
+        return cache[symbol]
+    rc, _out, _err = await _git('grep', '-F', '-w', symbol, 'HEAD', cwd=cwd)
+    present = True if rc == 0 else (False if rc == 1 else None)
+    cache[symbol] = present
+    return present
+
+
+def _path_token_match(command_scope, file_path):
+    # Whether `file_path` (or its basename) appears in the command text as a whole path component,
+    # not as a substring of a longer name. The commands are split on whitespace and the ':' ref
+    # separator (so `git show HEAD:src/a.py` yields the path `src/a.py` as a token); a match is an
+    # exact token, or a token whose final path component is the basename. This is what stops a
+    # command that read `a.txt.backup` from grounding a finding that cites `a.txt`.
+    base = file_path.rsplit('/', 1)[-1]
+    for tok in re.split(r'[\s:]+', command_scope):
+        if tok == file_path or tok == base or tok.rsplit('/', 1)[-1] == base:
+            return True
+    return False
 
 
 async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation=False):
@@ -1047,11 +1069,11 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     #     true. The symbol is searched as a whole-word literal, with no language-specific keyword,
     #     so the check holds for any language.
     #   (fabricated subject) the "at least one" primary check passes a finding that co-cites a real
-    #     symbol next to an invented one. If it names an underscored identifier that appears in
-    #     neither the reviewer's git output nor the reviewed tree, that identifier is a
-    #     fabrication and the finding is dropped. Underscored symbols are the shape of an invented
-    #     subject (a real one is always in the tree); dotted tokens are excluded so filenames
-    #     ("schema.json") and camelCase builtins ("NameError") are never mistaken for subjects.
+    #     symbol next to an invented one. If it names an identifier that appears in neither the
+    #     reviewer's git output nor the reviewed tree, that identifier is a fabrication and the
+    #     finding is dropped. Dotted names are matched in full (an invented chain cannot ground on
+    #     its leaf); a name that is a file the reviewer opened — a whole path in a recorded command
+    #     — is a filename, not a subject, so it is exempt; asserted-absent symbols are exempt too.
     # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
     # reviewer read, even though the missing symbol itself is absent.
     # With post_consolidation=True the finding has already been grounded by the reviewer (the gate
@@ -1067,7 +1089,7 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     # property of the symbol, not the finding, so the same symbol is grepped once, not once per
     # finding that names it.
     symbol_cache = {}
-    file_basenames = await _repo_file_basenames(cwd)
+    file_basenames = await _repo_file_basenames(cwd, base_ref)
     kept = []
     for f in findings:
         location = f.get('location') or ''
@@ -1090,8 +1112,7 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             if not any(_symbol_in_text(output_scope, a) for a in anchors):
                 ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
         elif not post_consolidation and file_path:
-            base = file_path.rsplit('/', 1)[-1]
-            if file_path not in command_scope and base not in command_scope:
+            if not _path_token_match(command_scope, file_path):
                 ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
         elif not post_consolidation:
             # A finding that names no symbol and cites no file references nothing we can check
@@ -1117,18 +1138,22 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         if ok and anchors:
             # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
             # invented one; the "at least one" primary check above passes on the real one. If any
-            # underscored or camelCase identifier it names is in neither the code the reviewer read
-            # nor the reviewed tree, that identifier is a fabrication and the finding is dropped.
-            # Dotted names are skipped (their leaf is often a filename or extension, not a symbol);
-            # asserted-absent symbols are exempt because an absence finding legitimately names the
-            # missing symbol (see _asserted_absent_symbols).
+            # identifier it names is in neither the code the reviewer read nor the reviewed tree,
+            # that identifier is a fabrication and the finding is dropped. Dotted names are checked
+            # in full (an invented chain cannot ground on its leaf); a name that is a file the
+            # reviewer opened (a whole path in a recorded command) is a filename, not a subject,
+            # and is exempt; asserted-absent symbols are exempt because an absence finding
+            # legitimately names the missing symbol (see _asserted_absent_symbols).
             absent = _asserted_absent_symbols(f)
             for a in sorted(anchors):
-                if a in absent or '.' in a:
+                if a in absent or _path_token_match(command_scope, a):
                     continue
                 if _symbol_in_text(output_scope, a):
                     continue
-                if await _symbol_present(a, cwd, symbol_cache):
+                # A name is a fabrication only when it is definitively absent from the tree (a
+                # clean no-match grep) and absent from the evidence; a grep error (None) cannot
+                # prove absence, so it does not drop the finding.
+                if await _symbol_present(a, cwd, symbol_cache) is not False:
                     continue
                 ok, reason = (False,
                               f'names {a}, which appears in neither the reviewer\'s git '
@@ -1136,9 +1161,11 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
                 break
         if ok:
             # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
-            # present in the tree: the claim is falsified, so the finding is dropped.
+            # present in the tree: the claim is falsified, so the finding is dropped. Only a
+            # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
+            # does not drop the finding.
             for symbol in _asserted_absent_symbols(f):
-                if await _symbol_present(symbol, cwd, symbol_cache):
+                if await _symbol_present(symbol, cwd, symbol_cache) is True:
                     ok, reason = (False,
                                   f'asserts {symbol} is undefined or absent, but '
                                   f'it is present in the reviewed tree')

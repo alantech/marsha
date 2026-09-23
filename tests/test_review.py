@@ -640,6 +640,59 @@ def test_gate_drops_zero_based_line_citation(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_symbol_present_tri_state_on_grep_error(repo):
+    # A git grep error (rc >= 2) is not proof of absence: _symbol_present distinguishes a clean
+    # no-match (False) from a failed grep (None). A grep error must therefore neither fabricate a
+    # symbol (fabricated-subject drops only on a definitive no-match) nor fail to falsify an
+    # absence claim (contradiction drops only on a positive match).
+    assert asyncio.run(review._symbol_present('TWO', repo, {})) is True
+    assert asyncio.run(review._symbol_present('zzzabsent', repo, {})) is False
+    with patch.object(review, '_git', new=AsyncMock(return_value=(2, '', 'fatal: bad'))):
+        assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
+
+
+def test_gate_drops_cited_file_match_in_unrelated_command(repo):
+    # The cited-file check matches a whole path component, not a substring: a command that read
+    # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
+    # different file's name, not the file that command actually opened.
+    ev = [('$ git show HEAD:a.txt.backup', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
+    # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
+    # is the only symbol-level backstop. A consolidator can invent a dotted chain (svc.foo.bar); it
+    # must be checked in full, not skipped as dotted and not grounded on its `bar` leaf (a real,
+    # present symbol), so the finding is dropped when that exact chain is in neither the evidence
+    # nor the tree.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n\nbar = 1\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total routes through svc.foo.bar', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
+def test_gate_keeps_deleted_file_finding(repo):
+    # A finding about a file the change deleted (present at the base, absent at HEAD): its dotted
+    # filename must be recognized as a file (from the base tree, not just HEAD), so the gate falls
+    # to the file-opened branch and grounds it on the `git show <base>:<path>` the reviewer ran,
+    # instead of treating the filename as a code symbol and dropping it as "never retrieved".
+    _git(repo, 'checkout', '-q', 'main')
+    with open(f'{repo}/removed.txt', 'w') as fh:
+        fh.write('alpha\nbeta\n')
+    _git(repo, 'add', 'removed.txt')
+    _git(repo, 'commit', '-q', '-m', 'add removed.txt')
+    # Checking back out to feature drops removed.txt from the working tree (it is tracked on the
+    # base, not on HEAD), so it is the deleted-file case: present at base, absent at HEAD.
+    _git(repo, 'checkout', '-q', 'feature')
+    ev = [('$ git show main:removed.txt', 'alpha\nbeta')]
+    f = _gate_finding('removed.txt handling is wrong', 'removed.txt:1', ev,
+                      support='read the deleted file via git show main:removed.txt')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_review_pass_merges_evidence_across_rounds(repo):
     # A reviewer that verifies with git in round 1 and re-states the finding in round 2 (without
     # re-probing) must keep its round-1 evidence on the final finding, so the gate can verify it
