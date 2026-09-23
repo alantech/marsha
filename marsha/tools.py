@@ -835,8 +835,8 @@ async def git(args, ctx=None, page=None):
     if not workdir or not os.path.isdir(workdir):
         return 'error: git has no working directory (not run inside a repository).'
     # A whole-file read of a file larger than half the context window would buffer more than the
-    # model can usefully hold, so it is refused before the read: the reviewer should `git grep`
-    # the file for what it needs (or read a slice with `PAGE=<n>`) rather than dump it all.
+    # model can usefully hold, so it is refused before the read — whether whole or paged, since a
+    # paged read still buffers the whole file. The reviewer should `git grep` it for what it needs.
     blob = _whole_file_object(sub, rest)
     if blob is not None and ctx is not None and ctx.context_window:
         size = await _git_object_size(blob, workdir)
@@ -845,8 +845,8 @@ async def git(args, ctx=None, page=None):
             if size > limit:
                 return (
                     f'error: `git {sub} {blob}` reads a whole file of {size} bytes — more '
-                    f'than half the context window ({limit} chars). Do not dump it: search it '
-                    f'with `git grep <pattern> -- {blob}`, or read a slice with `PAGE=<n>`.')
+                    f'than half the context window ({limit} chars), whether whole or paged. Do '
+                    f'not read it: search it with `git grep <pattern> -- {blob}` instead.')
     env = dict(os.environ)
     env['GIT_TERMINAL_PROMPT'] = '0'  # never block on a credential prompt
     try:

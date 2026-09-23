@@ -710,6 +710,8 @@ def test_git_refuses_whole_file_read_over_half_context(tmp_path):
     ctx = tools.ToolContext('review', workdir=str(tmp_path), context_window=2000)
     out = asyncio.run(tools.git(['show', 'HEAD:big.txt'], ctx))
     assert out.startswith('error:') and 'context window' in out
+    # The guard blocks paged reads too (they still buffer the file), so it must not suggest one.
+    assert 'PAGE=' not in out
     # A file under the threshold reads normally.
     assert not asyncio.run(
         tools.git(['show', 'HEAD:small.txt'], ctx)).startswith('error:')

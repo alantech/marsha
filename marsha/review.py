@@ -82,9 +82,9 @@ async def _run(cmd, *args, cwd=None, timeout=60, input=None):
     return (proc.returncode, out, err)
 
 
-async def _git(*args, cwd=None, timeout=60, input=None):
+async def _git(*args, cwd=None, timeout=60, input=None, strip=True):
     rc, out, err = await _run('git', *args, cwd=cwd, timeout=timeout, input=input)
-    return (rc, out.strip(), err.strip())
+    return (rc, out.strip() if strip else out, err.strip())
 
 
 async def _gh(*args, cwd=None, timeout=120, input=None):
@@ -913,7 +913,9 @@ async def _file_info(path, cwd, base_ref, cache):
         if rc != 0:
             continue
         exists = True
-        rc, content, _err = await _git('show', f'{ref}:{path}', cwd=cwd)
+        # strip=False: count lines from the raw content so blank lines at the file's start or end
+        # are counted (a stripped read would undercount them and mis-drop a valid citation).
+        rc, content, _err = await _git('show', f'{ref}:{path}', cwd=cwd, strip=False)
         if rc == 0:
             line_count = len(content.splitlines())
         break

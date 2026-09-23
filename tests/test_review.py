@@ -525,6 +525,16 @@ def test_gate_backstop_drops_citation_into_empty_file(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_counts_blank_boundary_lines_in_file(repo):
+    # A file with blank lines at its start/end: _file_info counts them from the raw (unstripped)
+    # content, so a citation to a real line is in range rather than mis-dropped as out of range.
+    _add_code_file(repo, 'pad.txt', '\n\nvalue\n\n')  # 4 lines: blank, blank, value, blank
+    ev = [('$ git show HEAD:pad.txt', 'value')]
+    f = _gate_finding('the value line is wrong', 'pad.txt:3', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_gate_drops_finding_with_no_evidence(repo):
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
