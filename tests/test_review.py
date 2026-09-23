@@ -698,6 +698,17 @@ def test_gate_post_consolidation_drops_grepped_invented_symbol(repo):
         [f], repo, 'main', post_consolidation=True)) == []
 
 
+def test_gate_file_opened_check_ignores_grep_pathspec(repo):
+    # A location-only finding (no symbol) must be grounded on a file OPEN (git show), not on a git
+    # grep whose pathspec merely names the file: a clean no-match grep read no code from the cited
+    # file, so it does not establish that the reviewer opened it.
+    os.makedirs(f'{repo}/src', exist_ok=True)
+    _add_code_file(repo, 'src/config.py', 'a = 1\n')
+    ev = [('$ git grep -n needle -- src/config.py', '')]
+    f = _gate_finding('the value here is wrong', 'src/config.py:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_keeps_deleted_file_finding(repo):
     # A finding about a file the change deleted (present at the base, absent at HEAD): its dotted
     # filename must be recognized as a file (from the base tree, not just HEAD), so the gate falls

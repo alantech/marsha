@@ -801,6 +801,8 @@ def test_git_refuses_ext_diff_external_program(tmp_path):
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     out = asyncio.run(tools.git(['diff', '--ext-diff'], ctx))
     assert out.startswith('error:') and 'external program' in out
+    # --textconv likewise runs configured external filters, so it is refused too.
+    assert asyncio.run(tools.git(['diff', '--textconv'], ctx)).startswith('error:')
     assert not asyncio.run(
         tools.git(['diff', '--no-ext-diff'], ctx)).startswith('error:')
 

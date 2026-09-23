@@ -1055,20 +1055,15 @@ def _path_token_match(command_scope, file_path):
 
 
 def _opened_command_scope(evidence):
-    # The command text that establishes a file was OPENED, with a `git grep` PATTERN removed: the
-    # first non-flag argument of a grep is a search term, not a path, so grepping for a symbol must
-    # not make that symbol look like an opened file (which would let a grep'd-but-absent name pass a
-    # file-opened check). A `PAGE=n` prefix (a paged re-request) is tolerated.
+    # The command text that establishes a file was OPENED (git show, git cat-file, a pathspec).
+    # A `git grep` is a SEARCH, not a file open: even with a pathspec it returns only matching
+    # lines (or nothing at all on a clean no-match), so a location-only finding must be grounded on
+    # a `git show`, not on a grep that read no code from the cited file.
     lines = []
     for cmd, _out in evidence:
-        parts = cmd.split()
-        if 'grep' in parts:
-            i = parts.index('grep') + 1
-            while i < len(parts) and parts[i].startswith('-'):
-                i += 1
-            if i < len(parts):  # drop the pattern (the first non-flag argument)
-                parts = parts[:i] + parts[i + 1:]
-        lines.append(' '.join(parts))
+        if 'grep' in cmd.split():
+            continue  # a search, not a file open
+        lines.append(cmd)
     return '\n'.join(lines)
 
 
@@ -1124,9 +1119,10 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         # "read" only if it appears in code the reviewer actually retrieved.
         output_scope = '\n'.join(out for _cmd, out in evidence)
         # The file-opened check (for a finding that names no symbol) matches against the COMMAND
-        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output. The
-        # grep PATTERN is dropped from that scope (a search term is not a path), so grepping for a
-        # file's name is not treated as having opened it.
+        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output.
+        # `git grep` commands are excluded from that scope — a search is not a file open, and a
+        # no-match grep read no code from its pathspec — so a location-only finding must be
+        # grounded on a `git show`, not on a grep.
         command_scope = _opened_command_scope(evidence)
         ok, reason = True, ''
         if not evidence:

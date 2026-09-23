@@ -757,10 +757,11 @@ GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
 # (e.g. `git diff --no-index /etc/passwd /etc/shadow`); rejected so the reviewer cannot pull
 # local secrets or arbitrary files into the LLM context.
 GIT_EXTERNAL_FILE_FLAGS = {'--no-index'}
-# Flags that make an otherwise-read-only command run an EXTERNAL program (e.g. `git diff --ext-diff`
-# shells out to the configured $diff.external tool); rejected so a configured external helper cannot
-# be executed by the read-only tool. The `--no-ext-diff` negation is safe and is not blocked.
-GIT_EXTERNAL_EXEC_FLAGS = {'--ext-diff'}
+# Flags that make an otherwise-read-only command run an EXTERNAL program: `git diff --ext-diff`
+# shells out to the configured $diff.external tool, and `--textconv` runs the configured textconv
+# filters (both can execute arbitrary commands); rejected so a configured external helper cannot be
+# run by the read-only tool. The `--no-ext-diff` / `--no-textconv` negations are safe and not blocked.
+GIT_EXTERNAL_EXEC_FLAGS = {'--ext-diff', '--textconv'}
 GIT_TIMEOUT = 60
 
 
