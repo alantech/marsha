@@ -15,6 +15,7 @@ dependencies = [
     "autopep8",
     "flake8",
     "mccabe",
+    "mypy",
     "mistletoe",
     "openai>=1.0",
     "pycodestyle",
@@ -43,3 +44,49 @@ include = ["marsha*"]
 
 [tool.setuptools.package-data]
 marsha = ["personas/*.md", "personas/*.txt"]
+
+# Static type checking (issue #217). mypy runs as strict as is practical for this codebase:
+# the `strict` preset plus dead-code detection. `disallow_any_explicit` is intentionally left
+# off so the LLM-JSON / untyped-library boundaries can use a narrow, deliberate `Any`.
+[tool.mypy]
+python_version = "3.14"
+files = ["marsha", "tests"]
+strict = true
+warn_unreachable = true
+pretty = true
+# mistletoe's ast_renderer.get_ast is untyped; we wrap it in a typed boundary
+# (marsha.meta._get_ast) rather than fight disallow_untyped_calls at the call site.
+untyped_calls_exclude = ["mistletoe.ast_renderer"]
+
+# Third-party deps that ship no py.typed marker / stubs. Handled per-module (not a global
+# ignore_missing_imports) so a missing stub stays visible where it actually matters.
+[[tool.mypy.overrides]]
+module = ["quickjs.*", "pycodestyle.*", "pyflakes.*", "autopep8.*"]
+ignore_missing_imports = true
+
+# Not yet converted to strict (issue #217, P2/P3). Drop a module from this list as it reaches
+# zero errors so the gate keeps tightening. The leaf modules (utils, config, context, log,
+# term, meta, parse, model_match, stats, llm_client) are checked strictly.
+[[tool.mypy.overrides]]
+module = [
+    "marsha.base",
+    "marsha.llm",
+    "marsha.tools",
+    "marsha.review",
+    "marsha.helper",
+    "marsha.__main__",
+    "marsha.backends.*",
+    "marsha.mappers.*",
+    "marsha.personas.*",
+    # tests/ has no __init__.py, so mypy names these top-level modules (not tests.test_*).
+    "test_backend",
+    "test_cli",
+    "test_context",
+    "test_model_match",
+    "test_optimize",
+    "test_personas",
+    "test_review",
+    "test_tools",
+    "test_utils",
+]
+ignore_errors = true

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
 import os
 import platform
+from typing import TypedDict, cast
 
 APP_NAME = 'marsha'
 CONFIG_FILENAME = 'config.json'
@@ -12,13 +15,25 @@ ANTHROPIC_DEFAULT_MODEL = 'claude-sonnet-5'
 ANTHROPIC_DEFAULT_STRONG_MODEL = 'claude-opus-5'
 PROVIDERS = ('openai', 'anthropic')
 
-_cli_model = None
-_cli_strong_model = None
-_cli_provider = None
-_cli_api_base = None
+
+# The shape of the optional user config file (config.json). Every key is optional; values are
+# strings (a provider/model name, a base URL, or an API key).
+class ConfigFile(TypedDict, total=False):
+    provider: str
+    api_base: str
+    api_key: str
+    claude_api_key: str
+    model: str
+    model_strong: str
 
 
-def get_config_dir():
+_cli_model: str | None = None
+_cli_strong_model: str | None = None
+_cli_provider: str | None = None
+_cli_api_base: str | None = None
+
+
+def get_config_dir() -> str:
     system = platform.system()
     if system == 'Windows':
         base = os.environ.get('LOCALAPPDATA')
@@ -33,46 +48,47 @@ def get_config_dir():
     return os.path.join(base, APP_NAME)
 
 
-def get_config_path():
+def get_config_path() -> str:
     return os.path.join(get_config_dir(), CONFIG_FILENAME)
 
 
-def load_config_file():
-    config = {}
+def load_config_file() -> ConfigFile:
+    config: ConfigFile = {}
     path = get_config_path()
     if os.path.exists(path):
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
+                loaded = json.load(f)
         except (OSError, ValueError) as e:
             raise Exception(f'Failed to read config file at {path}: {e}')
-        if not isinstance(config, dict):
+        if not isinstance(loaded, dict):
             raise Exception(
                 f'Invalid config file at {path}: expected a JSON object')
+        config = cast(ConfigFile, loaded)
     return config
 
 
-def set_cli_model(model):
+def set_cli_model(model: str) -> None:
     global _cli_model
     _cli_model = model
 
 
-def set_cli_strong_model(model):
+def set_cli_strong_model(model: str) -> None:
     global _cli_strong_model
     _cli_strong_model = model
 
 
-def set_cli_provider(provider):
+def set_cli_provider(provider: str) -> None:
     global _cli_provider
     _cli_provider = provider
 
 
-def set_cli_api_base(base):
+def set_cli_api_base(base: str) -> None:
     global _cli_api_base
     _cli_api_base = base
 
 
-def resolve_provider():
+def resolve_provider() -> str:
     if _cli_provider:
         provider = _cli_provider
     else:
@@ -83,7 +99,7 @@ def resolve_provider():
     return provider
 
 
-def resolve_api_base(cli_value=None):
+def resolve_api_base(cli_value: str | None = None) -> str:
     if cli_value:
         return cli_value
     if _cli_api_base:
@@ -97,7 +113,7 @@ def resolve_api_base(cli_value=None):
     return DEFAULT_API_BASE
 
 
-def is_local_backend():
+def is_local_backend() -> bool:
     # True when the OpenAI provider is pointed at a non-default base (a local or
     # OpenAI-compatible server such as llama.cpp). Such servers serialize requests and are
     # slow, so callers use this to run reviewers one at a time and relax the client timeout.
@@ -105,7 +121,7 @@ def is_local_backend():
     return resolve_provider() == 'openai' and resolve_api_base() != DEFAULT_API_BASE
 
 
-def resolve_api_key(provider=None):
+def resolve_api_key(provider: str | None = None) -> str | None:
     provider = provider or resolve_provider()
     if provider == 'anthropic':
         env_value = os.getenv('CLAUDE_API_KEY') or os.getenv(
@@ -119,7 +135,7 @@ def resolve_api_key(provider=None):
     return load_config_file().get('api_key')
 
 
-def resolve_model():
+def resolve_model() -> str:
     if _cli_model:
         return _cli_model
     file_value = load_config_file().get('model')
@@ -130,7 +146,7 @@ def resolve_model():
     return DEFAULT_MODEL
 
 
-def resolve_strong_model():
+def resolve_strong_model() -> str:
     if _cli_strong_model:
         return _cli_strong_model
     file_value = load_config_file().get('model_strong')
@@ -141,13 +157,13 @@ def resolve_strong_model():
     return DEFAULT_STRONG_MODEL
 
 
-def model_is_pinned():
+def model_is_pinned() -> bool:
     # True when the standard model was explicitly chosen (--model or the config file) rather than
     # falling back to the default. Pinned models are never remapped by model auto-matching.
     return _cli_model is not None or bool(load_config_file().get('model'))
 
 
-def strong_model_is_pinned():
+def strong_model_is_pinned() -> bool:
     # As model_is_pinned, for the strong model (the model_strong config key).
     return _cli_strong_model is not None or bool(
         load_config_file().get('model_strong'))

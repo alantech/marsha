@@ -1,7 +1,11 @@
+from __future__ import annotations
+
+from openai.types.chat import ChatCompletion
+
 from marsha.utils import write_file
 
 # Price per 1024 tokens (input, output), matched by longest model name prefix
-PRICING_MODEL = {
+PRICING_MODEL: dict[str, tuple[float, float]] = {
     'gpt-6-luna': (0.00009765625, 0.00048828125),
     'gpt-6-sol': (0.001953125, 0.009765625),
     'gpt-5.6-terra': (0.001953125, 0.01171875),
@@ -16,22 +20,23 @@ PRICING_MODEL = {
 }
 
 
-def price_for(model):
-    best = None
+def price_for(model: str) -> tuple[float, float]:
+    best: str | None = None
     for prefix in PRICING_MODEL:
         if model.startswith(prefix) and (best is None or len(prefix) > len(best)):
             best = prefix
     return PRICING_MODEL[best] if best else (0.0, 0.0)
 
 
-def price_known(model):
+def price_known(model: str) -> bool:
     # True when the model matches a price-table entry (by prefix). For other models the price
     # is unknown, which consumers must treat as neutral (not as free).
     return any(model.startswith(prefix) for prefix in PRICING_MODEL)
 
 
 class ModelStats:
-    def __init__(self, name, input_tokens, output_tokens, input_cost, output_cost, total_cost):
+    def __init__(self, name: str, input_tokens: int, output_tokens: int,
+                 input_cost: float, output_cost: float, total_cost: float) -> None:
         self.name = name
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
@@ -41,28 +46,39 @@ class ModelStats:
 
 
 class StageStats:
-    def __init__(self, name, total_time, total_calls):
+    def __init__(self, name: str, total_time: float, total_calls: int) -> None:
         self.name = name
         self.total_time = total_time
         self.total_calls = total_calls
-        self.models = {}
+        self.models: dict[str, ModelStats] = {}
 
-    def update(self, res: list):
+    def update(self, res: list[ChatCompletion]) -> None:
         self.total_calls += len(res)
         for r in res:
+            usage = r.usage
+            if usage is None:
+                continue
             ms = self.models.get(r.model)
             if ms is None:
                 ms = self.models[r.model] = ModelStats(r.model, 0, 0, 0, 0, 0)
             in_price, out_price = price_for(r.model)
-            ms.input_tokens += r.usage.prompt_tokens
-            ms.input_cost += r.usage.prompt_tokens * in_price / 1024
-            ms.output_tokens += r.usage.completion_tokens
-            ms.output_cost += r.usage.completion_tokens * out_price / 1024
+            ms.input_tokens += usage.prompt_tokens
+            ms.input_cost += usage.prompt_tokens * in_price / 1024
+            ms.output_tokens += usage.completion_tokens
+            ms.output_cost += usage.completion_tokens * out_price / 1024
             ms.total_cost = ms.input_cost + ms.output_cost
 
 
 class MarshaStats:
-    def __init__(self):
+    total_time: float
+    total_calls: int
+    attempts: int
+    total_cost: float
+    first_stage: StageStats
+    second_stage: StageStats
+    third_stage: StageStats
+
+    def __init__(self) -> None:
         self.total_time = 0
         self.total_calls = 0
         self.attempts = 0
@@ -72,28 +88,28 @@ class MarshaStats:
         self.third_stage = StageStats('third_stage', 0, 0)
 
     @property
-    def stages(self):
+    def stages(self) -> list[StageStats]:
         return [self.first_stage, self.second_stage, self.third_stage]
 
-    def stage_update(self, stage: str, res: list):
+    def stage_update(self, stage: str, res: list[ChatCompletion]) -> None:
         stage_stats = getattr(self, stage, None)
         if isinstance(stage_stats, StageStats):
             stage_stats.update(res)
 
-    def aggregate(self, total_time, attempts):
+    def aggregate(self, total_time: float, attempts: int) -> None:
         self.total_time = total_time
         self.attempts = attempts
         self.total_calls = sum(stage.total_calls for stage in self.stages)
         self.total_cost = sum(
             ms.total_cost for stage in self.stages for ms in stage.models.values())
 
-    def to_file(self, filename: str = 'stats.md'):
+    def to_file(self, filename: str = 'stats.md') -> None:
         write_file(filename, content=self.__str__())
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()
 
-    def __str__(self):
+    def __str__(self) -> str:
         stage_titles = {
             'first_stage': 'First',
             'second_stage': 'Second',

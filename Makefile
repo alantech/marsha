@@ -35,6 +35,10 @@ format:
 test: ./venv
 	./venv/bin/python -m pytest tests/
 
+.PHONY: typecheck
+typecheck: ./venv
+	./venv/bin/mypy
+
 .PHONY: time
 time: ./venv .time.py
 	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs) --provider $(provider) --runs $(runs)

@@ -1,0 +1,24 @@
+name: Type-check project
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.client_payload.ref }}
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Type-check project
+        run: |
+          uv venv venv
+          uv pip install --python ./venv/bin/python .
+          ./venv/bin/mypy

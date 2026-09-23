@@ -1,12 +1,22 @@
+from __future__ import annotations
+
 import os
 import re
+from typing import Any, cast
 
-from mistletoe import Document, ast_renderer
+from mistletoe import ast_renderer
+from mistletoe.block_token import Document
 
 from marsha.utils import read_file, get_filename_from_path
 
 
-def to_markdown(node):
+def _get_ast(doc: Document) -> dict[str, Any]:
+    # mistletoe's ast_renderer.get_ast is untyped; wrap it in a typed boundary that returns the
+    # raw markdown-AST node dict (dynamic — the keys present depend on the node type).
+    return cast('dict[str, Any]', ast_renderer.get_ast(doc))
+
+
+def to_markdown(node: dict[str, Any]) -> str:
     # Technically I should iterate on the `children` lists every time because they could have more
     # than one, but since this is hardwired for each node type, I'm just going to use the actual
     # implementations to skip that when possible to reduce recursion depth and simplify the code
@@ -25,7 +35,8 @@ def to_markdown(node):
     if node['type'] == 'EscapeSequence':
         return f'''\\{node['children'][0]['content']}'''
     if node['type'] == 'Heading':
-        return ('#' * node['level']) + ' ' + ''.join([to_markdown(child) for child in node['children']])
+        level: int = node['level']
+        return ('#' * level) + ' ' + ''.join([to_markdown(child) for child in node['children']])
     if node['type'] == 'Image':
         if len(node['title']['children'][0]['content']) > 0:
             return f'''![{''.join([to_markdown(child) for child in node['children']])}]({node['src']['children'][0]['content']} "{node['title']['children'][0]['content']}")'''
@@ -52,7 +63,8 @@ def to_markdown(node):
     if node['type'] == 'Quote':
         return '\n'.join([f'''> {to_markdown(child)}''' for child in node['children']])
     if node['type'] == 'RawText':
-        return node['content']
+        content: str = node['content']
+        return content
     if node['type'] == 'SetextHeading':
         raise NotImplementedError()
     if node['type'] == 'Strikethrough':
@@ -70,12 +82,12 @@ def to_markdown(node):
     raise Exception(f'''Unknown AST node {node['type']} encountered!''')
 
 
-def validate_marsha_fn(fn: str, void: bool = False):
-    ast = ast_renderer.get_ast(Document(fn))
-    fn_heading = ast['children'][0]['children'][0]['content']
+def validate_marsha_fn(fn: str, void: bool = False) -> None:
+    ast = _get_ast(Document(fn))
+    fn_heading: str = ast['children'][0]['children'][0]['content']
     # Check function signature
     if not void:
-        return_type = fn_heading.split('):')[1].strip()
+        return_type: str = fn_heading.split('):')[1].strip()
         if not return_type or return_type is None or return_type == '':
             raise Exception(
                 f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
@@ -102,16 +114,15 @@ def validate_marsha_fn(fn: str, void: bool = False):
             f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
 
 
-def validate_marsha_type(type: str):
-    ast = ast_renderer.get_ast(Document(type))
+def validate_marsha_type(type: str) -> None:
+    ast = _get_ast(Document(type))
+    type_heading: str = ast['children'][0]['children'][0]['content']
 
     if len(ast['children']) == 1:
-        type_heading = ast['children'][0]['children'][0]['content']
         if len(type_heading.split(' ')) != 3:
             raise Exception(
                 f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
     else:
-        type_heading = ast['children'][0]['children'][0]['content']
         if ast['children'][1]['type'] != 'Paragraph':
             raise Exception(
                 f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
@@ -123,7 +134,7 @@ def validate_marsha_type(type: str):
 
 
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[str]]:
-    res = ([], [], [])
+    res: tuple[list[str], list[str], list[str]] = ([], [], [])
     sections = file.split('#')
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
     void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
@@ -147,7 +158,7 @@ def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[s
 
 
 async def process_types(raw_types: list[str], dirname: str) -> list[str]:
-    types_defined = []
+    types_defined: list[str] = []
     for raw_type in raw_types:
         type_name = extract_type_name(raw_type)
         # If type is defined from a file, read the file
@@ -156,7 +167,7 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
             filename = extract_type_filename(raw_type)
             full_path = f'{dirname}/{filename}'
             try:
-                type_data = read_file(full_path)
+                type_data = cast(str, read_file(full_path))
             except Exception:
                 err = f'Failed to read file: {full_path}'
                 # if args.debug:
@@ -170,45 +181,45 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
     return types_defined
 
 
-def extract_type_name(type):
-    ast = ast_renderer.get_ast(Document(type))
+def extract_type_name(type: str) -> str:
+    ast = _get_ast(Document(type))
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
-    header = ast['children'][0]['children'][0]['content']
+    header: str = ast['children'][0]['children'][0]['content']
     return header.split(' ')[1].strip()
 
 
-def is_defined_from_file(md):
-    ast = ast_renderer.get_ast(Document(md))
+def is_defined_from_file(md: str) -> bool:
+    ast = _get_ast(Document(md))
     if len(ast['children']) != 1:
         return False
     if ast['children'][0]['type'] != 'Heading':
         return False
-    header = ast['children'][0]['children'][0]['content']
+    header: str = ast['children'][0]['children'][0]['content']
     split_header = header.split(' ')
     if len(split_header) != 3:
         return False
     return True
 
 
-def extract_type_filename(md):
-    ast = ast_renderer.get_ast(Document(md))
-    header = ast['children'][0]['children'][0]['content']
+def extract_type_filename(md: str) -> str:
+    ast = _get_ast(Document(md))
+    header: str = ast['children'][0]['children'][0]['content']
     return header.split(' ')[2]
 
 
-def extract_func_name(type) -> str:
-    ast = ast_renderer.get_ast(Document(type))
+def extract_func_name(type: str) -> str:
+    ast = _get_ast(Document(type))
     if ast['children'][0]['type'] != 'Heading':
         raise Exception('Invalid Marsha function')
-    header = ast['children'][0]['children'][0]['content']
+    header: str = ast['children'][0]['children'][0]['content']
     return header.split('(')[0].split('func')[1].strip()
 
 
 def void_note(meta: MarshaMeta) -> str:
     # The note telling oracle-related prompts not to test the void functions (grammar-level,
     # target-language-agnostic). Empty when the assignment has no void functions.
-    void_function_names = list(
+    void_function_names: list[str] = list(
         map(lambda f: extract_func_name(f), meta.void_funcs))
     if len(void_function_names) == 0:
         return ''
@@ -216,13 +227,20 @@ def void_note(meta: MarshaMeta) -> str:
 
 
 class MarshaMeta():
-    def __init__(self, input_file):
+    input_file: str
+    filename: str
+    content: str
+    functions: list[str]
+    void_funcs: list[str]
+    types: list[str] | None
+
+    def __init__(self, input_file: str) -> None:
         self.input_file = input_file
 
-    async def populate(self):
+    async def populate(self) -> MarshaMeta:
         marsha_file_dirname = os.path.dirname(self.input_file)
         self.filename = get_filename_from_path(self.input_file)
-        self.content = read_file(self.input_file)
+        self.content = cast(str, read_file(self.input_file))
         self.functions, types, self.void_funcs = extract_functions_and_types(
             self.content)
         self.types = None

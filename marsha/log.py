@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import sys
 import time
 
 # Process start, so progress lines show elapsed time (matches `ps etime`) for spotting
 # where a long run has stalled.
-t0 = time.time()
+t0: float = time.time()
 
 # Trace verbosity for the stderr channel. 0 = off, 2 = summary (--trace), 3 = full
 # transcripts (--trace-full). Level 1 is reserved for the stdout `-d` debug, which is a
@@ -12,27 +14,27 @@ TRACE_OFF = 0
 TRACE_SUMMARY = 2
 TRACE_FULL = 3
 
-_level = TRACE_OFF
+_level: int = TRACE_OFF
 
 
-def set_level(level):
+def set_level(level: int) -> None:
     global _level
     _level = int(level) if level else TRACE_OFF
 
 
-def set_enabled(value):
+def set_enabled(value: bool) -> None:
     # Back-compat for earlier callers; maps on/off to the summary level.
     set_level(TRACE_SUMMARY if value else TRACE_OFF)
 
 
-def _timestamp():
+def _timestamp() -> str:
     elapsed = int(time.time() - t0)
     hours, rem = divmod(elapsed, 3600)
     minutes, seconds = divmod(rem, 60)
     return f'{hours:d}:{minutes:02d}:{seconds:02d}'
 
 
-def log(message):
+def log(message: str) -> None:
     # Write a timestamped progress line to stderr and flush immediately. stderr is unbuffered
     # and survives the block-buffering that hides stdout when it is piped to a file, so this is
     # the reliable channel for watching a run in real time. No-op unless a trace level is set.
@@ -41,7 +43,7 @@ def log(message):
     print(f'marsha[+{_timestamp()}] {message}', file=sys.stderr, flush=True)
 
 
-def dump(title, content):
+def dump(title: str, content: object) -> None:
     # Write the full transcript of one side of an LLM exchange (a request prompt or a response)
     # to stderr, bracketed by markers. Only enabled at the full trace level, since these are
     # large. A list (multiple completions) is joined with a blank line.

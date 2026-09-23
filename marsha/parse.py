@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 import os
 
-from mistletoe import Document, ast_renderer
+from mistletoe.block_token import Document
 
-from marsha.meta import MarshaMeta, to_markdown
+from marsha.meta import MarshaMeta, to_markdown, _get_ast
 from marsha.utils import write_file
 
 
-def split_preamble(doc, header):
+def split_preamble(doc: str, header: str) -> tuple[str, str]:
     # An editor response is a markdown preamble followed by the fenced artifact. Slice off the
     # preamble at the artifact's first header so the existing validators run on the artifact alone.
     marker = f'# {header}\n'
@@ -17,17 +19,17 @@ def split_preamble(doc, header):
     return doc[:idx].strip(), doc[idx:]
 
 
-def format_marsha_for_llm(meta: MarshaMeta):
+def format_marsha_for_llm(meta: MarshaMeta) -> str:
     break_line = '\n'
-    res = [f'# Requirements for file `{meta.filename}`']
+    res: list[str] = [f'# Requirements for file `{meta.filename}`']
     for func in meta.functions + meta.void_funcs:
-        ast = ast_renderer.get_ast(Document(func))
+        ast = _get_ast(Document(func))
         if ast['children'][0]['type'] != 'Heading':
             raise Exception('Invalid Marsha function')
         name = ''
-        args = []
+        args: list[str] = []
         ret = ''
-        desc_parts = []
+        desc_parts: list[str] = []
         reqs = ''
         list_started = False
         for (i, child) in enumerate(ast['children']):
@@ -35,7 +37,7 @@ def format_marsha_for_llm(meta: MarshaMeta):
                 # Special handling for the initial header (for now)
                 if child['type'] != 'Heading':
                     raise Exception('Invalid Marsha function')
-                header = child['children'][0]['content']
+                header: str = child['children'][0]['content']
                 name = header.split('(')[0].split('func')[1].strip()
                 args = [arg.strip()
                         for arg in header.split('(')[1].split(')')[0].split(',')]
@@ -87,11 +89,11 @@ def format_marsha_for_llm(meta: MarshaMeta):
     return break_line.join(res)
 
 
-def write_files_from_markdown(md: str, subdir=None) -> list[str]:
-    ast = ast_renderer.get_ast(Document(md))
-    filenames = []
+def write_files_from_markdown(md: str, subdir: str | None = None) -> list[str]:
+    ast = _get_ast(Document(md))
+    filenames: list[str] = []
     filename = ''
-    filedata = ''
+    filedata: str | None = ''
     for section in ast['children']:
         if section['type'] == 'Heading':
             filename = section['children'][0]['content']
