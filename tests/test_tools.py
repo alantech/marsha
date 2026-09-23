@@ -696,6 +696,27 @@ def test_git_single_oversized_line_is_truncated(tmp_path):
     assert len(body) <= tools.GIT_RESULT_CHAR_LIMIT
 
 
+def test_git_refuses_whole_file_read_over_half_context(tmp_path):
+    # A `git show <rev>:<path>` of a file larger than half the context window is refused before
+    # it is buffered, so a pathologically large file cannot exhaust the model's context.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'big.txt').write_text('x' * 5_000 + '\n')
+    (tmp_path / 'small.txt').write_text('y' * 100 + '\n')
+    subprocess.run(['git', 'add', 'big.txt', 'small.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    # A 2000-token window -> half is 1000 tokens -> 3000 chars, under the 5001-byte file.
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), context_window=2000)
+    out = asyncio.run(tools.git(['show', 'HEAD:big.txt'], ctx))
+    assert out.startswith('error:') and 'context window' in out
+    # A file under the threshold reads normally.
+    assert not asyncio.run(
+        tools.git(['show', 'HEAD:small.txt'], ctx)).startswith('error:')
+    # A commit show (no <rev>:<path> blob) is not a whole-file read -> not guarded.
+    assert not asyncio.run(tools.git(['show', 'HEAD'], ctx)).startswith('error:')
+
+
 def test_git_remote_mutating_subcommands_refused(tmp_path):
     # `git remote` is on the read-only allowlist, but its mutating subcommands rewrite
     # .git/config, so they are refused even though `remote` itself is permitted; the plain

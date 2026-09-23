@@ -46,7 +46,8 @@ import sys
 import urllib.parse
 import urllib.request
 
-from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.context import (
+    budget_tokens, CHARS_PER_TOKEN, estimate_tokens, fits, resolve_context_window)
 from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
@@ -138,6 +139,10 @@ class ToolContext:
     # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
     # conventions gate) so a stage is never blocked from answering.
     require_evidence: bool = False
+    # The model's context window (in tokens), resolved by the tool loop. Bounds the git tool's
+    # whole-file read guard (a file over half the window is refused rather than buffered). None
+    # when it cannot be resolved, in which case the guard is skipped.
+    context_window: int = None
 
 
 @dataclasses.dataclass
@@ -753,6 +758,49 @@ GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
 GIT_TIMEOUT = 60
 
 
+def _whole_file_object(sub, rest):
+    # The object a command dumps whole — `git show <rev>:<path>` or
+    # `git cat-file [-p] <rev>:<path>` — or None when it does not read a single blob (a commit,
+    # a tree listing, a size/existence/type probe, a diff, or a grep). Only a whole-blob read can
+    # grow without bound, so only those need the size guard.
+    if sub == 'show':
+        for a in rest:
+            if not a.startswith('-') and ':' in a:
+                return a
+        return None
+    if sub == 'cat-file':
+        mode, objs = None, []
+        for a in rest:
+            if a.startswith('-'):
+                mode = a
+            else:
+                objs.append(a)
+        if mode in ('-s', '--size', '-e', '--exists', '-t', '--type'):
+            return None
+        return objs[0] if len(objs) == 1 and ':' in objs[0] else None
+    return None
+
+
+async def _git_object_size(obj, workdir):
+    # The byte size of a git object via `git cat-file -s`, without reading its content, so a
+    # whole-file read can be refused before it is buffered. None when it cannot be resolved.
+    env = dict(os.environ)
+    env['GIT_TERMINAL_PROMPT'] = '0'
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'cat-file', '-s', obj, cwd=workdir, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, _err = await run_subprocess(proc, GIT_TIMEOUT)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(out.strip())
+    except (AttributeError, ValueError):
+        return None
+
+
 async def git(args, ctx=None, page=None):
     """`git <subcommand> [args...]` — run a read-only git command in the
     repository's working directory and return its output. Only read-only
@@ -787,6 +835,19 @@ async def git(args, ctx=None, page=None):
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: git has no working directory (not run inside a repository).'
+    # A whole-file read of a file larger than half the context window would buffer more than the
+    # model can usefully hold, so it is refused before the read: the reviewer should `git grep`
+    # the file for what it needs (or read a slice with `PAGE=<n>`) rather than dump it all.
+    blob = _whole_file_object(sub, rest)
+    if blob is not None and ctx is not None and ctx.context_window:
+        size = await _git_object_size(blob, workdir)
+        if size is not None:
+            limit = budget_tokens(ctx.context_window, 0.5) * CHARS_PER_TOKEN
+            if size > limit:
+                return (
+                    f'error: `git {sub} {blob}` reads a whole file of {size} bytes — more '
+                    f'than half the context window ({limit} chars). Do not dump it: search it '
+                    f'with `git grep <pattern> -- {blob}`, or read a slice with `PAGE=<n>`.')
     env = dict(os.environ)
     env['GIT_TERMINAL_PROMPT'] = '0'  # never block on a credential prompt
     try:
@@ -1054,6 +1115,14 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
         raise Exception(
             'run_with_tools requires a single-result mapper (n_results=1)')
     ctx = ctx or ToolContext()
+    if ctx.context_window is None:
+        # Resolve the model's context window once (cached) so the git whole-file guard can refuse
+        # a read that would outgrow the model; on any failure the guard is simply skipped.
+        try:
+            ctx.context_window = await resolve_context_window(
+                model=mapper.model, client=get_client())
+        except Exception:
+            ctx.context_window = None
     commands = build_commands(ctx)
     messages = [{'role': 'user', 'content': request}]
     last_text = ''

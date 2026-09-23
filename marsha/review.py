@@ -918,7 +918,8 @@ _EXISTENCE_ABSENCE_RE = re.compile(
     r'|class|type|identifier|member|element|entry|key|constant)'
     r'|non[-\s]?existent|has\s+no\s+definition|no\s+definition'
     r'|not\s+defined\b|not\s+declared\b'
-    r'|returns?\s+no\s+matches|cannot\s+(?:be\s+)?found)',
+    r'|returns?\s+no\s+matches|cannot\s+(?:be\s+)?found'
+    r'|has\s+no\b|without\b|lacks?\b)',
     re.I)
 
 
@@ -1036,15 +1037,14 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         if ok and anchors:
             # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
             # invented one; the "at least one" primary check above passes on the real one. If any
-            # underscored identifier it names is in neither the code the reviewer read nor the
-            # reviewed tree, that identifier is a fabrication and the finding is dropped. Only
-            # underscored names are checked: camelCase/dotted names are common in real code (and a
-            # dotted leaf is often a filename or extension), so treating an absent one as a
-            # fabrication would drop legitimate findings. Absence findings legitimately name a
-            # missing symbol, so asserted-absent symbols are exempt.
+            # underscored or camelCase identifier it names is in neither the code the reviewer read
+            # nor the reviewed tree, that identifier is a fabrication and the finding is dropped.
+            # Dotted names are skipped (their leaf is often a filename or extension, not a symbol);
+            # asserted-absent symbols are exempt because an absence finding legitimately names the
+            # missing symbol (see _asserted_absent_symbols).
             absent = _asserted_absent_symbols(f)
             for a in sorted(anchors):
-                if a in absent or '_' not in a:
+                if a in absent or '.' in a:
                     continue
                 if a in output_scope:
                     continue

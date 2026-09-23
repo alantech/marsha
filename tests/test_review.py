@@ -435,6 +435,28 @@ def test_gate_drops_finding_with_invented_subject_co_cited(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_drops_finding_with_invented_camelcase_co_cited(repo):
+    # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented
+    # camelCase one (phantomHandler) in neither the evidence nor the tree; the tripwire trips on
+    # camelCase identifiers too, not only underscored ones (wistful is Python + TypeScript).
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total calls phantomHandler which never resolves',
+                      'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_post_consolidation_drops_invented_camelcase(repo):
+    # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
+    # is the only symbol-level backstop; it must catch a camelCase symbol a consolidator rewords in
+    # (phantomHandler) that is in neither the evidence nor the tree.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total routes through phantomHandler', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
 def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
     # Two real snake_case symbols: compute_total is in the reviewer's evidence, helper_fn is in the
     # tree but not in this finding's evidence. The tripwire grounds helper_fn on the tree (a real
