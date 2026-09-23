@@ -483,6 +483,15 @@ def test_gate_backstop_drops_line_beyond_file(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_backstop_drops_citation_into_empty_file(repo):
+    # An existing but empty file has 0 lines, so a citation to any line is out of range ->
+    # dropped. (Before the fix an empty file read as "unknown length" and the check was skipped.)
+    _add_code_file(repo, 'empty.txt', '')
+    ev = [('$ git show HEAD:empty.txt', '')]
+    f = _gate_finding('the value here is wrong', 'empty.txt:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_drops_finding_with_no_evidence(repo):
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.

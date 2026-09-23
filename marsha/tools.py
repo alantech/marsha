@@ -745,7 +745,8 @@ GIT_READONLY_COMMANDS = {
 # .git/config or update remote-tracking refs — so they are refused even though
 # `remote` itself is on the allowlist.
 GIT_REMOTE_MUTATING = {
-    'add', 'remove', 'rename', 'set-url', 'set-head', 'update', 'prune'}
+    'add', 'remove', 'rename', 'set-url', 'set-head', 'set-branches',
+    'update', 'prune'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}

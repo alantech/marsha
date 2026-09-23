@@ -882,9 +882,10 @@ def _location_file(location):
 
 
 async def _file_info(path, cwd, base_ref, cache):
-    # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there.
-    # Cached per path so several findings citing the same file cost one probe each. A deleted
-    # file (present at base, absent at HEAD) still resolves against the base.
+    # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
+    # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
+    # path so several findings citing the same file cost one probe each. A deleted file (present
+    # at base, absent at HEAD) still resolves against the base.
     if path in cache:
         return cache[path]
     exists = False
@@ -895,7 +896,7 @@ async def _file_info(path, cwd, base_ref, cache):
             continue
         exists = True
         rc, content, _err = await _git('show', f'{ref}:{path}', cwd=cwd)
-        if rc == 0 and content:
+        if rc == 0:
             line_count = len(content.splitlines())
         break
     cache[path] = (exists, line_count)
@@ -1036,8 +1037,11 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
             # invented one; the "at least one" primary check above passes on the real one. If any
             # underscored identifier it names is in neither the code the reviewer read nor the
-            # reviewed tree, that identifier is a fabrication and the finding is dropped. Absence
-            # findings legitimately name a missing symbol, so asserted-absent symbols are exempt.
+            # reviewed tree, that identifier is a fabrication and the finding is dropped. Only
+            # underscored names are checked: camelCase/dotted names are common in real code (and a
+            # dotted leaf is often a filename or extension), so treating an absent one as a
+            # fabrication would drop legitimate findings. Absence findings legitimately name a
+            # missing symbol, so asserted-absent symbols are exempt.
             absent = _asserted_absent_symbols(f)
             for a in sorted(anchors):
                 if a in absent or '_' not in a:
