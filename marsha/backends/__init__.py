@@ -14,12 +14,12 @@ __all__ = ['LanguageBackend', 'PythonBackend', 'DEFAULT_TARGET', 'available',
 
 DEFAULT_TARGET = 'python'
 
-_registry = {}
-_aliases = {}
-_current = None
+_registry: dict[str, LanguageBackend] = {}
+_aliases: dict[str, str] = {}
+_current: LanguageBackend | None = None
 
 
-def register(backend):
+def register(backend: LanguageBackend) -> None:
     if backend.id in _registry:
         raise Exception(f'Duplicate language backend id: {backend.id}')
     _registry[backend.id] = backend
@@ -29,11 +29,11 @@ def register(backend):
         _aliases[alias] = backend.id
 
 
-def available():
+def available() -> list[str]:
     return sorted(_registry)
 
 
-def resolve_target(name):
+def resolve_target(name: str | None) -> LanguageBackend:
     # Resolve a target by id or alias (case-insensitive); raise listing what is available.
     key = (name or '').strip().lower()
     if key in _registry:
@@ -44,7 +44,7 @@ def resolve_target(name):
         f'Unknown target language: {name} (available: {", ".join(available())})')
 
 
-def select(name):
+def select(name: str | None) -> LanguageBackend:
     # Bind the target backend for this run (called once from the CLI). Returns the backend.
     global _current
     backend = resolve_target(name)
@@ -52,7 +52,7 @@ def select(name):
     return backend
 
 
-def current():
+def current() -> LanguageBackend:
     # The backend bound for this run; defaults to the default target before any select().
     global _current
     if _current is None:

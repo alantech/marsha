@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import time
+from typing import Any, cast
 
 import openai
+from openai.types.chat import ChatCompletion
 
 from marsha.config import is_local_backend, resolve_model, resolve_strong_model
 from marsha.log import log
@@ -10,10 +14,10 @@ from marsha.stats import stats
 from marsha.utils import prettify_time_delta
 
 # Get time at startup to make human legible "start times" in the logs
-t0 = time.time()
+t0: float = time.time()
 
 
-def uses_completion_tokens(model):
+def uses_completion_tokens(model: str) -> bool:
     # Reasoning models reject max_tokens and require max_completion_tokens. GPT-5, GPT-5.6 and
     # GPT-6 are all reasoning models (gpt-5.6-*/gpt-6-* do not match the 'gpt-5' prefix, so the
     # gpt-6 family is listed explicitly).
@@ -21,8 +25,12 @@ def uses_completion_tokens(model):
             or model.startswith('o'))
 
 
-async def retry_chat_completion(query, model=None, max_tries=3, n_results=1, label=None):
-    client = get_client()
+async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
+                                max_tries: int = 3, n_results: int = 1,
+                                label: str | None = None) -> ChatCompletion:
+    # get_client returns a provider-union; this mapper is only constructed for the OpenAI
+    # provider (see mappers.get_mapper), so the concrete client is always an AsyncOpenAI here.
+    client = cast(openai.AsyncOpenAI, get_client())
     if model is None:
         model = resolve_model()
     label = label or 'llm'
@@ -34,7 +42,7 @@ async def retry_chat_completion(query, model=None, max_tries=3, n_results=1, lab
     log(f'-> {label}: request sent (model={model}, n={n_results})')
     while True:
         try:
-            out = await client.chat.completions.create(**query)
+            out = cast(ChatCompletion, await client.chat.completions.create(**query))
             t2 = time.time()
             total_tokens = out.usage.total_tokens if out.usage is not None else 9001
             print(
@@ -67,7 +75,19 @@ async def retry_chat_completion(query, model=None, max_tries=3, n_results=1, lab
 class ChatGPTMapper(BaseMapper):
     """ChatGPT-based mapper class"""
 
-    def __init__(self, system, model=None, max_tokens=None, reasoning_effort=None, seed=None, max_retries=3, n_results=1, stats_stage=None, label=None):
+    system: str
+    model: str | None
+    max_tokens: int | None
+    reasoning_effort: str | None
+    seed: int | None
+    max_retries: int
+    n_results: int
+    stats_stage: str | None
+
+    def __init__(self, system: str, model: str | None = None, max_tokens: int | None = None,
+                 reasoning_effort: str | None = None, seed: int | None = None, max_retries: int = 3,
+                 n_results: int = 1, stats_stage: str | None = None,
+                 label: str | None = None) -> None:
         BaseMapper.__init__(self)
         self.system = system
         self.model = model
@@ -79,12 +99,12 @@ class ChatGPTMapper(BaseMapper):
         self.stats_stage = stats_stage
         self.label = label
 
-    async def transform(self, user_request):
+    async def transform(self, user_request: Any) -> Any:
         # A bare string is a single user message; a list of {'role', 'content'}
         # dicts is a whole prior conversation (the tool-use follow-up calls).
         if isinstance(user_request, str):
             user_request = [{'role': 'user', 'content': user_request}]
-        query_obj = {
+        query_obj: dict[str, Any] = {
             'messages': [{
                 'role': 'system',
                 'content': self.system,

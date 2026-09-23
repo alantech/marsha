@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openai.types.chat import ChatCompletion
+from typing import Any
 
 from marsha.utils import write_file
 
@@ -52,7 +52,7 @@ class StageStats:
         self.total_calls = total_calls
         self.models: dict[str, ModelStats] = {}
 
-    def update(self, res: list[ChatCompletion]) -> None:
+    def update(self, res: list[Any]) -> None:
         self.total_calls += len(res)
         for r in res:
             usage = r.usage
@@ -91,7 +91,7 @@ class MarshaStats:
     def stages(self) -> list[StageStats]:
         return [self.first_stage, self.second_stage, self.third_stage]
 
-    def stage_update(self, stage: str, res: list[ChatCompletion]) -> None:
+    def stage_update(self, stage: str, res: list[Any]) -> None:
         stage_stats = getattr(self, stage, None)
         if isinstance(stage_stats, StageStats):
             stage_stats.update(res)

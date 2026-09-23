@@ -31,6 +31,8 @@ tools are read-only network with an SSRF guard, and their output is always
 presented to the model as explicitly-untrusted reference data.
 """
 
+from __future__ import annotations
+
 import asyncio
 import dataclasses
 import html
@@ -45,6 +47,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from typing import Any, Callable, Coroutine, Protocol
 
 from marsha.context import (
     budget_tokens, CHARS_PER_TOKEN, estimate_tokens, fits, resolve_context_window)
@@ -113,6 +116,31 @@ PHASE_CATEGORIES = {
     'review': {CATEGORY_GIT, CATEGORY_NOTES},
 }
 
+# A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
+# keyword) and returns the output text. Declared as an open callable so the per-tool lambdas
+# (which bind the ToolContext as a default) all fit one type.
+ToolHandler = Callable[..., Coroutine[Any, Any, str]]
+
+
+# The target backend is duck-typed here (not imported) to avoid a tools<->backends cycle:
+# tools.py supplies the agnostic base commands that each backend layers its own on top of.
+class _ToolBackend(Protocol):
+    def tool_commands(self, ctx: ToolContext) -> dict[str, ToolCommand]:
+        ...
+
+    def installed_env_usable(self, ctx: ToolContext) -> bool:
+        ...
+
+
+# The mapper duck-type the tool loop drives: it needs the system/model/n_results attributes
+# (for context resolution and compaction) plus the async run() entry point.
+class _MapperLike(Protocol):
+    system: str
+    model: str | None
+    n_results: int
+
+    async def run(self, i: Any) -> Any: ...
+
 
 @dataclasses.dataclass
 class ToolContext:
@@ -123,17 +151,17 @@ class ToolContext:
     availability; None in a bare test means only the agnostic tools are
     available)."""
     phase: str = 'gen'
-    workdir: str = None
-    backend: object = None
+    workdir: str | None = None
+    backend: _ToolBackend | None = None
     # Per-reviewer scratchpad (the `notes` tool). A fresh list per reviewer; on a
     # context compaction the notes are re-attached so they survive. Empty elsewhere.
-    notes: list = dataclasses.field(default_factory=list)
+    notes: list[str] = dataclasses.field(default_factory=list)
     # Per-reviewer evidence ledger: the (command line, raw output) of every git command the
     # reviewer actually ran, captured as the tool loop executes. Unlike the message history it is
     # NOT summarized away by context compaction, so it is the faithful record of what the reviewer
     # really retrieved — the basis for the review's anti-hallucination evidence gate. A fresh list
     # per reviewer so their ledgers do not leak across reviewers.
-    evidence: list = dataclasses.field(default_factory=list)
+    evidence: list[tuple[str, str]] = dataclasses.field(default_factory=list)
     # When True (the review panel), the loop will not accept a findings response until the
     # reviewer has actually run a git command — the changed-file summary (names + line counts) is
     # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
@@ -142,7 +170,7 @@ class ToolContext:
     # The model's context window (in tokens), resolved by the tool loop. Bounds the git tool's
     # whole-file read guard (a file over half the window is refused rather than buffered). None
     # when it cannot be resolved, in which case the guard is skipped.
-    context_window: int = None
+    context_window: int | None = None
 
 
 @dataclasses.dataclass
@@ -156,7 +184,7 @@ class ToolCommand:
     category: str
     usage: str
     description: str
-    handler: 'callable'
+    handler: ToolHandler
     # True for a command whose handler accepts a `page=` keyword (long output is returned
     # page by page instead of truncated). Only the git tool uses this today.
     accepts_page: bool = False
@@ -167,17 +195,17 @@ class PendingCommand:
     """A `$` command detected on the final line of an LLM response."""
     line: str
     name: str
-    args: list
+    args: list[str]
     malformed: bool = False
     # A `PAGE=<n>` prefix on the command line, when present: the page of the output to
     # return for a command that paginates long results (currently git). None otherwise.
-    page: int = None
+    page: int | None = None
 
 
 # --- small shared helpers -------------------------------------------------------
 
 
-def truncate(text, limit=RESULT_CHAR_LIMIT):
+def truncate(text: str | None, limit: int = RESULT_CHAR_LIMIT) -> str:
     # Bound a tool result so one result cannot blow the context budget.
     if text is None:
         return ''
@@ -186,7 +214,7 @@ def truncate(text, limit=RESULT_CHAR_LIMIT):
     return text[:limit] + '\n…[truncated]'
 
 
-def _git_page_result(result, sub, rest, page=None):
+def _git_page_result(result: str, sub: str, rest: list[str], page: int | None = None) -> str:
     # Bound a git result by explicit pagination instead of a silent truncation, so a reviewer
     # can never act on a partial view it mistakes for the whole file (the root of the "this
     # function is truncated, so the call must be missing / the file is corrupted" findings).
@@ -201,9 +229,9 @@ def _git_page_result(result, sub, rest, page=None):
     text = result[:-1] if result.endswith('\n') else result
     lines = text.split('\n')
     # (first_line, last_line, page_text), 1-based line numbers
-    pages = []
+    pages: list[tuple[int, int, str]] = []
     page_start = 0
-    cur = []
+    cur: list[str] = []
     cur_len = 0
     _line_trunc = '…[line truncated]'
     for i, ln in enumerate(lines):
@@ -244,13 +272,13 @@ def _git_page_result(result, sub, rest, page=None):
     return marker + '\n' + body
 
 
-def wrap_untrusted(name, content):
+def wrap_untrusted(name: str, content: str) -> str:
     # Present a tool result as explicitly-untrusted reference data, identical
     # across OpenAI / Claude / local backends (not a native `tool` role).
     return f'[tool:{name}]\n{content}\n[/tool:{name}]'
 
 
-def is_blocked_host(hostname):
+def is_blocked_host(hostname: str | None) -> bool:
     # SSRF guard: reject localhost and private/loopback/link-local/reserved
     # addresses so a tool cannot be pointed at the host's own network.
     if not hostname:
@@ -277,7 +305,7 @@ def is_blocked_host(hostname):
     return False
 
 
-def assert_public_url(url):
+def assert_public_url(url: str) -> None:
     # Raise unless `url` is an http(s) URL to a public host (SSRF guard).
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ('http', 'https'):
@@ -291,11 +319,11 @@ def assert_public_url(url):
 # --- web fetching / parsing (shared by the web tools and the registry tools) ----
 
 
-async def http_get(url, timeout=HTTP_TIMEOUT):
+async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """GET a URL off the event loop and return (status, content_type, body).
     The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
     memory before the text limits are applied."""
-    def get():
+    def get() -> tuple[int, str, bytes]:
         req = urllib.request.Request(
             url, headers={
                 'User-Agent': USER_AGENT,
@@ -307,10 +335,11 @@ async def http_get(url, timeout=HTTP_TIMEOUT):
     return await asyncio.to_thread(get)
 
 
-async def http_post(url, body, headers=None, timeout=HTTP_TIMEOUT):
+async def http_post(url: str, body: bytes, headers: dict[str, str] | None = None,
+                    timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """POST a bytes body off the event loop and return (status, content_type,
     body). Mirrors http_get (browser UA, capped read) for the MCP endpoints."""
-    def post():
+    def post() -> tuple[int, str, bytes]:
         req = urllib.request.Request(
             url, data=body, method='POST', headers={
                 'User-Agent': USER_AGENT,
@@ -322,7 +351,8 @@ async def http_post(url, body, headers=None, timeout=HTTP_TIMEOUT):
     return await asyncio.to_thread(post)
 
 
-async def _mcp_tools_call(url, tool, arguments, timeout=HTTP_TIMEOUT):
+async def _mcp_tools_call(url: str, tool: str, arguments: dict[str, Any],
+                          timeout: int = HTTP_TIMEOUT) -> Any:
     """One-shot MCP `tools/call` against a keyless endpoint: a single JSON-RPC
     POST with no initialize/session/streaming client. Returns the response's
     `result` object. Handles both the plain-JSON (Parallel) and the
@@ -356,10 +386,10 @@ async def _mcp_tools_call(url, tool, arguments, timeout=HTTP_TIMEOUT):
     raise Exception(f'{tool}: unexpected MCP response (HTTP {status})')
 
 
-def _strip_tags(fragment):
+def _strip_tags(fragment: str) -> str:
     # Drop tags; insert a space only where two word characters would otherwise
     # run together, so `</a>.` stays `.` and `<b>CSV</b> file` keeps one space.
-    def repl(m):
+    def repl(m: re.Match[str]) -> str:
         before = fragment[:m.start()]
         after = fragment[m.end():]
         if before and after and before[-1].isalnum() and after[0].isalnum():
@@ -368,7 +398,7 @@ def _strip_tags(fragment):
     return re.sub(r'(?s)<[^>]+>', repl, fragment)
 
 
-def html_to_text(doc):
+def html_to_text(doc: str) -> str:
     """Reduce an HTML document to readable plain text: scripts, styles, and
     other non-content blocks are dropped, block boundaries become newlines,
     and entities are decoded."""
@@ -395,7 +425,7 @@ def html_to_text(doc):
     return '\n'.join(lines)
 
 
-def _decode_ddg_href(href):
+def _decode_ddg_href(href: str) -> str:
     """Resolve a result link from DuckDuckGo's HTML endpoint: protocol-relative
     links are absolutized and the `/l/?uddg=<url>` redirect wrapper is
     unwrapped to the real destination."""
@@ -410,7 +440,7 @@ def _decode_ddg_href(href):
     return href
 
 
-def parse_ddg_html(doc):
+def parse_ddg_html(doc: str) -> list[tuple[str, str, str]]:
     """Parse the results of DuckDuckGo's HTML search endpoint into
     (title, url, snippet) triples. Returns [] on any markup mismatch so the
     caller can fall back to the instant-answer API."""
@@ -431,7 +461,7 @@ def parse_ddg_html(doc):
     return results
 
 
-async def ddg_instant(query):
+async def ddg_instant(query: str) -> list[tuple[str, str, str]]:
     """Fallback search via the DuckDuckGo instant-answer JSON API. Coverage is
     narrower than the HTML endpoint (entity-centric) but the endpoint is
     stable; returns (title, url, snippet) triples."""
@@ -448,7 +478,7 @@ async def ddg_instant(query):
     if abstract and abstract_url:
         results.append((data.get('Heading') or query, abstract_url, abstract))
 
-    def walk(topics):
+    def walk(topics: list[Any]) -> None:
         for topic in topics:
             if isinstance(topic, dict):
                 # A group entry nests its members under a 'Topics' key.
@@ -471,7 +501,7 @@ async def ddg_instant(query):
 # --- language-agnostic tools: general web --------------------------------------
 
 
-async def _search_parallel(query):
+async def _search_parallel(query: str) -> list[tuple[str, str, str]]:
     """Primary web search: Parallel's keyless MCP endpoint, which returns
     structured JSON (url/title/excerpts per result)."""
     result = await _mcp_tools_call(
@@ -490,7 +520,7 @@ async def _search_parallel(query):
     return out
 
 
-def _parse_exa_results(text):
+def _parse_exa_results(text: str) -> list[tuple[str, str, str]]:
     """Parse Exa's line-oriented result blob (`Title:`/`URL:`/`Highlights:`
     blocks separated by `---`) into (title, url, snippet) triples."""
     out = []
@@ -520,7 +550,7 @@ def _parse_exa_results(text):
     return out
 
 
-async def _search_exa(query):
+async def _search_exa(query: str) -> list[tuple[str, str, str]]:
     """Secondary web search: Exa's keyless MCP endpoint (a different index, so
     it both fails over Parallel and widens recall)."""
     result = await _mcp_tools_call(
@@ -532,7 +562,7 @@ async def _search_exa(query):
     return _parse_exa_results(text)
 
 
-async def web_search(args, ctx=None):
+async def web_search(args: list[str], ctx: ToolContext | None = None) -> str:
     """`web-search "search terms"` — search the web (keyless one-shot MCP:
     Parallel, then Exa, then DuckDuckGo instant-answers) and return the top
     results as numbered title/URL/snippet lines."""
@@ -559,7 +589,7 @@ async def web_search(args, ctx=None):
     return truncate('\n'.join(lines))
 
 
-async def view_web_page(args, ctx=None):
+async def view_web_page(args: list[str], ctx: ToolContext | None = None) -> str:
     """`view-web-page "https://url"` — fetch a web page and return its text
     content (HTML reduced to plain text), truncated to PAGE_CHAR_LIMIT."""
     if len(args) != 1:
@@ -644,14 +674,14 @@ if result is not None:
 '''
 
 
-def _calc_bootstrap():
+def _calc_bootstrap() -> str:
     return CALC_BOOTSTRAP_TEMPLATE.replace('__MEMORY_LIMIT__', str(CALC_MEMORY_LIMIT))
 
 
-def _read_workdir_files(workdir):
+def _read_workdir_files(workdir: str | None) -> dict[str, str]:
     # The current directory's files (name -> content) for calc's `files` object:
     # everything directly in the dir except the venv and dotfiles, each capped.
-    files = {}
+    files: dict[str, str] = {}
     if not workdir or not os.path.isdir(workdir):
         return files
     for entry in sorted(os.listdir(workdir)):
@@ -668,7 +698,7 @@ def _read_workdir_files(workdir):
     return files
 
 
-def _scrubbed_env():
+def _scrubbed_env() -> dict[str, str]:
     # Strip LLM credentials so a calc script cannot exfil inherited API keys.
     env = dict(os.environ)
     for k in list(env):
@@ -678,7 +708,7 @@ def _scrubbed_env():
     return env
 
 
-async def _spawn_calc(payload: bytes, env, timeout):
+async def _spawn_calc(payload: bytes, env: dict[str, str], timeout: int) -> tuple[str, str]:
     # The actual QuickJS subprocess: the bootstrap reads the JSON payload from stdin
     # (script + files) and writes the captured print() output to stdout. A hard timeout
     # (via run_subprocess) kills a runaway script.
@@ -688,7 +718,7 @@ async def _spawn_calc(payload: bytes, env, timeout):
     return await run_subprocess(proc, timeout, input=payload)
 
 
-async def calc(args, ctx=None):
+async def calc(args: list[str], ctx: ToolContext | None = None) -> str:
     """`calc "js-expression-or-script"` — evaluate JavaScript in an isolated
     QuickJS sandbox (pure ES: Math/JSON/Date/String/Array, plus a `files`
     object of the current dir's file contents; no network, no filesystem, no
@@ -720,7 +750,7 @@ async def calc(args, ctx=None):
 # --- shared subprocess helper (used by the installed-env tools) -----------------
 
 
-async def run_in_python(python, argv, timeout=30):
+async def run_in_python(python: str, argv: list[str], timeout: int = 30) -> tuple[str | None, str]:
     """Run a command in a python interpreter and return (stdout, err);
     (None, message) when it could not be run at all. The target backend uses
     this for its installed-environment introspection tools."""
@@ -765,7 +795,7 @@ GIT_EXTERNAL_EXEC_FLAGS = {'--ext-diff', '--textconv'}
 GIT_TIMEOUT = 60
 
 
-def _whole_file_object(sub, rest):
+def _whole_file_object(sub: str, rest: list[str]) -> str | None:
     # The object a command dumps whole — `git show <rev>:<path>` or
     # `git cat-file [-p] <rev>:<path>` — or None when it does not read a single blob (a commit,
     # a tree listing, a size/existence/type probe, a diff, or a grep). Only a whole-blob read can
@@ -788,7 +818,7 @@ def _whole_file_object(sub, rest):
     return None
 
 
-async def _git_object_size(obj, workdir):
+async def _git_object_size(obj: str, workdir: str) -> int | None:
     # The byte size of a git object via `git cat-file -s`, without reading its content, so a
     # whole-file read can be refused before it is buffered. None when it cannot be resolved.
     env = dict(os.environ)
@@ -808,7 +838,7 @@ async def _git_object_size(obj, workdir):
         return None
 
 
-async def git(args, ctx=None, page=None):
+async def git(args: list[str], ctx: ToolContext | None = None, page: int | None = None) -> str:
     """`git <subcommand> [args...]` — run a read-only git command in the
     repository's working directory and return its output. Only read-only
     subcommands are permitted; mutating ones (commit/push/pull/checkout/
@@ -888,7 +918,7 @@ async def git(args, ctx=None, page=None):
     return _git_page_result(result, sub, rest, page)
 
 
-async def notes(args, ctx=None):
+async def notes(args: list[str], ctx: ToolContext | None = None) -> str:
     """`notes add <text>` / `notes show` — a per-reviewer scratchpad. `notes add`
     records a note (kept server-side, so it survives context compaction);
     `notes show` lists the notes recorded so far. The reviewer uses this to carry
@@ -914,7 +944,7 @@ async def notes(args, ctx=None):
 # --- the command set: agnostic base, layered per target -------------------------
 
 
-def agnostic_tool_commands(ctx=None):
+def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
     """The language-agnostic fake-terminal commands, defined once and shared by
     every target: the general web (web-search, view-web-page) and sandboxed
     computation (calc), plus the review-only git and notes tools. A target's
@@ -956,7 +986,7 @@ def agnostic_tool_commands(ctx=None):
     }
 
 
-def build_commands(ctx=None):
+def build_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
     """The phase's command set: the target backend's tools (the language-agnostic
     base plus its registry and installed-env tools), kept only where the phase
     allows the category — the installed-env tools additionally require a usable
@@ -980,7 +1010,7 @@ def build_commands(ctx=None):
     return out
 
 
-def tool_instructions(ctx=None):
+def tool_instructions(ctx: ToolContext | None = None) -> str:
     """The tool protocol appended to a system prompt: a knowledge-cutoff
     reminder, routing guidance, the guardrail for untrusted tool output, and the
     list of commands available in this phase."""
@@ -1013,7 +1043,7 @@ _PAGE_COMMAND_RE = re.compile(
     r'^\$\s+PAGE=(\d+)\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
 
 
-def extract_pending_command(text):
+def extract_pending_command(text: Any) -> PendingCommand | None:
     """The single command encoded in the last non-empty line of a response, or
     None when the response does not end with a command. One command per turn,
     on the final line (robust to weaker/local models); everything above it is
@@ -1050,7 +1080,8 @@ def extract_pending_command(text):
     return PendingCommand(line=last, name=name, args=args)
 
 
-async def execute_command(commands, name, args, page=None):
+async def execute_command(commands: dict[str, ToolCommand], name: str, args: list[str],
+                          page: int | None = None) -> str:
     """Run one fake-terminal command and return its output text. Errors are
     returned as `error: ...` text so the model can see what went wrong and
     adapt, instead of the loop raising. `page` is forwarded only to commands
@@ -1073,7 +1104,9 @@ _TOOL_COMPACT_PROMPT = '''You are compacting a code-review exploration conversat
 '''
 
 
-async def _maybe_compact_tool_history(messages, mapper, ctx, debug=False):
+async def _maybe_compact_tool_history(messages: list[dict[str, str]], mapper: _MapperLike,
+                                      ctx: ToolContext, debug: bool = False
+                                      ) -> list[dict[str, str]]:
     # If the accumulated tool-loop prompt would exceed the context budget, summarize it with an
     # LLM pass and re-attach the reviewer's notes so they survive the compaction. Returns the
     # (possibly shorter) messages. When the budget cannot be determined, returns them unchanged
@@ -1082,7 +1115,9 @@ async def _maybe_compact_tool_history(messages, mapper, ctx, debug=False):
     system = getattr(mapper, 'system', '') or ''
     prompt_text = system + '\n' + '\n'.join(m['content'] for m in messages)
     try:
-        client = get_client()
+        # get_client() is the provider's client (OpenAI or Anthropic); context-window probing only
+        # ever dereferences the OpenAI client, so its exact type is opaque here.
+        client: Any = get_client()
         window = await resolve_context_window(model=mapper.model, client=client)
     except Exception:
         return messages
@@ -1118,13 +1153,14 @@ _FINDING_SEVERITY_RE = re.compile(
     r'\[(?:MAJOR|MINOR|NIT|NITPICK)\]', re.IGNORECASE)
 
 
-def _is_no_findings_response(text):
+def _is_no_findings_response(text: Any) -> bool:
     # True when a tool-loop response reports no findings (so it needs no git probe to back up):
     # it contains no finding headline. A report of any finding (any severity tag) is not exempt.
     return _FINDING_SEVERITY_RE.search(text or '') is None
 
 
-async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_TOOL_ROUNDS):
+async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | None = None,
+                         debug: bool = False, max_rounds: int = MAX_TOOL_ROUNDS) -> Any:
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
     the response's final line is a `$` command, execute it and feed the
     untrusted-wrapped output back in a follow-up call, repeating until a
@@ -1140,8 +1176,8 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
         # Resolve the model's context window once (cached) so the git whole-file guard can refuse
         # a read that would outgrow the model; on any failure the guard is simply skipped.
         try:
-            ctx.context_window = await resolve_context_window(
-                model=mapper.model, client=get_client())
+            client: Any = get_client()
+            ctx.context_window = await resolve_context_window(model=mapper.model, client=client)
         except Exception:
             ctx.context_window = None
     commands = build_commands(ctx)

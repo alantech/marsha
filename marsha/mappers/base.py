@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from marsha.log import dump
 
 
@@ -10,19 +14,23 @@ class ContextOverflowError(Exception):
 class BaseMapper():
     """Semi-abstract base for 'mappers' in Marsha"""
 
-    def __init__(self):
+    check_retries: int
+    output: Any
+    label: str | None
+
+    def __init__(self) -> None:
         self.check_retries = 3
         self.output = None
         self.label = 'llm'
 
-    async def transform(self, i):
+    async def transform(self, i: Any) -> Any:
         raise Exception('Not implemented')
 
-    async def check(self):
+    async def check(self) -> Any:
         # Define a check if you want, but not necessary
         return self.output
 
-    async def run(self, i):
+    async def run(self, i: Any) -> Any:
         # Every LLM call funnels through here, so this is the single place to capture the full
         # input/output transcript for the --trace-full level.
         label = getattr(self, 'label', None) or 'llm'
