@@ -632,6 +632,14 @@ def test_gate_drops_citation_when_line_count_unknown(repo):
         assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_drops_zero_based_line_citation(repo):
+    # Citations are 1-based; a :0 line is not a valid line and is dropped (the bounds check used
+    # to reject only lines past the end, so a zero-based citation slipped through).
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:0', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_review_pass_merges_evidence_across_rounds(repo):
     # A reviewer that verifies with git in round 1 and re-states the finding in round 2 (without
     # re-probing) must keep its round-1 evidence on the final finding, so the gate can verify it

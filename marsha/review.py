@@ -1109,9 +1109,11 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
                 # citation pass an unverified backstop.
                 ok, reason = False, (f'cited line {line} could not be verified: the line count '
                                      f'of {file_path} could not be determined')
-            elif line is not None and line > line_count:
-                ok, reason = False, (f'cited line {line} is beyond the file '
-                                     f'({line_count} lines at HEAD)')
+            elif line is not None and (line < 1 or line > line_count):
+                # Citations are 1-based, so a line below 1 (a 0-based :0) is invalid as well as
+                # one past the end of the file.
+                ok, reason = False, (f'cited line {line} is not a valid line of {file_path} '
+                                     f'({line_count} lines at HEAD; lines are 1-based)')
         if ok and anchors:
             # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
             # invented one; the "at least one" primary check above passes on the real one. If any
