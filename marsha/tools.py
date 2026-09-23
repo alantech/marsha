@@ -745,13 +745,11 @@ GIT_READONLY_COMMANDS = {
     'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
     'remote',
 }
-# `git remote` is read-only only for listing (bare `remote`, `remote -v`, `remote
-# show`, `remote get-url`); the other subcommands mutate the repo — they rewrite
-# .git/config or update remote-tracking refs — so they are refused even though
-# `remote` itself is on the allowlist.
-GIT_REMOTE_MUTATING = {
-    'add', 'remove', 'rename', 'set-url', 'set-head', 'set-branches',
-    'update', 'prune'}
+# `git remote` is read-only only for listing (bare `remote`, `remote -v`, `remote get-url`,
+# `remote show`); every other subcommand mutates the repo (rewriting .git/config or updating
+# remote-tracking refs). The read-only subcommands are allowlisted and the rest refused, so a
+# new or aliased mutating subcommand (e.g. `rm` for `remove`) cannot slip through.
+GIT_REMOTE_READONLY_SUBCOMMANDS = {'get-url', 'show'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
@@ -820,14 +818,15 @@ async def git(args, ctx=None, page=None):
             'modify the git tree.')
     rest = args[1:]
     if sub == 'remote':
-        # `git remote` lists, but `git remote add/remove/rename/set-url/set-head`
-        # mutate .git/config — refuse those so the allowlist stays read-only.
-        for arg in rest:
-            if arg in GIT_REMOTE_MUTATING:
-                return (
-                    f'error: `git remote {arg}` is not allowed (it would modify the '
-                    'repository); only `git remote`, `git remote -v`, '
-                    '`git remote show` and `git remote get-url` are permitted.')
+        # `git remote` lists, but its mutating subcommands (add/remove/rm/rename/set-url/
+        # set-head/set-branches/update/prune) mutate the repo — refuse anything that is not an
+        # explicitly read-only listing subcommand.
+        first = next((a for a in rest if not a.startswith('-')), None)
+        if first is not None and first not in GIT_REMOTE_READONLY_SUBCOMMANDS:
+            return (
+                f'error: `git remote {first}` is not allowed (it would modify the '
+                'repository); only `git remote`, `git remote -v`, '
+                '`git remote get-url` and `git remote show` are permitted.')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:

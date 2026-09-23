@@ -834,6 +834,23 @@ def _corroborated(findings, passes, threshold):
 _ANCHOR_TOKEN = re.compile(
     r'[A-Za-z_$][A-Za-z0-9_]*(?:\.[A-Za-z_$][A-Za-z0-9_]*)*')
 
+# Cached per cwd: the basenames of every file at HEAD, so the anchor set can tell a filename (a
+# token naming a real file in the repo) from a dotted code symbol by probing the repo instead of
+# guessing at extensions (which would miss names like archive.tar.gz or extensionless files).
+_file_basenames_cache = {}
+
+
+async def _repo_file_basenames(cwd):
+    # The basenames of every file at HEAD (one `git ls-tree` per cwd, cached). A token in this set
+    # is a file the reviewer could open, not a code symbol.
+    if cwd in _file_basenames_cache:
+        return _file_basenames_cache[cwd]
+    rc, out, _err = await _git('ls-tree', '-r', '--name-only', 'HEAD', cwd=cwd)
+    basenames = ({ln.rsplit('/', 1)[-1] for ln in out.splitlines() if ln}
+                 if rc == 0 else set())
+    _file_basenames_cache[cwd] = basenames
+    return basenames
+
 
 def _is_distinctive(tok):
     # A code-like token rather than an English word: long enough and shaped like an identifier —
@@ -844,21 +861,22 @@ def _is_distinctive(tok):
                  or re.search(r'[a-z][A-Z]', tok) is not None))
 
 
-def _distinctive_anchors(finding):
+def _distinctive_anchors(finding, file_basenames):
     # The code-like symbols a finding leans on, drawn from its headline and support (NOT its
     # location: the cited path is checked separately as "the file was opened", and letting it feed
     # the symbol set would ground a finding merely because the reviewer read the cited file, even
-    # when none of the symbols the finding actually claims were in that file). For the finding to
+    # when none of the symbols the finding actually claims were in that file). A token that names
+    # a real file in the repo (file_basenames) is excluded for the same reason. For the finding to
     # count as grounded, at least one of these must appear in the git output its reviewer actually
     # retrieved. An empty set means the check falls back to the cited file having been opened.
     text = ' '.join(
         filter(None, [finding.get('desc'), finding.get('support')]))
     anchors = set()
     for tok in _ANCHOR_TOKEN.findall(text):
-        if _is_distinctive(tok):
+        if _is_distinctive(tok) and tok not in file_basenames:
             anchors.add(tok)
             for part in tok.split('.'):
-                if _is_distinctive(part):
+                if _is_distinctive(part) and part not in file_basenames:
                     anchors.add(part)
     return anchors
 
@@ -1002,13 +1020,14 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
     # property of the symbol, not the finding, so the same symbol is grepped once, not once per
     # finding that names it.
     symbol_cache = {}
+    file_basenames = await _repo_file_basenames(cwd)
     kept = []
     for f in findings:
         location = f.get('location') or ''
         _path, line = parse_location(location)
         file_path = _location_file(location)
         evidence = f.get('evidence') or []
-        anchors = _distinctive_anchors(f)
+        anchors = _distinctive_anchors(f, file_basenames)
         # The symbol check matches against the git OUTPUT only, never the command text: a reviewer
         # can grep for a symbol that does not exist (git grep returns nothing), and counting the
         # query string as evidence would ground a fabricated symbol in its own lookup. A symbol is

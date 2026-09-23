@@ -727,8 +727,8 @@ def test_git_remote_mutating_subcommands_refused(tmp_path):
     subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     for mutating in (
-            'add', 'remove', 'rename', 'set-url', 'set-head', 'set-branches',
-            'update', 'prune'):
+            'add', 'remove', 'rm', 'rename', 'set-url', 'set-head',
+            'set-branches', 'update', 'prune'):
         out = asyncio.run(tools.git(['remote', mutating, 'origin'], ctx))
         assert out.startswith('error:') and 'would modify the repository' in out
     for listing in (['remote'], ['remote', '-v']):

@@ -457,6 +457,17 @@ def test_gate_post_consolidation_drops_invented_camelcase(repo):
         [f], repo, 'main', post_consolidation=True)) == []
 
 
+def test_gate_keeps_finding_grounded_on_opened_file_in_support(repo):
+    # A finding with no code-symbol anchor whose support cites the file it opened (a.txt, a real
+    # file in the repo) is grounded on the file being opened, not dropped because the filename
+    # does not appear in the retrieved output — a.txt is a file, not a code symbol.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:2', ev,
+                      support='confirmed the line via git show HEAD:a.txt')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
     # Two real snake_case symbols: compute_total is in the reviewer's evidence, helper_fn is in the
     # tree but not in this finding's evidence. The tripwire grounds helper_fn on the tree (a real
