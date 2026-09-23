@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -5,6 +7,9 @@ import re
 import time
 import traceback
 import sys
+from typing import Any, Callable, cast
+
+import openai
 
 from marsha import backends, tools
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
@@ -30,7 +35,7 @@ from marsha.mappers.chatgpt import uses_completion_tokens
 STRONG_REASONING_EFFORT = 'xhigh'
 
 
-def parse_spec_check(text):
+def parse_spec_check(text: str) -> dict[str, Any]:
     """Parse the structured spec check response; raise on anything malformed"""
     t = text.strip()
     if t.startswith('```'):
@@ -58,7 +63,7 @@ def parse_spec_check(text):
     return {'compilable': obj['compilable'], 'warnings': warnings, 'errors': errors}
 
 
-def parse_diagnosis(text):
+def parse_diagnosis(text: str) -> dict[str, str]:
     """Parse the structured failure diagnosis; raise on anything malformed"""
     t = text.strip()
     if t.startswith('```'):
@@ -84,11 +89,12 @@ def parse_diagnosis(text):
     return {'fault': fault, 'reason': reason}
 
 
-async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
+async def gpt_check_spec(meta: MarshaMeta, retries: int = 2) -> dict[str, Any]:
     # Reasoning models need a larger budget for their chain of thought. GPT-6 has no 'minimal'
     # tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that still reasons.
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        answer = {'max_tokens': 8192, 'reasoning_effort': 'low'}
+        answer: dict[str, Any] = {
+            'max_tokens': 8192, 'reasoning_effort': 'low'}
     elif resolve_provider() == 'anthropic':
         answer = {'max_tokens': 4096}
     else:
@@ -105,7 +111,7 @@ async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
         raise
 
 
-async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int = 3, debug: bool = False):
+async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int = 3, debug: bool = False) -> str:
     # Generate the oracle (the test suite) first, anchored to the spec. This is the
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
@@ -123,7 +129,7 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
     ---- end ----''')
     try:
         if tool_use:
-            doc = await tools.run_with_tools(
+            doc: str = await tools.run_with_tools(
                 gpt_gen_test, marsha_for_test_llm, ctx, debug=debug)
         else:
             doc = await gpt_gen_test.run(marsha_for_test_llm)
@@ -143,7 +149,7 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
             raise Exception('Failed to generate test suite', meta.filename)
 
 
-async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False, retries=2, tool_ctx=None):
+async def _run_editor(loop: str, meta: MarshaMeta, user_message: str, model: str | None, stats_stage: str | None, debug: bool = False, retries: int = 2, tool_ctx: tools.ToolContext | None = None) -> tuple[str | None, str]:
     # One implementor (editor) iteration: load the loop's editor prompt, run it, and split its
     # response into (preamble, artifact). Returns (artifact, preamble), or (None, '') on failure.
     # `tool_ctx`, when set, enables the fake terminal for the editor (see marsha.tools).
@@ -156,12 +162,12 @@ async def _run_editor(loop, meta, user_message, model, stats_stage, debug=False,
     if loop == 'impl':
         first_header = b.source_name(meta.filename)
 
-        def validate(artifact):
+        def validate(artifact: str) -> bool:
             return b.validate_markdown(artifact, 'impl', meta.filename)
     else:
         first_header = b.test_name(meta.filename)
 
-        def validate(artifact):
+        def validate(artifact: str) -> bool:
             return b.validate_markdown(artifact, 'oracle', meta.filename)
     for attempt in range(retries):
         try:
@@ -200,7 +206,7 @@ Output no prose, no numbering, no code fences, and no finding that was not in th
 '''
 
 
-def _trim_findings_to_budget(findings, fits_check):
+def _trim_findings_to_budget(findings: list[dict[str, Any]], fits_check: Callable[[list[dict[str, Any]]], bool]) -> list[dict[str, Any]]:
     # Deterministic last-resort reduction: drop findings from lowest to highest severity until
     # fits_check passes (or nothing is left). Guarantees the editor never receives an over-budget
     # prompt unless even the highest-severity findings alone exceed it.
@@ -212,9 +218,11 @@ def _trim_findings_to_budget(findings, fits_check):
     return current
 
 
-async def consolidate_findings(context_block, findings, model, debug=False,
-                               retries=3, allow_empty=False,
-                               reasoning_effort=None, seed=None):
+async def consolidate_findings(context_block: str, findings: list[dict[str, Any]],
+                               model: str | None, debug: bool = False,
+                               retries: int = 3, allow_empty: bool = False,
+                               reasoning_effort: str | None = None,
+                               seed: int | None = None) -> list[dict[str, Any]]:
     # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
     # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
     # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
@@ -233,7 +241,7 @@ async def consolidate_findings(context_block, findings, model, debug=False,
 {format_findings(findings)}'''
     best = findings
     floor = 0 if allow_empty else 1
-    shrinks = []
+    shrinks: list[list[dict[str, Any]]] = []
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
@@ -259,13 +267,13 @@ async def consolidate_findings(context_block, findings, model, debug=False,
     return best
 
 
-async def compact_findings(meta, findings, model, debug=False, retries=2, prior_context=''):
+async def compact_findings(meta: MarshaMeta, findings: list[dict[str, Any]], model: str | None, debug: bool = False, retries: int = 2, prior_context: str = '') -> list[dict[str, Any]]:
     # Shrink the findings list to fit the editor's context budget (see consolidate_findings).
     return await consolidate_findings(
         f'{format_marsha_for_llm(meta)}\n{prior_context}', findings, model, debug, retries)
 
 
-async def _budgeted_findings(meta, findings, build, model, args, debug=False):
+async def _budgeted_findings(meta: MarshaMeta, findings: list[dict[str, Any]], build: Callable[[list[dict[str, Any]]], str], model: str | None, args: Any, debug: bool = False) -> list[dict[str, Any]]:
     # Ensure the editor prompt build(findings) fits the context budget. If not, compact the
     # findings (LLM), then deterministically trim by severity, so the editor never receives an
     # over-budget prompt. If the budget cannot be determined (e.g. no client in a test harness),
@@ -274,11 +282,12 @@ async def _budgeted_findings(meta, findings, build, model, args, debug=False):
     cap = getattr(args, 'context_cap', 0.5)
     try:
         client = get_client()
-        ctx = await resolve_context_window(model=model, client=client, override=override)
+        ctx = await resolve_context_window(
+            model=model, client=cast(openai.AsyncOpenAI | None, client), override=override)
     except Exception:
         return findings
 
-    def fits_check(current):
+    def fits_check(current: list[dict[str, Any]]) -> bool:
         return fits(build(current), ctx, cap)
     if fits_check(findings):
         log(f'editor prompt ~{estimate_tokens(build(findings))} tokens, within budget '
@@ -293,7 +302,7 @@ async def _budgeted_findings(meta, findings, build, model, args, debug=False):
     return _trim_findings_to_budget(reduced, fits_check)
 
 
-def _oracle_review_message(meta, oracle_md):
+def _oracle_review_message(meta: MarshaMeta, oracle_md: str) -> str:
     return f'''{format_marsha_for_llm(meta)}
 {void_note(meta)}
 
@@ -302,7 +311,7 @@ def _oracle_review_message(meta, oracle_md):
 {oracle_md}'''
 
 
-def _oracle_editor_message(meta, oracle_md, findings):
+def _oracle_editor_message(meta: MarshaMeta, oracle_md: str, findings: list[dict[str, Any]]) -> str:
     return f'''{format_marsha_for_llm(meta)}
 
 # The current test suite (oracle)
@@ -314,7 +323,7 @@ def _oracle_editor_message(meta, oracle_md, findings):
 {format_findings(findings)}'''
 
 
-async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: bool = False) -> str:
+async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug: bool = False) -> str:
     # Per-phase inner loop for the oracle: run the reviewer personas, hand their findings to the
     # editor (Wren), and iterate until there are no actionable findings or the suite stabilizes.
     level = args.optimize
@@ -326,7 +335,8 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings, prior_preamble = [], ''
+    prior_findings: list[dict[str, Any]] = []
+    prior_preamble: str = ''
     for i in range(level):
         log(f'oracle loop iteration {i + 1}/{level}: running reviewers')
         user_message = _oracle_review_message(meta, oracle_md)
@@ -366,7 +376,7 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args, debug: boo
     return oracle_md
 
 
-async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, tool_use: bool = True, retries: int = 3, debug: bool = False):
+async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, tool_use: bool = True, retries: int = 3, debug: bool = False) -> list[str]:
     # Generate implementations against the (already generated) oracle. The implementation
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     b = backends.current()
@@ -388,10 +398,10 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
     if tool_use:
         # One tool-aware conversation per candidate, all in parallel: each candidate
         # may independently look up the information it needs.
-        async def one_candidate():
+        async def one_candidate() -> str:
             mapper = get_mapper(system, n_results=1,
                                 stats_stage='first_stage', label='impl-gen')
-            return await tools.run_with_tools(mapper, user_request, ctx, debug=debug)
+            return cast(str, await tools.run_with_tools(mapper, user_request, ctx, debug=debug))
         tasks = [asyncio.create_task(one_candidate())
                  for _ in range(n_results)]
         try:
@@ -410,7 +420,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
     # The output should be a valid list of implementation Markdown documents (code + optional
     # manifest). Parse each one and keep the valid docs; if none are valid, retry.
     try:
-        mds = list()
+        mds: list[str] = []
         for doc in reses:
             if b.validate_markdown(doc, 'impl', meta.filename):
                 mds.append(doc)
@@ -432,7 +442,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
             raise Exception('Failed to generate code', meta.filename)
 
 
-def _impl_review_message(meta, oracle, code):
+def _impl_review_message(meta: MarshaMeta, oracle: str, code: str) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -445,7 +455,7 @@ def _impl_review_message(meta, oracle, code):
 {b.code_block(code)}'''
 
 
-def _impl_editor_message(meta, oracle, code, findings):
+def _impl_editor_message(meta: MarshaMeta, oracle: str, code: str, findings: list[dict[str, Any]]) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -462,7 +472,7 @@ def _impl_editor_message(meta, oracle, code, findings):
 {format_findings(findings)}'''
 
 
-async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debug: bool = False):
+async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str], debug: bool = False) -> None:
     # Per-phase inner loop for the implementation, run after the candidate already passes the
     # oracle. Reviewer personas propose findings; the editor (Cody) applies them; the guardrail
     # re-runs the oracle and reverts any change that regresses, so the loop can never ship broken.
@@ -477,7 +487,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     req_files = [file for file in files if file.endswith(b.manifest_name())]
     req_file = req_files[0] if len(req_files) > 0 else None
     subdir = os.path.dirname(os.path.abspath(code_file))
-    oracle = read_file(test_file)
+    oracle = cast(str, read_file(test_file))
     # The candidate already passed the oracle, so its declared dependencies are installed in a
     # candidate venv: the installed-env tools can introspect it. Absent a venv, build_commands
     # drops those tools and the phase degrades to the base set.
@@ -487,10 +497,11 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     reviewers = resolve_loop_reviewers('impl', args.impl_personas, registry)
     model = resolve_strong_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings, prior_preamble = [], ''
+    prior_findings: list[dict[str, Any]] = []
+    prior_preamble: str = ''
     for i in range(level):
         log(f'impl loop iteration {i + 1}/{level}: running reviewers')
-        current_code = read_file(code_file)
+        current_code = cast(str, read_file(code_file))
         user_message = _impl_review_message(meta, oracle, current_code)
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
@@ -517,7 +528,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
                     f'[Optimize impl] iteration {i + 1}: editor failed, stopping')
             break
         backup_code = current_code
-        backup_req = read_file(req_file) if (
+        backup_req = cast(str, read_file(req_file)) if (
             req_file and os.path.exists(req_file)) else None
         write_files_from_markdown(artifact, subdir=subdir)
         if read_file(code_file) == backup_code:
@@ -532,7 +543,7 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
             prior_findings, prior_preamble = actionable, preamble
         else:
             write_file(code_file, backup_code)
-            if backup_req is not None:
+            if backup_req is not None and req_file is not None:
                 write_file(req_file, backup_req)
             if debug:
                 print(
@@ -540,9 +551,9 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
     return
 
 
-async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False):
+async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False) -> None:
     b = backends.current()
-    code = read_file(filename)
+    code = cast(str, read_file(filename))
     gpt_fix = get_mapper(b.lint_fix_prompt(filename),
                          stats_stage='second_stage', label='lint-fix')
     fixed_code = await gpt_fix.run(f'''# {filename}
@@ -570,7 +581,7 @@ async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False):
+async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False) -> None:
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     # The backend lints (style + semantics) with the target toolchain; we lint to catch coarse
@@ -593,7 +604,7 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: 
     await lint_and_fix_files(marsha_filename, files, max_depth - 1, debug)
 
 
-async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str, retries: int = 2):
+async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str, retries: int = 2) -> dict[str, str]:
     # Read-only: decide whether the implementation or a test is at fault. Uses the standard
     # (cheap) model, since the safety property is enforced structurally, not by this call.
     b = backends.current()
@@ -621,7 +632,7 @@ async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str
         return {'fault': 'implementation', 'reason': 'diagnosis unavailable; defaulting to fixing the implementation'}
 
 
-async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False):
+async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False) -> str:
     # Edit ONLY the implementation. The oracle is provided as fixed context and is never
     # part of the editable output, so this path structurally cannot touch the test suite.
     b = backends.current()
@@ -645,7 +656,7 @@ async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: s
 # Diagnosis
 
 The implementation is at fault: {reason}'''
-    fixed_code = await gpt_fix.run(user_request)
+    fixed_code: str = await gpt_fix.run(user_request)
     try:
         if not b.validate_markdown(fixed_code, 'impl', meta.filename):
             if debug:
@@ -660,7 +671,7 @@ The implementation is at fault: {reason}'''
             raise Exception('Failed to fix implementation', meta.filename)
 
 
-async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False):
+async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False) -> str:
     # The "punt back": the only path that may edit the oracle, and only spec-anchored. It must
     # justify every change by the assignment and must never weaken a test that is actually
     # correct (so a misrouted diagnosis degrades to a no-op rather than a bent test).
@@ -685,7 +696,7 @@ async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, re
 # Diagnosis
 
 A test is at fault: {reason}'''
-    fixed_test = await gpt_fix.run(user_request)
+    fixed_test: str = await gpt_fix.run(user_request)
     try:
         if not b.validate_markdown(fixed_test, 'oracle', meta.filename):
             if debug:
@@ -706,7 +717,7 @@ def _code_from_test_md(md: str) -> str:
     return m.group(1) if m else md
 
 
-def _correction_review_message(meta, code, orig_test, corrected_code, reason):
+def _correction_review_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -727,7 +738,7 @@ def _correction_review_message(meta, code, orig_test, corrected_code, reason):
 A test is at fault: {reason}'''
 
 
-def _correction_editor_message(meta, code, orig_test, corrected_code, reason, findings):
+def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str, findings: list[dict[str, Any]]) -> str:
     return _correction_review_message(
         meta, code, orig_test, corrected_code, reason) + f'''
 
@@ -736,14 +747,14 @@ def _correction_editor_message(meta, code, orig_test, corrected_code, reason, fi
 {format_findings(findings)}'''
 
 
-async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, args, debug: bool = False, subdir: str = None) -> str:
+async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, args: Any, debug: bool = False, subdir: str | None = None) -> str:
     # Third per-phase loop: reviewer personas check the test correction's reasoning and
     # spec-alignment before it is written, so the only path that can bend the oracle is itself
     # spec-anchored and double-checked. The editor (Rex) applies the findings.
     level = args.optimize
     if level <= 0:
         return corrected_md
-    tool_ctx = None
+    tool_ctx: tools.ToolContext | None = None
     if not args.no_tools and subdir is not None:
         b = backends.current()
         tool_ctx = tools.ToolContext(
@@ -753,7 +764,8 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
         'correction', args.fix_personas, registry)
     model = resolve_strong_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings, prior_preamble = [], ''
+    prior_findings: list[dict[str, Any]] = []
+    prior_preamble: str = ''
     for i in range(level):
         log(f'correction loop iteration {i + 1}/{level}: running reviewers')
         corrected_code = _code_from_test_md(corrected_md)
@@ -798,7 +810,7 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
     return corrected_md
 
 
-async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False, args=None):
+async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False, args: Any = None) -> None:
     if retries == 0:
         raise Exception('Failed to fix code', meta.filename)
     b = backends.current()
@@ -818,8 +830,8 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
         if debug:
             print('Test failed, diagnosing the root cause')
             print(test_results)
-        test = read_file(test_file)
-        code = read_file(code_file)
+        test = cast(str, read_file(test_file))
+        code = cast(str, read_file(code_file))
         # Diagnose whether the implementation or a test is at fault, then route to the matching
         # fix. Only one artifact is ever edited per pass: the implementation fix structurally
         # cannot touch the oracle, and the (spec-anchored, double-checked) test correction is the
@@ -847,7 +859,7 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
         return await test_and_fix_files(meta, files, retries - 1, debug, args)
 
 
-async def generate_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> list[tuple[str, str]]:
+async def generate_code(args: Any, meta: MarshaMeta, n_results: int, debug: bool) -> list[tuple[str, str]]:
     t1 = time.time()
     b = backends.current()
     print(f'Generating {b.id} code...')
@@ -895,7 +907,7 @@ async def generate_code(args, meta: MarshaMeta, n_results: int, debug: bool) -> 
     return cands
 
 
-async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool = False):
+async def review_and_fix(args: Any, meta: MarshaMeta, files: list[str], debug: bool = False) -> None:
     t_ssi = time.time()
     print('Parsing generated code...')
     log(f'second stage: {meta.filename} (lint & fix)')
@@ -911,7 +923,7 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
             t_ssii - t_ssi)
     if debug:
         for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
+            print(f'# {file}\n{cast(str, read_file(file))}\n')
     t_tsi = time.time()
     print('Verifying and correcting generated code...')
     log('third stage: verify & correct')
@@ -931,10 +943,10 @@ async def review_and_fix(args, meta: MarshaMeta, files: list[str], debug: bool =
         await optimize_implementation(args, meta, files, debug)
     if debug:
         for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
+            print(f'# {file}\n{cast(str, read_file(file))}\n')
     print('Formatting code...')
     log('formatting')
     backends.current().format_files(files)
     if debug:
         for file in files:
-            print(f'# {file}\n{read_file(file)}\n')
+            print(f'# {file}\n{cast(str, read_file(file))}\n')

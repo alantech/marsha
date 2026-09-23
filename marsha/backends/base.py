@@ -31,6 +31,7 @@ class LanguageBackend:
     id: str = ''
     aliases: tuple[str, ...] = ()
     code_fence_lang: str = ''
+    target_version: str = ''
 
     # --- fake-terminal tools ----------------------------------------------------
 

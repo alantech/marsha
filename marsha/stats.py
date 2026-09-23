@@ -46,7 +46,7 @@ class ModelStats:
 
 
 class StageStats:
-    def __init__(self, name: str, total_time: float, total_calls: int) -> None:
+    def __init__(self, name: str, total_time: int | str, total_calls: int) -> None:
         self.name = name
         self.total_time = total_time
         self.total_calls = total_calls
@@ -70,7 +70,7 @@ class StageStats:
 
 
 class MarshaStats:
-    total_time: float
+    total_time: int | str
     total_calls: int
     attempts: int
     total_cost: float
@@ -96,7 +96,7 @@ class MarshaStats:
         if isinstance(stage_stats, StageStats):
             stage_stats.update(res)
 
-    def aggregate(self, total_time: float, attempts: int) -> None:
+    def aggregate(self, total_time: int | str, attempts: int) -> None:
         self.total_time = total_time
         self.attempts = attempts
         self.total_calls = sum(stage.total_calls for stage in self.stages)
