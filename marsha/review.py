@@ -1010,6 +1010,13 @@ def _asserted_absent_symbols(finding):
     return absent
 
 
+def _symbol_in_text(text, symbol):
+    # Whether `symbol` appears in `text` as a whole word (not a substring of a longer identifier),
+    # so a shorter invented name cannot ground itself on a longer one the reviewer actually read
+    # (e.g. `phantomHand` on `phantomHandler`). Dotted names match as a whole token.
+    return re.search(rf'\b{re.escape(symbol)}\b', text) is not None
+
+
 async def _symbol_present(symbol, cwd, cache):
     # Whether `symbol` occurs in the reviewed commit, matched as a whole-word literal on its
     # last dotted component (no language-specific keyword, so any language works). Pinned to
@@ -1080,7 +1087,7 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
         elif not post_consolidation and anchors:
-            if not any(a in output_scope for a in anchors):
+            if not any(_symbol_in_text(output_scope, a) for a in anchors):
                 ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
         elif not post_consolidation and file_path:
             base = file_path.rsplit('/', 1)[-1]
@@ -1096,7 +1103,13 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
             if not exists:
                 ok, reason = False, f'cited file {file_path} does not exist at HEAD or {base_ref}'
-            elif line is not None and line_count is not None and line > line_count:
+            elif line is not None and line_count is None:
+                # The file exists but its line count could not be read, so the cited line cannot
+                # be verified against the file's end; drop it rather than let an out-of-range
+                # citation pass an unverified backstop.
+                ok, reason = False, (f'cited line {line} could not be verified: the line count '
+                                     f'of {file_path} could not be determined')
+            elif line is not None and line > line_count:
                 ok, reason = False, (f'cited line {line} is beyond the file '
                                      f'({line_count} lines at HEAD)')
         if ok and anchors:
@@ -1111,7 +1124,7 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             for a in sorted(anchors):
                 if a in absent or '.' in a:
                     continue
-                if a in output_scope:
+                if _symbol_in_text(output_scope, a):
                     continue
                 if await _symbol_present(a, cwd, symbol_cache):
                     continue

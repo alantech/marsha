@@ -455,6 +455,16 @@ def test_gate_drops_finding_with_invented_camelcase_co_cited(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_symbol_match_is_whole_word_not_substring(repo):
+    # The anchor check is a whole-word match, not a substring match: a fabricated symbol that is
+    # a prefix of a symbol the reviewer actually read (phantomHand on phantomHandler) does not
+    # ground the finding.
+    _add_code_file(repo, 'calc.py', 'def phantomHandler():\n    return 1\n')
+    ev = [('$ git show HEAD:calc.py', 'def phantomHandler():\n    return 1')]
+    f = _gate_finding('phantomHand leaks memory', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_post_consolidation_drops_invented_camelcase(repo):
     # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
     # is the only symbol-level backstop; it must catch a camelCase symbol a consolidator rewords in
@@ -608,6 +618,18 @@ def test_gate_drops_out_of_range_line_range_location(repo):
     f = _gate_finding('the value here is wrong', 'a.txt:2-4', ev)
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
+
+
+def test_gate_drops_citation_when_line_count_unknown(repo):
+    # A file that exists but whose line count cannot be read: a cited line cannot be verified
+    # against the file's end, so it is dropped (an out-of-range citation must not pass an
+    # unverified backstop).
+    async def fake_line_count(ref, path, cwd):
+        return None  # counting failed
+    with patch.object(review, '_git_line_count', new=fake_line_count):
+        ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+        f = _gate_finding('the value here is wrong', 'a.txt:999', ev)
+        assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
 def test_review_pass_merges_evidence_across_rounds(repo):
