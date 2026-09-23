@@ -24,6 +24,11 @@ from marsha.llm_client import get_client
 from marsha.mappers import get_mapper
 from marsha.mappers.chatgpt import uses_completion_tokens
 
+# The strong model (default gpt-5.6-terra) runs the impl/correction review loops and the
+# test-fixing calls at extra-high reasoning: those are the highest-stakes edits (they may rewrite
+# code or the oracle), so they get the most reasoning budget the model offers.
+STRONG_REASONING_EFFORT = 'xhigh'
+
 
 def parse_spec_check(text):
     """Parse the structured spec check response; raise on anything malformed"""
@@ -80,9 +85,10 @@ def parse_diagnosis(text):
 
 
 async def gpt_check_spec(meta: MarshaMeta, retries: int = 2):
-    # Reasoning models need a larger budget for their chain of thought
+    # Reasoning models need a larger budget for their chain of thought. GPT-6 has no 'minimal'
+    # tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that still reasons.
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        answer = {'max_tokens': 8192, 'reasoning_effort': 'minimal'}
+        answer = {'max_tokens': 8192, 'reasoning_effort': 'low'}
     elif resolve_provider() == 'anthropic':
         answer = {'max_tokens': 4096}
     else:
@@ -185,6 +191,7 @@ Reduce the list by doing ALL of the following:
 1. Drop any finding that is NOT a real, actionable defect. A real defect is a concrete, verified problem in the current code: a correctness or safety bug, a spec/oracle violation, or a change that measurably degrades quality, reliability, or performance. The SEVERITY label is only a reviewer's opinion, not a verdict, so judge the ACTUAL impact. Drop findings whose impact is nil or merely theoretical, including: a stylistic or readability preference; a robustness/scale concern with no realistic trigger (e.g. "only matters if there are more than N items", "could hide a transient error that callers already handle"); a micro-optimization with no evidence of real cost; or anything the surrounding code already handles.
 2. Drop any finding that is already resolved, superseded, or no longer needs to be acted on.
 3. When two or more findings make the same point, keep ONLY the single most detailed one and drop the rest. Preserve the exact [Name-Label] of the most detailed one.
+4. When two findings make contradictory claims about the same code, keep only the one grounded in the actual code and drop the other.
 Keep ONLY findings a developer would actually act on. When in doubt whether a finding changes anything real, drop it.
 You MUST preserve each kept finding's [Name-Label] exactly as it was given: do not rename, renumber, or invent labels. The reduced list may therefore skip some letter/number combinations.
 Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
@@ -206,7 +213,8 @@ def _trim_findings_to_budget(findings, fits_check):
 
 
 async def consolidate_findings(context_block, findings, model, debug=False,
-                               retries=3, allow_empty=False):
+                               retries=3, allow_empty=False,
+                               reasoning_effort=None, seed=None):
     # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
     # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
     # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
@@ -217,22 +225,37 @@ async def consolidate_findings(context_block, findings, model, debug=False,
     # compaction, where dropping every finding would lose the work. `context_block` is the
     # surrounding context (a Marsha meta for the optimize loops; a note for `marsha review`).
     gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
-                     stats_stage='third_stage', model=model, label='compact')
+                     stats_stage='third_stage', model=model, label='compact',
+                     reasoning_effort=reasoning_effort, seed=seed)
     user = f'''{context_block}
 # Review findings to reduce
 
 {format_findings(findings)}'''
     best = findings
     floor = 0 if allow_empty else 1
+    shrinks = []
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
             compacted = parse_compacted_findings(text)
-            if floor <= len(compacted) < len(best):
-                best = compacted
+            # A valid shrink is within the floor and strictly smaller than the ORIGINAL input;
+            # tracking against the input (not the current best) lets a later non-empty shrink be
+            # recorded even after an earlier attempt already collapsed best to empty.
+            if floor <= len(compacted) < len(findings):
+                if len(compacted) < len(best):
+                    best = compacted
+                shrinks.append(compacted)
         except Exception as e:
             if debug:
                 print(f'[Compact] attempt {attempt + 1} failed: {e!r}')
+    # A review (allow_empty) must not be zeroed by a single flaky empty response: if the smallest
+    # result is empty but some attempt shrank to a non-empty list, keep that one - surfacing a
+    # finding beats dropping it on a malformed or uncertain response. A genuine, consistent
+    # "no findings" (empty on every attempt) still returns empty.
+    if floor == 0 and not best:
+        non_empty = [c for c in shrinks if c]
+        if non_empty:
+            best = min(non_empty, key=len)
     return best
 
 
@@ -472,7 +495,8 @@ async def optimize_implementation(args, meta: MarshaMeta, files: list[str], debu
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
-                                      loop='impl', guidance=b.persona_guidance(), tool_ctx=tool_ctx)
+                                      loop='impl', guidance=b.persona_guidance(), tool_ctx=tool_ctx,
+                                      reasoning_effort=STRONG_REASONING_EFFORT)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:
@@ -602,6 +626,7 @@ async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: s
     # part of the editable output, so this path structurally cannot touch the test suite.
     b = backends.current()
     gpt_fix = get_mapper(b.fix_impl_prompt(meta), model=resolve_strong_model(),
+                         reasoning_effort=STRONG_REASONING_EFFORT,
                          stats_stage='third_stage', label='impl-fix')
     user_request = f'''{format_marsha_for_llm(meta)}
 
@@ -641,6 +666,7 @@ async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, re
     # correct (so a misrouted diagnosis degrades to a no-op rather than a bent test).
     b = backends.current()
     gpt_fix = get_mapper(b.correct_test_prompt(meta), model=resolve_strong_model(),
+                         reasoning_effort=STRONG_REASONING_EFFORT,
                          stats_stage='third_stage', label='test-correct')
     user_request = f'''{format_marsha_for_llm(meta)}
 
@@ -737,7 +763,7 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
             user_message += prior_round_block(prior_findings, prior_preamble)
         findings = await run_personas(reviewers, user_message, model, 'third_stage', debug,
                                       loop='correction', guidance=backends.current().persona_guidance(),
-                                      tool_ctx=tool_ctx)
+                                      tool_ctx=tool_ctx, reasoning_effort=STRONG_REASONING_EFFORT)
         actionable = actionable_findings(findings, severities)
         if not actionable:
             if debug:

@@ -22,8 +22,9 @@ from marsha.llm import consolidate_findings
 from marsha.log import log
 from marsha.mappers import get_mapper
 from marsha.personas import (build_registry, dedup_by_location, dedup_findings,
-                             format_findings, load_editor, position_label,
-                             prior_round_block, resolve_loop_reviewers, run_personas)
+                             format_findings, load_editor, load_persona,
+                             personas_dir, position_label, prior_round_block,
+                             resolve_loop_reviewers, run_personas)
 from marsha.utils import run_subprocess
 
 # External context (a PR body + comments, or a Linear ticket) and the diff itself can be
@@ -32,20 +33,29 @@ from marsha.utils import run_subprocess
 # dropping the whole change. Both are char counts, truncated before the reviewer ever sees them.
 REVIEW_CONTEXT_LIMIT = 48_000
 REVIEW_DIFF_LIMIT = 120_000
-# A reviewer probing the codebase with the git tool needs more rounds than a single-shot
-# lookup; this bounds each reviewer's (and the conventions gate's) tool loop.
-REVIEW_MAX_TOOL_ROUNDS = 12
+# A reviewer probing a large codebase with the git tool needs many rounds to map a diff against
+# the code it touches; a tight cap cut reviewers off mid-inspection on big PRs, so they finished
+# with no findings at all. 75 lets a reviewer walk the relevant call graph and read the files it
+# actually needs before it decides. This is a cap, not a target — a small diff still finishes in
+# a few rounds — and it bounds each reviewer's, the critic's, and the conventions gate's loop.
+REVIEW_MAX_TOOL_ROUNDS = 75
+# The review runs the panel, the conventions gate, and the consolidation at 'high' reasoning —
+# above gpt-6-luna's 'medium' default — so a single pass is more reliable.
+# A fixed seed makes sampling as reproducible as the provider allows (a seed-honoring provider
+# reproduces a pass, so consensus passes below use distinct seeds).
+REVIEW_REASONING_EFFORT = 'high'
+REVIEW_SEED = 1
 # Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the conventions
 # review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;
 # without this, a reviewer re-raises rebutted findings (and, anchored on them, adds new noise).
 _REFUTE_CONFIDENCE_RULE = (
-    '\n# Handling the conventions review\n'
-    'You are re-reviewing after the conventions review pushed back on some of your findings. '
-    'For each of your findings from last round that it rebutted, DROP it. Re-raise it only if '
-    'you are very confident the rebuttal misreads the codebase, and only after re-verifying your '
-    'position with the git tool (git show / git grep). When in doubt, drop the finding. Keep the '
-    'findings it did not rebut, and add a new one only if you have verified it with the git tool. '
-    'Do not re-raise a rebutted finding on a hunch.')
+    '\n# Handling the conventions review and the critic\n'
+    'You are re-reviewing after the conventions review and the critic pushed back on some of '
+    'your findings. For each of your findings from last round that they rebutted, DROP it. '
+    'Re-raise it only if you are very confident the rebuttal misreads the codebase, and only '
+    'after re-verifying your position with the git tool (git show / git grep). When in doubt, '
+    'drop the finding. Keep the findings they did not rebut, and add a new one only if you have '
+    'verified it with the git tool. Do not re-raise a rebutted finding on a hunch.')
 
 
 def gh_available():
@@ -155,6 +165,41 @@ async def changed_files(base_ref, head='HEAD', cwd=None):
     return out
 
 
+async def gh_pr_head(num, cwd=None):
+    # The PR's head branch name and head commit OID, so a review can tell whether the local branch
+    # already contains the PR head (and any unpushed local commits on top of it).
+    rc, out, err = await _gh(
+        'pr', 'view', str(num), '--json', 'headRefName,headRefOid', cwd=cwd)
+    if rc != 0:
+        raise Exception(f'`gh pr view {num}` failed: {err or out}')
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        raise Exception(f'`gh pr view {num}` returned unparseable JSON: {e}')
+    return (data.get('headRefName') or '', data.get('headRefOid') or '')
+
+
+async def local_branch_ahead_of(cwd=None, head_ref='', head_oid=''):
+    # True when `head_oid` is an ancestor of (or equal to) the current HEAD, i.e. the checked-out
+    # branch already contains the PR head plus any unpushed local commits on top of it. The PR
+    # head branch is fetched first so `head_oid` is resolvable even when the local branch is not
+    # the PR branch. A fetch failure is non-fatal: if the object is already local the check still
+    # works, and if not, the ancestry test simply reports False and the caller checks out.
+    if head_ref:
+        await _git('fetch', 'origin', head_ref, '--quiet', cwd=cwd)
+    rc, _out, _err = await _git(
+        'merge-base', '--is-ancestor', head_oid, 'HEAD', cwd=cwd)
+    return rc == 0
+
+
+async def commits_ahead(cwd=None, base_oid=None):
+    # How many commits the current HEAD has on top of `base_oid` (0 when it contains none).
+    rc, out, _err = await _git('rev-list', '--count', f'{base_oid}..HEAD', cwd=cwd)
+    if rc != 0 or not out.strip().isdigit():
+        return 0
+    return int(out.strip())
+
+
 async def gh_pr_checkout(num, cwd=None):
     rc, out, err = await _gh('pr', 'checkout', str(num), cwd=cwd, timeout=300)
     if rc != 0:
@@ -226,23 +271,32 @@ async def gh_pr_context(num, cwd=None):
 
 
 async def linear_context(ticket, cwd=None):
-    # Pull the ticket (title/description/requirements) to seed the review.
+    # Pull the ticket to seed the review via the linear CLI (issue view, JSON).
     rc, out, err = await _run(
-        'linear', 'issue', ticket, '--output', 'json', cwd=cwd)
+        'linear', 'issue', 'view', ticket, '--json', '--no-pager', cwd=cwd)
     if rc != 0:
-        raise Exception(f'`linear issue {ticket}` failed: {err or out}')
+        raise Exception(f'`linear issue view {ticket}` failed: {err or out}')
     return out
 
 
 def parse_location(location):
-    # "path/file.py:12" -> ('path/file.py', 12); "path/file.py:12:40" drops the column;
-    # a bare "path/file.py" -> ('path/file.py', None).
+    # "path/file.py:12" -> ('path/file.py', 12). The line is the largest number in a range
+    # (":12-40" -> 40, ":9-15,28-29" -> 29) so the file-data backstop bounds-checks a range at its
+    # end; a "line:column" spec (":12:40") keeps the line (12) and drops the column; an open-ended
+    # tail (":12+", ":12-EOF") keeps the last concrete number; a bare "path/file.py" -> None line.
     if not location:
         return ('', None)
-    m = re.match(r'^(.*?):(\d+)(?::\d+)?\s*$', location.strip())
-    if m:
-        return (m.group(1).strip(), int(m.group(2)))
-    return (location.strip(), None)
+    loc = location.strip()
+    m = re.search(r':\d', loc)
+    if not m:
+        return (loc, None)
+    file_part = loc[:m.start()].strip()
+    spec = loc[m.start():]  # from the first ':<digit>' to the end
+    if re.match(r'^:\d+:', spec):
+        # "line:column" — the line is the first number; the column is dropped.
+        return (file_part, int(re.findall(r'\d+', spec)[0]))
+    nums = [int(n) for n in re.findall(r'\d+', spec)]
+    return (file_part, max(nums) if nums else None)
 
 
 def diff_new_lines(diff_text):
@@ -314,15 +368,29 @@ def build_review_message(stat_text, base_name, base_ref, context_blocks):
     return '\n\n'.join(parts)
 
 
+def order_findings(findings):
+    # Order the final set by severity, then by location.
+    order = {'MAJOR': 0, 'MINOR': 1, 'NIT': 2}
+
+    def key(f):
+        path, line = parse_location(f.get('location') or '')
+        return (order.get(f['severity'], 3), path or '',
+                -1 if line is None else line)
+
+    return sorted(findings, key=key)
+
+
 def render_findings(findings, base_ref):
     if not findings:
         return f'No findings against {base_ref}.'
-    lines = [f'Review findings against {base_ref} ({len(findings)}):', '']
+    blocks = [f'Review findings against {base_ref} ({len(findings)}):']
     for i, f in enumerate(findings, 1):
         loc = f['location'] or '(no location)'
-        lines.append(
-            f'{i}. [{f["severity"]}] {loc} - {f["desc"]}  ({f["name"]})')
-    return '\n'.join(lines)
+        block = f'{i}. [{f["severity"]}] {loc} - {f["desc"]}  ({f["name"]})'
+        if f.get('support'):
+            block += '\n\n' + f['support']
+        blocks.append(block)
+    return '\n\n'.join(blocks)
 
 
 # The conventions gate's output contract: it rebuts findings (by [Name-Label]) that violate a
@@ -339,14 +407,16 @@ Do not restate a reviewer's name. Do not add any prose outside the rebuttals.
 '''
 
 
-async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, reasoning_effort=None, seed=None):
     # The conventions gate (Norman): read the repo's real conventions (AGENTS.md/CLAUDE.md/lint
     # configs, via the git tool) and return a rebuttal preamble citing the [Name-Label]s of
     # findings that violate a convention the codebase actually follows, or '' when there are
     # none. Mirrors the editor role in the optimize loops, but it pushes back on findings.
     if not findings:
         return ''
-    gate_ctx = dataclasses.replace(tool_ctx, notes=[])
+    # The gate rebuts findings (it answers "NO OBJECTIONS" or rebuttals, not findings), so it is
+    # exempt from mandatory probing; it may still probe to check a convention.
+    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
     _name, body = load_editor('review')
     system = body + _CONVENTIONS_REBUTTAL_CONTRACT
     system += tools.tool_instructions(gate_ctx)
@@ -357,12 +427,94 @@ async def conventions_gate(findings, tool_ctx, model, base_name, base_ref, debug
         f'convention the codebase actually follows.\n\n# Findings under review\n\n'
         + format_findings(findings))
     mapper = get_mapper(system, n_results=1, stats_stage='review',
-                        model=model, label='review:conventions-gate')
+                        model=model, label='review:conventions-gate',
+                        reasoning_effort=reasoning_effort, seed=seed)
     try:
         text = await tools.run_with_tools(
             mapper, user, gate_ctx, debug=debug, max_rounds=REVIEW_MAX_TOOL_ROUNDS)
     except Exception as e:
+        # log() is a no-op unless --trace, so a failed gate would otherwise fail open (findings
+        # proceed unexamined) with no visible trace; surface it at debug verbosity.
+        if debug:
+            print(
+                f'[Review] conventions gate failed; findings proceed unexamined: {e}')
         log(f'review: conventions gate failed: {e}')
+        return ''
+    text = (text or '').strip()
+    if not text or text.upper().startswith('NO OBJECTIONS'):
+        return ''
+    return text
+
+
+# The critic's output contract. The persona (Vera) carries the role, the method, and the
+# epistemic standard; this fixes only the machine-readable form of her report. She refutes
+# findings by their [Name-Label], or reports NO OBJECTIONS when every finding survives.
+_CRITIC_REBUTTAL_CONTRACT = '''
+
+Your output is consumed mechanically, so its form is fixed; here you only report the work you have
+already done.
+
+If every finding survives your attempt to falsify it, reply with the single line, exactly:
+NO OBJECTIONS
+
+Otherwise reply with one line per finding you refuted, and nothing else, each in exactly this form:
+[Name-Label] - <one sentence stating the contradiction, citing the file:line of the counter-evidence>
+
+Use each finding's exact [Name-Label]. Do not restate a reviewer's name, do not re-raise or add
+findings, do not restate agreement, and write no prose outside those lines.
+'''
+
+
+async def critic_gate(findings, tool_ctx, model, base_name, base_ref, debug=False,
+                      reasoning_effort=None, seed=None, max_rounds=None):
+    # The critic (Vera): actively search the code for counter-evidence to each finding — a
+    # claimed-missing call/import that is present, a claimed-undefined symbol that is defined, a
+    # "corrupted" file that is actually valid — and return refutations citing the [Name-Label]s,
+    # or '' when every finding holds up. Complements conventions_gate (which only checks
+    # conventions): it pushes back on findings that are wrong for any reason.
+    if not findings:
+        return ''
+    # The critic refutes findings (it answers NO OBJECTIONS or refutations, not findings), so it
+    # is exempt from mandatory probing; it still probes with git to find counter-evidence.
+    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
+    _name, body = load_persona(os.path.join(
+        personas_dir(), '_review-critic.md'))
+    system = body + _CRITIC_REBUTTAL_CONTRACT
+    system += tools.tool_instructions(gate_ctx)
+    # The code the reviewer already retrieved, so the critic verifies against it and probes only
+    # what it still needs instead of re-deriving every finding from scratch (the per-persona call
+    # passes one reviewer's ledger, so this is exactly the code that reviewer read).
+    evidence_lines, seen = [], set()
+    for f in findings:
+        for cmd, out in (f.get('evidence') or []):
+            if (cmd, out) not in seen:
+                seen.add((cmd, out))
+                evidence_lines.append(f'$ {cmd}\n{out}')
+    evidence_block = ('\n\n# Code the reviewer already read\n\n'
+                      + '\n\n'.join(evidence_lines)
+                      if evidence_lines else '')
+    user = (
+        f'Falsify the findings below against the actual code (default branch `{base_name}`, '
+        f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
+        f'symbols as whole words, with no language-specific definition keyword assumed, and read '
+        f'the cited lines with `git show HEAD:<path>`. Use the code the reviewer already read '
+        f'below as your starting point and probe only what you still need. Report, in the fixed '
+        f'form, only the findings the code plainly contradicts.\n\n# Findings under review\n\n'
+        + format_findings(findings) + evidence_block)
+    mapper = get_mapper(system, n_results=1, stats_stage='review',
+                        model=model, label='review:critic',
+                        reasoning_effort=reasoning_effort, seed=seed)
+    try:
+        text = await tools.run_with_tools(
+            mapper, user, gate_ctx, debug=debug,
+            max_rounds=max_rounds or REVIEW_MAX_TOOL_ROUNDS)
+    except Exception as e:
+        # log() is a no-op unless --trace, so a failed critic would otherwise silently skip the
+        # anti-hallucination backstop with no visible trace; surface it at debug verbosity.
+        if debug:
+            print(
+                f'[Review] critic failed; findings proceed without critique: {e}')
+        log(f'review: critic failed: {e}')
         return ''
     text = (text or '').strip()
     if not text or text.upper().startswith('NO OBJECTIONS'):
@@ -666,6 +818,387 @@ def _same_concern(finding, prior):
     return len(ta & tb) / len(ta | tb) >= 0.4
 
 
+def _corroborated(findings, passes, threshold):
+    # Keep a finding only if an equivalent concern (same file + a shared identifier or a close
+    # description) appears in at least `threshold` of the independent `passes` (one findings-list
+    # per consensus run). A real defect is re-found across independent runs; a sampling fluke is
+    # not, so requiring corroboration makes the panel's output stable even when the model's
+    # per-run recall varies. Near-duplicate survivors are merged downstream (dedup_by_location +
+    # consolidation), so this only filters, it does not merge.
+    kept = []
+    for f in findings:
+        count = 0
+        for p in passes:
+            priors = [{'path': parse_location(pf.get('location') or '')[0],
+                       'desc': pf.get('desc') or ''} for pf in p]
+            if any(_same_concern(f, pr) for pr in priors):
+                count += 1
+        if count >= threshold:
+            kept.append(f)
+    return kept
+
+
+# A code identifier, optionally a dotted member chain (e.g. `svc.foo.bar`). Used to pull the
+# concrete symbols a finding leans on so the evidence gate can check them against real output.
+_ANCHOR_TOKEN = re.compile(
+    r'[A-Za-z_$][A-Za-z0-9_]*(?:\.[A-Za-z_$][A-Za-z0-9_]*)*')
+
+# Cached per (cwd, base_ref): the basenames of every file at HEAD OR the base, so the anchor set
+# can tell a filename (a token naming a real file in the repo) from a dotted code symbol by
+# probing the repo instead of guessing at extensions (which would miss names like archive.tar.gz
+# or extensionless files). The base is included too: a finding may be about a file the change
+# deleted (present at the base, absent at HEAD), and _file_info resolves that against the base.
+_file_basenames_cache = {}
+
+
+async def _repo_file_basenames(cwd, base_ref):
+    # The basenames of every file at HEAD or the base (one `git ls-tree` per ref, cached per
+    # (cwd, base_ref)). A token in this set is a file the reviewer could open, not a code symbol.
+    key = (cwd, base_ref)
+    if key in _file_basenames_cache:
+        return _file_basenames_cache[key]
+    basenames = set()
+    for ref in ('HEAD', base_ref):
+        rc, out, _err = await _git('ls-tree', '-r', '--name-only', ref, cwd=cwd)
+        if rc == 0:
+            basenames.update(ln.rsplit('/', 1)[-1]
+                             for ln in out.splitlines() if ln)
+    _file_basenames_cache[key] = basenames
+    return basenames
+
+
+def _is_distinctive(tok):
+    # A code-like token rather than an English word: long enough and shaped like an identifier —
+    # it carries an underscore, a dotted member, or a camelCase hump. Anchoring the check on these
+    # (not on common words, which appear in any retrieved code) is what makes the gate discriminative.
+    return (len(tok) >= 4
+            and ('_' in tok or '.' in tok
+                 or re.search(r'[a-z][A-Z]', tok) is not None))
+
+
+def _distinctive_anchors(finding, file_basenames):
+    # The code-like symbols a finding leans on, drawn from its headline and support (NOT its
+    # location: the cited path is checked separately as "the file was opened", and letting it feed
+    # the symbol set would ground a finding merely because the reviewer read the cited file, even
+    # when none of the symbols the finding actually claims were in that file). A token that names
+    # a real file in the repo (file_basenames) is excluded for the same reason. For the finding to
+    # count as grounded, at least one of these must appear in the git output its reviewer actually
+    # retrieved. An empty set means the check falls back to the cited file having been opened.
+    text = ' '.join(
+        filter(None, [finding.get('desc'), finding.get('support')]))
+    anchors = set()
+    for tok in _ANCHOR_TOKEN.findall(text):
+        if _is_distinctive(tok) and tok not in file_basenames:
+            anchors.add(tok)
+            for part in tok.split('.'):
+                if _is_distinctive(part) and part not in file_basenames:
+                    anchors.add(part)
+    return anchors
+
+
+def _location_file(location):
+    # A single file path from a finding's location, or None when it is not a clean single file.
+    # The file is everything before a trailing line spec — a ':' followed by a digit, whatever
+    # follows it (":12", ":12:40", ":12-40", ":1-EOF", ":12+", ":9-15,28-29"). Returns None for a
+    # multi-file location ("a.ts + b.ts") or anything with a space: those cannot be checked as one
+    # file, so the file-data backstop must not treat the raw string as a filename (doing so wrongly
+    # "fabricates" a nonexistent path and drops a real finding).
+    if not location or ' + ' in location:
+        return None
+    loc = location.strip()
+    if ' ' in loc:
+        return None
+    m = re.match(r'^(.*?):\d.*$', loc)
+    if m:
+        return m.group(1).strip()
+    return loc
+
+
+async def _git_line_count(ref, path, cwd):
+    # The line count of <ref>:<path>, streamed in chunks and counted by newline bytes so a large
+    # cited file is never buffered whole (and held as a list of lines) just to validate a citation's
+    # line bound. Matches str.splitlines(): a final line without a trailing newline still counts,
+    # and blank lines count. Returns None if the object cannot be read.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'show', f'{ref}:{path}', cwd=cwd,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, OSError):
+        return None
+    count = 0
+    last = None
+    try:
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
+            count += chunk.count(b'\n')
+            last = chunk[-1:]
+        await proc.wait()
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    if last is not None and last != b'\n':
+        count += 1
+    return count
+
+
+async def _file_info(path, cwd, base_ref, cache):
+    # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
+    # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
+    # path so several findings citing the same file cost one probe each. A deleted file (present
+    # at base, absent at HEAD) still resolves against the base.
+    if path in cache:
+        return cache[path]
+    exists = False
+    line_count = None
+    for ref in ('HEAD', base_ref):
+        rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
+        if rc != 0:
+            continue
+        exists = True
+        # Stream the line count rather than buffering the whole blob and splitting it, so a large
+        # cited file is not held in memory just to validate a citation's line bound.
+        line_count = await _git_line_count(ref, path, cwd)
+        break
+    cache[path] = (exists, line_count)
+    return cache[path]
+
+
+# A finding may assert that a symbol does not exist ("is undefined", "not defined", "no such
+# function", ...). That is the one claim the gate can falsify without interpreting the code: if
+# the asserted-absent symbol is actually present in the tree, the finding's central claim is
+# contradicted. The cues are limited to unambiguous existence negations — not usage claims such as
+# "never called" (a present symbol does not refute those), and not the broad "missing" (which
+# usually attaches to a non-symbol concern). Findings are written in English whatever the language
+# under review, so English cues are language-agnostic.
+_EXISTENCE_ABSENCE_RE = re.compile(
+    r'(does\s+not\s+exist|do\s+not\s+exist|doesn\'t\s+exist'
+    r'|is\s+undefined|is\s+not\s+defined|is\s+not\s+declared|is\s+not\s+present'
+    r'|are\s+not\s+defined|are\s+not\s+declared'
+    r'|no\s+such\s+(?:function|method|symbol|variable|attribute|property|field'
+    r'|class|type|identifier|member|element|entry|key|constant)'
+    r'|non[-\s]?existent|has\s+no\s+definition|no\s+definition'
+    r'|not\s+defined\b|not\s+declared\b'
+    r'|returns?\s+no\s+matches|cannot\s+(?:be\s+)?found'
+    r'|has\s+no\b|without\b|lacks?\b)',
+    re.I)
+
+
+def _asserted_absent_symbols(finding):
+    # The distinctive symbols a finding asserts do not exist. For each existence-absence cue the
+    # accused symbol is the distinctive token nearest to it (a few characters either side), so
+    # "X is not defined, though Y is defined" accuses only X and a co-cited, genuinely-present
+    # symbol is never mistaken for the one the finding claims is absent.
+    text = ' '.join(
+        filter(None, [finding.get('desc'), finding.get('support')]))
+    absent = set()
+    for cue in _EXISTENCE_ABSENCE_RE.finditer(text):
+        lo, hi = max(0, cue.start() - 40), min(len(text), cue.end() + 40)
+        nearest, nearest_dist = None, None
+        for tok in _ANCHOR_TOKEN.finditer(text, lo, hi):
+            if not _is_distinctive(tok.group(0)):
+                continue
+            if tok.start() < cue.end() and cue.start() < tok.end():
+                dist = 0
+            else:
+                dist = min(abs(cue.start() - tok.end()),
+                           abs(cue.end() - tok.start()))
+            if nearest_dist is None or dist < nearest_dist:
+                nearest, nearest_dist = tok.group(0), dist
+        if nearest is not None and nearest_dist <= 40:
+            absent.add(nearest)
+            for part in nearest.split('.'):
+                if _is_distinctive(part):
+                    absent.add(part)
+    return absent
+
+
+def _symbol_in_text(text, symbol):
+    # Whether `symbol` appears in `text` as a whole word (not a substring of a longer identifier),
+    # so a shorter invented name cannot ground itself on a longer one the reviewer actually read
+    # (e.g. `phantomHand` on `phantomHandler`). Dotted names match as a whole token.
+    return re.search(rf'\b{re.escape(symbol)}\b', text) is not None
+
+
+async def _symbol_present(symbol, cwd, cache):
+    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word fixed string (no
+    # language-specific keyword, so any language works). A dotted name is grepped in full, so an
+    # invented chain such as svc.foo.bar is "present" only if that exact chain is, never on the
+    # strength of its `bar` leaf alone. Pinned to HEAD rather than the working tree, so uncommitted
+    # changes — which a local review excludes — cannot falsify a finding about the committed code.
+    # Returns True (a match), False (a clean no-match), or None (the grep itself failed — an error
+    # is not proof of absence). Cached per symbol.
+    if symbol in cache:
+        return cache[symbol]
+    rc, _out, _err = await _git('grep', '-F', '-w', symbol, 'HEAD', cwd=cwd)
+    present = True if rc == 0 else (False if rc == 1 else None)
+    cache[symbol] = present
+    return present
+
+
+def _path_token_match(command_scope, file_path):
+    # Whether `file_path` appears in the command text as a whole path component, not as a substring
+    # of a longer name. The commands are split on whitespace and the ':' ref separator (so
+    # `git show HEAD:src/a.py` yields the path `src/a.py` as a token). A full path (one with a
+    # directory) matches only on the exact path, so a command that read vendor/foo.py cannot ground
+    # a cite of src/foo.py; a bare filename (no directory) also matches any token whose final
+    # component is that name, since the cite alone cannot say which directory it meant. This is
+    # what stops a command that read a.txt.backup from grounding a finding that cites a.txt.
+    bare = '/' not in file_path
+    for tok in re.split(r'[\s:]+', command_scope):
+        if tok == file_path or (bare and tok.rsplit('/', 1)[-1] == file_path):
+            return True
+    return False
+
+
+def _opened_command_scope(evidence):
+    # The command text that establishes a file was OPENED (git show, git cat-file, a pathspec).
+    # A `git grep` is a SEARCH, not a file open: even with a pathspec it returns only matching
+    # lines (or nothing at all on a clean no-match), so a location-only finding must be grounded on
+    # a `git show`, not on a grep that read no code from the cited file.
+    lines = []
+    for cmd, _out in evidence:
+        if 'grep' in cmd.split():
+            continue  # a search, not a file open
+        lines.append(cmd)
+    return '\n'.join(lines)
+
+
+async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation=False):
+    # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
+    # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
+    # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
+    # a reviewer to run a git command before it may report, so a well-formed finding carries an
+    # evidence ledger; this gate checks each finding against the code ITS reviewer actually read:
+    #   (primary) at least one symbol it names — or, when it names no symbol, the file it cites —
+    #     must appear in that reviewer's git output. A finding whose symbols were never read is a
+    #     guess, dropped even though the file data is real. A finding with no evidence at all (the
+    #     loop gave up forcing a probe) is unverified and dropped.
+    #   (backstop) a cited file must exist in the repo and a cited line be within its length, which
+    #     drops outright fabrications (a nonexistent path, or a line past the end).
+    #   (contradiction) a finding that asserts a symbol is undefined / does not exist is dropped
+    #     when that symbol is present in the reviewed tree — the claim and the code cannot both be
+    #     true. The symbol is searched as a whole-word literal, with no language-specific keyword,
+    #     so the check holds for any language.
+    #   (fabricated subject) the "at least one" primary check passes a finding that co-cites a real
+    #     symbol next to an invented one. If it names an identifier that appears in neither the
+    #     reviewer's git output nor the reviewed tree, that identifier is a fabrication and the
+    #     finding is dropped. Dotted names are matched in full (an invented chain cannot ground on
+    #     its leaf). A real filename is never an anchor (the repo's file list is excluded up front),
+    #     so no command-text exemption is needed — and one would be wrong, since a `git grep <name>`
+    #     query is a search term, not an opened file; asserted-absent symbols are exempt too.
+    # "At least one" (not "all") keeps an absence finding ("no maxItems") alive on the schema the
+    # reviewer read, even though the missing symbol itself is absent.
+    # With post_consolidation=True the finding has already been grounded by the reviewer (the gate
+    # ran on the original); the consolidator merely REWRITTEN it. So the two "did the reviewer read
+    # this" checks (primary symbol-in-evidence and file-never-opened) are skipped — the rewrite
+    # legitimately rephrases and its symbols need not literally match the reviewer's output — while
+    # the fabrication checks (no-evidence, backstop, invented subject, contradiction) still run so a
+    # symbol the consolidator invented is still dropped.
+    if not findings:
+        return findings
+    file_cache = {}
+    # Shared across findings (like file_cache): whether a symbol is present in the tree is a
+    # property of the symbol, not the finding, so the same symbol is grepped once, not once per
+    # finding that names it.
+    symbol_cache = {}
+    file_basenames = await _repo_file_basenames(cwd, base_ref)
+    kept = []
+    for f in findings:
+        location = f.get('location') or ''
+        _path, line = parse_location(location)
+        file_path = _location_file(location)
+        evidence = f.get('evidence') or []
+        anchors = _distinctive_anchors(f, file_basenames)
+        # The symbol check matches against the git OUTPUT only, never the command text: a reviewer
+        # can grep for a symbol that does not exist (git grep returns nothing), and counting the
+        # query string as evidence would ground a fabricated symbol in its own lookup. A symbol is
+        # "read" only if it appears in code the reviewer actually retrieved.
+        output_scope = '\n'.join(out for _cmd, out in evidence)
+        # The file-opened check (for a finding that names no symbol) matches against the COMMAND
+        # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output.
+        # `git grep` commands are excluded from that scope — a search is not a file open, and a
+        # no-match grep read no code from its pathspec — so a location-only finding must be
+        # grounded on a `git show`, not on a grep.
+        command_scope = _opened_command_scope(evidence)
+        ok, reason = True, ''
+        if not evidence:
+            ok, reason = False, 'no git verification: reported without reading the code'
+        elif not post_consolidation and anchors:
+            if not any(_symbol_in_text(output_scope, a) for a in anchors):
+                ok, reason = False, 'none of its named symbols appear in the reviewer\'s git evidence'
+        elif not post_consolidation and file_path:
+            if not _path_token_match(command_scope, file_path):
+                ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
+        elif not post_consolidation:
+            # A finding that names no symbol and cites no file references nothing we can check
+            # against the code the reviewer read, so any nonempty evidence (even an unrelated
+            # `git status`) would ground it; drop it as ungrounded.
+            ok, reason = False, (
+                'names no symbol and cites no file, so it cannot be grounded in the code read')
+        if ok and file_path:
+            exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
+            if not exists:
+                ok, reason = False, f'cited file {file_path} does not exist at HEAD or {base_ref}'
+            elif line is not None and line_count is None:
+                # The file exists but its line count could not be read, so the cited line cannot
+                # be verified against the file's end; drop it rather than let an out-of-range
+                # citation pass an unverified backstop.
+                ok, reason = False, (f'cited line {line} could not be verified: the line count '
+                                     f'of {file_path} could not be determined')
+            elif line is not None and (line < 1 or line > line_count):
+                # Citations are 1-based, so a line below 1 (a 0-based :0) is invalid as well as
+                # one past the end of the file.
+                ok, reason = False, (f'cited line {line} is not a valid line of {file_path} '
+                                     f'({line_count} lines at HEAD; lines are 1-based)')
+        if ok and anchors:
+            # (fabricated subject) a finding may co-cite a real, grounded symbol next to an
+            # invented one; the "at least one" primary check above passes on the real one. If any
+            # identifier it names is in neither the code the reviewer read nor the reviewed tree,
+            # that identifier is a fabrication and the finding is dropped. Dotted names are checked
+            # in full (an invented chain cannot ground on its leaf). A real filename is never an
+            # anchor to begin with (_distinctive_anchors excludes the repo's file list), so there is
+            # no command-text exemption here — one would be dangerous, since a `git grep <name>`
+            # argument is a search term, not an opened file, and would let a grep'd-but-absent
+            # invented name evade the check. Asserted-absent symbols are exempt because an absence
+            # finding legitimately names the missing symbol (see _asserted_absent_symbols).
+            absent = _asserted_absent_symbols(f)
+            for a in sorted(anchors):
+                if a in absent:
+                    continue
+                if _symbol_in_text(output_scope, a):
+                    continue
+                # A name is a fabrication only when it is definitively absent from the tree (a
+                # clean no-match grep) and absent from the evidence; a grep error (None) cannot
+                # prove absence, so it does not drop the finding.
+                if await _symbol_present(a, cwd, symbol_cache) is not False:
+                    continue
+                ok, reason = (False,
+                              f'names {a}, which appears in neither the reviewer\'s git '
+                              f'evidence nor the reviewed tree')
+                break
+        if ok:
+            # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
+            # present in the tree: the claim is falsified, so the finding is dropped. Only a
+            # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
+            # does not drop the finding.
+            for symbol in _asserted_absent_symbols(f):
+                if await _symbol_present(symbol, cwd, symbol_cache) is True:
+                    ok, reason = (False,
+                                  f'asserts {symbol} is undefined or absent, but '
+                                  f'it is present in the reviewed tree')
+                    break
+        if ok:
+            kept.append(f)
+        elif debug:
+            print(f'[Review] evidence gate dropped '
+                  f'[{f.get("name")}-{f.get("label")}] {f.get("location")}: {reason}')
+    return kept
+
+
 _BODY_FINDING_RE = re.compile(
     r'^-\s+\*\*\[([A-Z]+\d+)\]\s+\w+\s*\*\*\s*`([^`]*)`\s*:\s*(.+)$', re.M)
 
@@ -787,6 +1320,8 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
     for f in findings:
         path, line = parse_location(f['location'])
         body = f"**[{f['label']}] {f['severity']}**: {f['desc']}"
+        if f.get('support'):
+            body += f"\n\n{f['support']}"
         if f['label'] in threads:
             replies.append((threads[f['label']]['root_id'], body))
         elif path and line is not None and line in touched.get(path, set()):
@@ -794,14 +1329,20 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
                 {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
         else:
             loc = f['location'] or 'n/a'
-            body_findings.append(
-                f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}")
+            item = f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}"
+            if f.get('support'):
+                # A blank line before the support would end the list item (CommonMark), detaching
+                # it into a standalone paragraph; indent it under the bullet instead so it stays
+                # part of the item.
+                item += '\n' + '\n'.join(
+                    '  ' + ln for ln in f['support'].split('\n'))
+            body_findings.append(item)
     if new_inline or body_findings:
         review = {'event': 'COMMENT', 'comments': new_inline}
         if body_findings:
             review['body'] = (
                 'Marsha review — findings that could not be placed on a diff line:\n\n'
-                + '\n'.join(body_findings))
+                + '\n\n'.join(body_findings))
         payload = json.dumps(review)
         rc, out, err = await _gh(
             'api', f'repos/{repo}/pulls/{pr_num}/reviews',
@@ -843,6 +1384,116 @@ async def post_review(pr_num, findings, diff_text, cwd=None, active_numbers=None
         f'{closed} threads resolved.')
 
 
+async def _per_persona_critique(reviewers, findings, message, model, base_name, base_ref,
+                                guidance, tool_ctx, prior_labels_by_number,
+                                reasoning_effort, seed, debug):
+    # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
+    # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
+    # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
+    # caught here by an LLM that actually reads the code, before the findings are pooled. A pooled
+    # critic dilutes its attention across the whole panel; per-reviewer it holds each reviewer to
+    # its own claims.
+    by_reviewer = {}
+    for f in findings:
+        by_reviewer.setdefault(f['name'], []).append(f)
+    specs = {s[0]: s for s in reviewers}
+
+    async def handle(name, group):
+        refutation = await critic_gate(
+            group, tool_ctx, model, base_name, base_ref, debug=debug,
+            reasoning_effort=reasoning_effort, seed=seed)
+        if not refutation:
+            return group
+        if debug:
+            print(f'[Review] critic examined {name}\'s finding(s):')
+            for gf in group:
+                print(f'  [examined] [{name}-{gf.get("label")}] '
+                      f'{gf.get("location")}: {gf.get("desc")}')
+            print(f'  [refuted] {refutation.strip()}')
+        spec = specs[name]
+        rev_message = (message + prior_round_block(group, refutation, 'the critic')
+                       + _REFUTE_CONFIDENCE_RULE)
+        # A fresh ledger for the revision so it re-verifies rather than trusting round 0.
+        rev_ctx = dataclasses.replace(
+            tool_ctx, notes=list(tool_ctx.notes), evidence=[])
+        revised = await run_personas(
+            [spec], rev_message, model, 'review', debug=debug, loop='review',
+            guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
+            prior_block_by_number=None, prior_labels_by_number=prior_labels_by_number,
+            reasoning_effort=reasoning_effort, seed=seed)
+        # A finding the reviewer verified in round 0 but merely re-states in the revision would
+        # otherwise sit on an empty revision-round ledger; merge the code it already read so the
+        # evidence gate still grounds it.
+        base_evidence = list(group[0].get('evidence') or [])
+        for f in revised:
+            f['evidence'] = list(f.get('evidence') or []) + base_evidence
+        return revised
+    results = await asyncio.gather(*(handle(n, g) for n, g in by_reviewer.items()))
+    return [f for sub in results for f in sub]
+
+
+async def _review_pass(reviewers, message, model, base_name, base_ref, rounds, guidance, tool_ctx, prior_block_by_number, prior_labels_by_number, reasoning_effort, seed, debug):
+    # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
+    # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
+    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
+    # same-location-collapsed findings (before semantic consolidation) — ready for consensus
+    # voting across passes, or a single-pass consolidation.
+    prior_findings, prior_preamble = [], ''
+    actionable = []
+    evidence_by_number = {}
+    for i in range(rounds + 1):
+        user_message = message
+        if i > 0:
+            user_message += prior_round_block(
+                prior_findings, prior_preamble, 'the conventions review')
+            user_message += _REFUTE_CONFIDENCE_RULE
+        findings = await run_personas(
+            reviewers, user_message, model, 'review',
+            debug=debug, loop='review', guidance=guidance,
+            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
+            prior_block_by_number=prior_block_by_number,
+            prior_labels_by_number=prior_labels_by_number,
+            reasoning_effort=reasoning_effort, seed=seed)
+        # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
+        # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
+        # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already
+        # revising against push-back.
+        if i == 0 and findings:
+            findings = await _per_persona_critique(
+                reviewers, findings, message, model, base_name, base_ref, guidance,
+                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug)
+        # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
+        # verifies with git in an early round and may re-state the finding in a later round without
+        # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
+        # just the one that emitted a given finding. The gate must judge a finding against the code
+        # the reviewer actually read over the whole pass.
+        for f in findings:
+            evidence_by_number.setdefault(
+                _label_reviewer_number(f['label']), []).extend(f.get('evidence') or [])
+        actionable = dedup_findings(findings)
+        if i == rounds or not actionable:
+            break
+        # The conventions gate rebuts findings that violate a real convention; the panel revises
+        # against that push-back. The critic no longer runs pooled here — it critiques each
+        # reviewer in isolation (above), before the findings are pooled.
+        conv_preamble = await conventions_gate(
+            actionable, tool_ctx, model, base_name, base_ref, debug,
+            reasoning_effort=reasoning_effort, seed=seed)
+        if not conv_preamble:
+            if debug:
+                print('[Review] conventions gate found no issues; converged')
+            break
+        if debug:
+            n_conv = conv_preamble.count('\n') + 1
+            print(f'[Review] conventions gate ({n_conv}) rebutted findings; '
+                  f'starting round {i + 2}')
+        prior_findings, prior_preamble = actionable, conv_preamble
+    for f in actionable:
+        f['evidence'] = evidence_by_number.get(
+            _label_reviewer_number(f['label']), list(f.get('evidence') or []))
+    return dedup_by_location(actionable)
+
+
 async def run_review(args):
     if args.post_review and args.pr is None:
         raise Exception(
@@ -851,17 +1502,40 @@ async def run_review(args):
         raise Exception('--pr requires the `gh` CLI to be on PATH.')
     if args.linear is not None and not linear_available():
         raise Exception('--linear requires the `linear` CLI to be on PATH.')
+    if args.consensus and args.consensus < 2:
+        # 0 is the documented single-pass default; 1 and negatives are not valid, so reject them
+        # rather than silently running a single pass when the user asked for a consensus mode.
+        raise Exception(
+            f'--consensus must be 0 (a single pass) or at least 2; got {args.consensus}.')
 
     cwd = os.getcwd()
     base_name, base_ref = await default_branch(cwd)
     if args.pr is not None:
-        if not await working_tree_clean(cwd):
-            raise Exception(
-                'Cannot review a PR: the working tree has uncommitted changes, and '
-                '`gh pr checkout` needs a clean tree. Commit or stash your changes, '
-                'or run `marsha review` without --pr.')
-        await gh_pr_checkout(args.pr, cwd)
-        print(f'Checked out PR #{args.pr}; reviewing it against {base_name}.')
+        head_ref, head_oid = await gh_pr_head(args.pr, cwd)
+        # By default, if the checked-out branch already contains the PR head (and any unpushed
+        # local commits on top of it), review the local commits as-is: checking the PR out would
+        # reset to the remote head and drop local fixes made since the last review. --remote forces
+        # the remote head.
+        review_local = (not args.remote and bool(head_oid)
+                        and await local_branch_ahead_of(cwd, head_ref, head_oid))
+        if review_local:
+            ahead = await commits_ahead(cwd, head_oid)
+            where = (f'{ahead} commit(s) ahead of PR #{args.pr} '
+                     f'(head {head_oid[:7]})' if ahead
+                     else f'matching PR #{args.pr} head')
+            note = ('' if await working_tree_clean(cwd)
+                    else ' (uncommitted changes are not included)')
+            print(
+                f'Reviewing the local branch ({where}) against {base_name}{note}.')
+        else:
+            if not await working_tree_clean(cwd):
+                raise Exception(
+                    'Cannot review a PR: the working tree has uncommitted changes, and '
+                    '`gh pr checkout` needs a clean tree. Commit or stash your changes, '
+                    'or run `marsha review` without --pr.')
+            await gh_pr_checkout(args.pr, cwd)
+            print(
+                f'Checked out PR #{args.pr}; reviewing it against {base_name}.')
 
     stat_text = await branch_diff_stat(base_ref, 'HEAD', cwd)
     if not stat_text.strip():
@@ -898,7 +1572,6 @@ async def run_review(args):
 
     model = resolve_model()
     guidance = backends.current().persona_guidance()
-    tool_ctx = tools.ToolContext(phase='review', workdir=cwd, notes=[])
     if args.debug:
         names = ', '.join(name for name, _, _ in reviewers)
         print(f'Reviewing against {base_name} with personas: {names}')
@@ -917,38 +1590,55 @@ async def run_review(args):
             prior_block_by_number[num] = _reviewer_prior_block(num, prior)
             prior_labels_by_number[num] = {f['label'] for f in prior}
 
-    # Review loop: the panel proposes findings; the conventions gate rebuts the ones that
-    # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges
-    # when the gate is quiet, the panel is clean, or the round budget is exhausted.
     rounds = max(0, args.review_rounds)
-    prior_findings, prior_preamble = [], ''
-    actionable = []
-    for i in range(rounds + 1):
-        user_message = message
-        if i > 0:
-            user_message += prior_round_block(
-                prior_findings, prior_preamble, 'conventions review')
-            user_message += _REFUTE_CONFIDENCE_RULE
-        findings = await run_personas(
-            reviewers, user_message, model, 'review',
-            debug=args.debug, loop='review', guidance=guidance,
-            tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
-            prior_block_by_number=prior_block_by_number,
-            prior_labels_by_number=prior_labels_by_number)
-        actionable = dedup_findings(findings)
-        if i == rounds or not actionable:
-            break
-        preamble = await conventions_gate(
-            actionable, tool_ctx, model, base_name, base_ref, args.debug)
-        if not preamble:
-            if args.debug:
-                print(
-                    '[Review] conventions gate found no convention violations; converged')
-            break
+    consensus_n = max(0, args.consensus or 0)
+    reasoning_effort = args.reasoning_effort or REVIEW_REASONING_EFFORT
+    if consensus_n > 1:
+        # Consensus: run the full panel+gate pass N times independently and keep only the findings
+        # a majority of the runs corroborate. This stabilizes the output against the model's
+        # per-run variance (which gpt-5-mini cannot be made deterministic): a real defect is
+        # re-found across runs, a sampling fluke is not. Each pass uses a fresh scratchpad and a
+        # distinct seed so a seed-honoring provider samples independently.
+        passes = []
+        for i in range(consensus_n):
+            pass_ctx = tools.ToolContext(
+                phase='review', workdir=cwd, notes=[], require_evidence=True)
+            passes.append(await _review_pass(
+                reviewers, message, model, base_name, base_ref, rounds, guidance,
+                pass_ctx, prior_block_by_number, prior_labels_by_number,
+                reasoning_effort, REVIEW_SEED + i, args.debug))
+        threshold = consensus_n // 2 + 1
+        union = dedup_findings([f for p in passes for f in p])
+        actionable = _corroborated(union, passes, threshold)
+        # A corroborated finding is raised by several independent passes, each with its OWN git
+        # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
+        # for the same (name, label) so the evidence gate sees all the code the panel actually read.
+        evidence_by_key = {}
+        for p in passes:
+            for pf in p:
+                evidence_by_key.setdefault(
+                    (pf['name'], pf['label']), []).extend(pf.get('evidence') or [])
+        for f in actionable:
+            f['evidence'] = evidence_by_key.get(
+                (f['name'], f['label']), list(f.get('evidence') or []))
         if args.debug:
-            print(
-                f'[Review] conventions gate rebutted findings; starting round {i + 2}')
-        prior_findings, prior_preamble = actionable, preamble
+            print(f'[Review] consensus over {consensus_n} passes '
+                  f'(threshold {threshold}): {len(union)} candidate(s) -> '
+                  f'{len(actionable)} corroborated')
+    else:
+        tool_ctx = tools.ToolContext(
+            phase='review', workdir=cwd, notes=[], require_evidence=True)
+        actionable = await _review_pass(
+            reviewers, message, model, base_name, base_ref, rounds, guidance,
+            tool_ctx, prior_block_by_number, prior_labels_by_number,
+            reasoning_effort, REVIEW_SEED, args.debug)
+
+    # Deterministic anti-hallucination gate (before consolidation): drop a finding whose concrete
+    # references do not hold up — a named symbol or cited file the reviewer never actually read,
+    # a finding reported without any probe, a file that does not exist, or a line past the end of
+    # the file. Runs on both the single-pass and consensus paths, so the consolidator only ever
+    # sees grounded findings.
+    actionable = await evidence_gate(actionable, cwd, base_ref, debug=args.debug)
 
     if actionable:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
@@ -958,6 +1648,13 @@ async def run_review(args):
         # nothing: allow_empty lets it reduce the list to zero, which a budget-driven compaction
         # must never do.
         actionable = dedup_by_location(actionable)
+        # The consolidation re-emits one-line findings (it drops non-defects and merges dupes), so
+        # the reviewer's supporting paragraphs are re-attached by (name, label) afterwards: the
+        # evidence was gathered by the reviewer with the git tools and should survive reduction.
+        support_by_label = {(f['name'], f['label']): f.get('support', '')
+                            for f in actionable}
+        evidence_by_label = {(f['name'], f['label']): list(f.get('evidence') or [])
+                             for f in actionable}
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
@@ -970,9 +1667,24 @@ async def run_review(args):
             context += _prior_conversations_block(
                 convs, {f['label'] for f in actionable})
         consolidated = await consolidate_findings(
-            context, actionable, model, debug=args.debug, allow_empty=True)
+            context, actionable, model, debug=args.debug, allow_empty=True,
+            reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
         actionable = dedup_findings(consolidated)
+        # The consolidator rewrites each finding's description and is only guaranteed to preserve
+        # its [Name-Label] — so it can name a symbol the reviewers never read (an invented
+        # function, say). Re-attach the reviewer's support and git evidence by (name, label), then
+        # re-run the deterministic gate on the REWRITTEN findings so a post-consolidation
+        # hallucination is dropped instead of posted.
+        for f in actionable:
+            key = (f['name'], f['label'])
+            f['support'] = support_by_label.get(key, '')
+            f['evidence'] = evidence_by_label.get(key, [])
+        actionable = await evidence_gate(
+            actionable, cwd, base_ref, debug=args.debug, post_consolidation=True)
+        actionable = dedup_findings(actionable)
         actionable = dedup_by_location(actionable)
+    # Order the final set (severity, then location) before printing or posting.
+    actionable = order_findings(actionable)
     print(render_findings(actionable, base_name))
 
     if args.post_review:

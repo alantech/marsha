@@ -18,6 +18,8 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 # only the max OUTPUT tokens). Keyed by longest-prefix model name.
 _KNOWN_CONTEXT = {
     'claude': 200_000,
+    'gpt-6': 1_050_000,
+    'gpt-5.6': 1_050_000,
     'gpt-5': 400_000,
     'o1': 200_000,
     'o3': 200_000,

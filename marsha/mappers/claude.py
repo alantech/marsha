@@ -90,13 +90,14 @@ async def retry_message_create(query, model=None, max_tries=3, label=None):
 class ClaudeMapper(BaseMapper):
     """Anthropic (Claude)-based mapper class"""
 
-    def __init__(self, system, model=None, max_tokens=None, reasoning_effort=None, max_retries=3, n_results=1, stats_stage=None, label=None):
+    def __init__(self, system, model=None, max_tokens=None, reasoning_effort=None, seed=None, max_retries=3, n_results=1, stats_stage=None, label=None):
         BaseMapper.__init__(self)
         self.system = system
         self.model = model
         self.max_tokens = max_tokens
         # Anthropic has no reasoning_effort; accepted for signature parity
         self.reasoning_effort = reasoning_effort
+        self.seed = seed
         self.max_retries = max_retries
         self.n_results = n_results
         self.stats_stage = stats_stage
@@ -113,6 +114,9 @@ class ClaudeMapper(BaseMapper):
         }
         if self.max_tokens is not None:
             query_obj['max_tokens'] = self.max_tokens
+        if self.seed is not None:
+            # Best-effort sampling reproducibility (Anthropic honors seed).
+            query_obj['seed'] = self.seed
         # Anthropic has no n parameter, so fan out one request per result
         if self.n_results > 1:
             reses = list(await asyncio.gather(*[

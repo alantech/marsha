@@ -2,6 +2,9 @@ from marsha.utils import write_file
 
 # Price per 1024 tokens (input, output), matched by longest model name prefix
 PRICING_MODEL = {
+    'gpt-6-luna': (0.00009765625, 0.00048828125),
+    'gpt-6-sol': (0.001953125, 0.009765625),
+    'gpt-5.6-terra': (0.001953125, 0.01171875),
     'gpt-5-mini': (0.000244140625, 0.001953125),
     'gpt-5-nano': (0.000048828125, 0.000390625),
     'gpt-5': (0.001220703125, 0.009765625),

@@ -60,6 +60,18 @@ def test_extract_single_command():
     assert pending.malformed is False
 
 
+def test_extract_page_prefixed_command():
+    # A `PAGE=<n>` env-var prefix selects a page of a paged command's output; it is stripped
+    # from the name/args and surfaced on pending.page. A plain command has page None.
+    pending = tools.extract_pending_command(DOC + '\n$ PAGE=2 git show HEAD:src/x.py\n')
+    assert pending.name == 'git'
+    assert pending.args == ['show', 'HEAD:src/x.py']
+    assert pending.page == 2
+    assert pending.malformed is False
+    plain = tools.extract_pending_command(DOC + '\n$ git show HEAD:src/x.py\n')
+    assert plain.name == 'git' and plain.page is None
+
+
 def test_extract_only_last_nonempty_line_counts():
     # A $ command in the middle of the response is reasoning, not a command; only
     # the final non-empty line is read as a command.
@@ -111,12 +123,32 @@ def test_execute_known_command_runs_handler():
     h.assert_awaited_once_with(['q'])
 
 
+def test_execute_command_forwards_page_only_to_paged_handlers():
+    # execute_command forwards `page` only to a command that paginates (accepts_page); other
+    # handlers are called with no page kwarg, so they never see it.
+    cmds = tools.build_commands(tools.ToolContext('review'))
+    with patch.object(cmds['git'], 'handler', new=AsyncMock(return_value='OK')) as h:
+        asyncio.run(tools.execute_command(cmds, 'git', ['show', 'HEAD:x'], page=3))
+        assert h.await_args.kwargs == {'page': 3}
+    with patch.object(cmds['notes'], 'handler', new=AsyncMock(return_value='OK')) as h2:
+        asyncio.run(tools.execute_command(cmds, 'notes', ['show'], page=3))
+        assert h2.await_args.kwargs == {}
+
+
 def test_execute_handler_exception_is_error_text():
     async def boom(args, ctx=None):
         raise Exception('kaput')
     cmds = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=boom: _h(args))}
     out = asyncio.run(tools.execute_command(cmds, 'kapow', []))
-    assert out == 'error: command kapow failed: kaput'
+    # The exception type is included: some exceptions stringify to '', so the type is what
+    # distinguishes the failure when the message is empty.
+    assert out == 'error: command kapow failed (Exception): kaput'
+
+    async def silent(args, ctx=None):
+        raise KeyError()
+    cmds2 = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=silent: _h(args))}
+    out2 = asyncio.run(tools.execute_command(cmds2, 'kapow', []))
+    assert out2 == 'error: command kapow failed (KeyError): '
 
 
 # --- phase scoping ---------------------------------------------------------------
@@ -610,21 +642,192 @@ def test_installed_env_venv_missing_is_error():
 
 
 def test_git_show_uses_larger_output_cap(tmp_path):
-    # A cited file between the old 12KB cap and the git cap must be returned in full (so a
-    # reviewer sees the whole file it cites), while a file beyond the git cap is still cut.
+    # A cited file between the old 12KB cap and the git cap is returned in full (a reviewer
+    # sees the whole file it cites); a file beyond the git cap is paged by LINE — never
+    # silently truncated, no page chops a line — and each names its 1-based line range.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
-    (tmp_path / 'mid.py').write_text('line\n' * 8000)   # ~40KB: under the git cap
-    (tmp_path / 'huge.txt').write_text('x' * 100_000)    # over the git cap
+    (tmp_path / 'mid.py').write_text('line\n' * 8000)            # ~40KB: under the git cap
+    (tmp_path / 'huge.txt').write_text('hello world\n' * 5000)   # 60KB, 5000 lines: over the cap
     subprocess.run(['git', 'add', 'mid.py', 'huge.txt'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     mid = asyncio.run(tools.git(['show', 'HEAD:mid.py'], ctx))
-    assert '[truncated]' not in mid and len(mid) > 12_000
-    huge = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
-    assert huge.rstrip().endswith('[truncated]')
-    assert len(huge) <= tools.GIT_RESULT_CHAR_LIMIT + 40
+    assert '[truncated]' not in mid and '[page ' not in mid and len(mid) > 12_000
+    # A bare request for output beyond the cap returns an error naming the pages — no content.
+    nopage = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx))
+    assert nopage.startswith('error:')
+    assert '5000 lines' in nopage
+    assert '2 page(s)' in nopage
+    assert 'PAGE=1 git show HEAD:huge.txt' in nopage
+    assert len(nopage) < 1000
+    # A named page returns that slice with its 1-based line range, every line intact.
+    page1 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=1))
+    assert page1.startswith('[page 1 of 2: lines 1-4000 of 5000')
+    assert 'more follows' in page1
+    body1 = page1.split('\n', 1)[1]
+    assert all(ln == 'hello world' for ln in body1.split('\n'))
+    assert body1.count('hello world') == 4000
+    page2 = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=2))
+    assert page2.startswith('[page 2 of 2: lines 4001-5000 of 5000')
+    assert 'end of output' in page2
+    beyond = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=99))
+    assert beyond.startswith('error: page 99 is out of range')
+
+
+def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path):
+    # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
+    # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first
+    # non-blank line (a .strip() would drop them and shift every cited line number).
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'lead.txt').write_text('\n' * 50 + 'hello world\n' * 5000)  # 5050 lines
+    subprocess.run(['git', 'add', 'lead.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    nopage = asyncio.run(tools.git(['show', 'HEAD:lead.txt'], ctx))
+    assert '5050 lines' in nopage  # the 50 leading blanks are counted, not dropped
+    page1 = asyncio.run(tools.git(['show', 'HEAD:lead.txt'], ctx, page=1))
+    assert 'lines 1-' in page1  # page 1 starts at the real first (blank) line
+    body1 = page1.split('\n', 1)[1].split('\n')
+    assert body1[:50] == [''] * 50  # the leading blanks are present at lines 1-50
+
+
+def test_git_single_oversized_line_is_truncated(tmp_path):
+    # A single line longer than the page bound (a minified or generated file) must not be
+    # returned whole: it is truncated so a page stays bounded even when one line alone
+    # exceeds the limit.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'blob.txt').write_text('x' * 100_000 + '\n')  # one line, 100KB
+    subprocess.run(['git', 'add', 'blob.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    nopage = asyncio.run(tools.git(['show', 'HEAD:blob.txt'], ctx))
+    assert nopage.startswith('error:') and '1 page(s)' in nopage
+    page1 = asyncio.run(tools.git(['show', 'HEAD:blob.txt'], ctx, page=1))
+    assert page1.startswith('[page 1 of 1: lines 1-1 of 1')
+    body = page1.split('\n', 1)[1]
+    assert '[line truncated]' in body
+    assert len(body) <= tools.GIT_RESULT_CHAR_LIMIT
+
+
+def test_git_refuses_whole_file_read_over_half_context(tmp_path):
+    # A `git show <rev>:<path>` of a file larger than half the context window is refused before
+    # it is buffered, so a pathologically large file cannot exhaust the model's context.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'big.txt').write_text('x' * 5_000 + '\n')
+    (tmp_path / 'small.txt').write_text('y' * 100 + '\n')
+    subprocess.run(['git', 'add', 'big.txt', 'small.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    # A 2000-token window -> half is 1000 tokens -> 3000 chars, under the 5001-byte file.
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), context_window=2000)
+    out = asyncio.run(tools.git(['show', 'HEAD:big.txt'], ctx))
+    assert out.startswith('error:') and 'context window' in out
+    # The guard blocks paged reads too (they still buffer the file), so it must not suggest one.
+    assert 'PAGE=' not in out
+    # A file under the threshold reads normally.
+    assert not asyncio.run(
+        tools.git(['show', 'HEAD:small.txt'], ctx)).startswith('error:')
+    # A commit show (no <rev>:<path> blob) is not a whole-file read -> not guarded.
+    assert not asyncio.run(tools.git(['show', 'HEAD'], ctx)).startswith('error:')
+
+
+def test_git_remote_mutating_subcommands_refused(tmp_path):
+    # `git remote` is on the read-only allowlist, but its mutating subcommands rewrite
+    # .git/config, so they are refused even though `remote` itself is permitted; the plain
+    # listing forms are not refused.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    for mutating in (
+            'add', 'remove', 'rm', 'rename', 'set-url', 'set-head',
+            'set-branches', 'update', 'prune'):
+        out = asyncio.run(tools.git(['remote', mutating, 'origin'], ctx))
+        assert out.startswith('error:') and 'would modify the repository' in out
+    for listing in (['remote'], ['remote', '-v']):
+        out = asyncio.run(tools.git(listing, ctx))
+        assert 'would modify the repository' not in out
+
+
+def test_git_refuses_no_index_reads_external_files(tmp_path):
+    # `git diff --no-index` reads files outside the repository (e.g. /etc/passwd), which would
+    # leak local secrets to the LLM; the flag is refused.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.git(
+        ['diff', '--no-index', '/etc/hostname', '/etc/passwd'], ctx))
+    assert out.startswith('error:') and 'outside the repository' in out
+
+
+def test_git_grep_no_match_is_not_an_error(tmp_path):
+    # A clean `git grep` with no matches exits 1 with empty output: that is a valid empty result,
+    # not a failure. It must not be reported as `error:` (which run_with_tools excludes from the
+    # evidence ledger), so a reviewer can show a symbol is genuinely absent rather than a failed
+    # search. A grep that DOES match returns its matches, not an error.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'code.txt').write_text('alpha\nbeta\n')
+    subprocess.run(['git', 'add', 'code.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    hit = asyncio.run(tools.git(['grep', '-F', 'alpha', 'HEAD'], ctx))
+    assert not hit.startswith('error:') and 'alpha' in hit
+    miss = asyncio.run(tools.git(['grep', '-F', 'zzzabsent', 'HEAD'], ctx))
+    assert not miss.startswith('error:') and miss == ''
+
+
+def test_git_refuses_ext_diff_external_program(tmp_path):
+    # `git diff --ext-diff` shells out to the configured external diff tool ($diff.external), which
+    # would let the read-only tool execute an arbitrary program; the flag is refused. The
+    # --no-ext-diff negation (which merely disables the external tool) is not blocked.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'f.txt').write_text('a\n')
+    subprocess.run(['git', 'add', 'f.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.git(['diff', '--ext-diff'], ctx))
+    assert out.startswith('error:') and 'external program' in out
+    # --textconv likewise runs configured external filters, so it is refused too.
+    assert asyncio.run(tools.git(['diff', '--textconv'], ctx)).startswith('error:')
+    assert not asyncio.run(
+        tools.git(['diff', '--no-ext-diff'], ctx)).startswith('error:')
+
+
+def test_run_with_tools_does_not_record_error_evidence(tmp_path):
+    # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
+    # too large to show at once), so it is not recorded as evidence: only actual output grounds a
+    # finding. A real page result IS recorded.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'huge.txt').write_text('hello world\n' * 5000)
+    subprocess.run(['git', 'add', 'huge.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    # Bare request for a file over the cap -> "name a page" error (no content) -> not recorded.
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    asyncio.run(tools.run_with_tools(
+        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC]), 'REQ', ctx))
+    assert ctx.evidence == []
+    # A named page -> real content -> recorded.
+    ctx2 = tools.ToolContext('review', workdir=str(tmp_path))
+    asyncio.run(tools.run_with_tools(
+        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC]), 'REQ', ctx2))
+    assert len(ctx2.evidence) == 1
+    assert 'hello world' in ctx2.evidence[0][1]
 
 
 # --- the tool loop -----------------------------------------------------------------
@@ -664,6 +867,60 @@ def test_run_with_tools_single_call_without_commands():
     assert out == DOC
     ex.assert_not_awaited()
     assert len(mapper.calls) == 1
+
+
+def test_run_with_tools_records_git_evidence(tmp_path):
+    # Every git command the reviewer runs is captured on ctx.evidence (command line + raw output),
+    # independent of context compaction, so the review's evidence gate can later prove a finding
+    # was grounded in real git output rather than a guess. Non-git commands are not recorded.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with_cmd = 'A1 [MAJOR] mid.py:2 - beta is wrong'
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == with_cmd
+    assert len(ctx.evidence) == 1
+    line, result = ctx.evidence[0]
+    assert 'git show HEAD:mid.py' in line
+    assert 'beta' in result
+
+
+def test_run_with_tools_does_not_record_non_git_evidence():
+    # Only git output is evidence; a web-search result is not.
+    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
+    ctx = tools.ToolContext('gen')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+
+
+def test_run_with_tools_requires_probe_before_findings(tmp_path):
+    # With require_evidence set (the review panel), a findings response is bounced back until the
+    # reviewer has run a git command — the file summary alone is not a basis for a finding. The
+    # final finding is only accepted after the forced probe, which lands in the evidence ledger.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # Reports a finding (no probe yet) -> bounced -> probes -> reports again (accepted).
+    mapper = ScriptedMapper([finding, '$ git show HEAD:mid.py\n', finding])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == finding
+    assert len(ctx.evidence) == 1  # it was forced to probe before the finding was accepted
+    # A "NO FINDINGS" answer is exempt: accepted without any probe.
+    ctx2 = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    out2 = asyncio.run(
+        tools.run_with_tools(ScriptedMapper(['NO FINDINGS']), 'REQ', ctx2))
+    assert out2 == 'NO FINDINGS' and ctx2.evidence == []
 
 
 def test_run_with_tools_unknown_command_feeds_error():

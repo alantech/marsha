@@ -138,7 +138,7 @@ The config file is a JSON file read from the standard configuration location for
 * macOS: `~/Library/Application Support/marsha/config.json`
 * Windows: `%LOCALAPPDATA%\marsha\config.json`
 
-It supports the keys `provider`, `api_base`, `api_key`, `claude_api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-5-mini` (`claude-sonnet-5` with the anthropic provider); `model_strong` (default `gpt-5`, `claude-opus-5` with the anthropic provider) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
+It supports the keys `provider`, `api_base`, `api_key`, `claude_api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-6-luna` (`claude-sonnet-5` with the anthropic provider); `model_strong` (default `gpt-5.6-terra`, `claude-opus-5` with the anthropic provider) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
 
 Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
 
@@ -151,7 +151,7 @@ Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
 
 The key can be anything; local servers like llama.cpp do not validate it.
 
-Against any OpenAI-compatible endpoint, Marsha probes the backend's `/models` list at startup and, when the configured model isn't served, remaps each model role to the closest match it does serve (logging the choice). The standard role lands on the cheapest, smallest model whose context is at least as large as the model it replaces (400k for the default `gpt-5-mini`); the strong role lands on the largest-context (most capable) one — so on a multi-model backend the two roles may resolve to different models. If no served model reaches the standard role's bar, the largest available is used. An explicitly chosen model (`--model` or the `model`/`model_strong` config keys) pins the role and is never remapped. If the endpoint can't be reached, the configured model is used as-is.
+Against any OpenAI-compatible endpoint, Marsha probes the backend's `/models` list at startup and, when the configured model isn't served, remaps each model role to the closest match it does serve (logging the choice). The standard role lands on the cheapest, smallest model whose context is at least as large as the model it replaces (1.05M for the default `gpt-6-luna`); the strong role lands on the largest-context (most capable) one — so on a multi-model backend the two roles may resolve to different models. If no served model reaches the standard role's bar, the largest available is used. An explicitly chosen model (`--model` or the `model`/`model_strong` config keys) pins the role and is never remapped. If the endpoint can't be reached, the configured model is used as-is.
 
 Marsha is organized around subcommands: `marsha compile` runs the compiler and `marsha help` explains them. (Bare `marsha <source.mrsh>` with no subcommand still works as a deprecated alias for `marsha compile`.)
 
@@ -281,7 +281,7 @@ options:
  * `--no-tools` Disables the LLM tool interface (the fake terminal: registry, web, sandboxed `calc`, and — in the optimize/correction loops — installed-environment introspection). Enabled by default: the LLM only pays for it when it actually issues a command. The CI `time` benchmark passes `--no-tools` to stay deterministic and free of live-search flakiness.
 * `--no-warn` Suppresses the warnings the sanity check prints about significant ambiguities in the definition. The check itself still runs, and still fails the compile when the definition contradicts itself.
 * `--api-base` Overrides the LLM endpoint with the base URL of any OpenAI-compatible API (eg `http://localhost:8080/v1` for a llama.cpp server). Takes precedence over the `OPENAI_BASE_URL` environment variable and the config file.
-* `--model` Overrides the model used for code generation (default `gpt-5-mini`, `claude-sonnet-5` with the anthropic provider), eg to use a different model or the name of a locally served model.
+* `--model` Overrides the model used for code generation (default `gpt-6-luna`, `claude-sonnet-5` with the anthropic provider), eg to use a different model or the name of a locally served model.
 * `--context-window` Overrides the context window (in tokens) used to size review/editor prompts. It is auto-detected from the service when possible (eg a llama.cpp server's `n_ctx`), else a documented default is used; set it if your backend mis-reports its window.
 * `--context-cap` The fraction of the context window a single prompt may occupy before its findings are compacted (default `0.5`).
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).

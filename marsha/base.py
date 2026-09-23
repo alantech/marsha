@@ -89,7 +89,24 @@ review_parser = sub.add_parser(
     help='Review a branch diff against the default branch with the review personas.')
 review_parser.add_argument('--pr', type=int, default=None,
                            help='GitHub PR number to review (needs the gh CLI). '
-                                'Checks the PR out; the working tree must be clean.')
+                                'By default, if the checked-out branch already contains the '
+                                'PR head, the local commits are reviewed (so unpushed fixes are '
+                                'picked up); otherwise the PR is checked out (clean tree needed).')
+review_parser.add_argument('--remote', action='store_true',
+                           help='With --pr, always check the PR out to its remote head instead '
+                                'of reviewing local commits that are ahead of the PR.')
+review_parser.add_argument('--consensus', type=int, default=0, metavar='N',
+                           help='Run the reviewer panel N times and keep only findings a majority '
+                                'of the runs corroborate (N >= 2). Stabilizes the output against '
+                                'the model\'s run-to-run variance at ~Nx the cost. Default: 0 '
+                                '(a single pass).')
+review_parser.add_argument('--reasoning-effort',
+                           choices=['none', 'low', 'medium',
+                                    'high', 'xhigh', 'max'],
+                           default=None,
+                           help='Reasoning effort for the review LLM calls. Higher is more '
+                                'thorough but slower. GPT-6 accepts none/low/medium/high/'
+                                'xhigh/max. Default: high.')
 review_parser.add_argument('--linear', default=None,
                            help='Linear ticket name whose requirements seed the review '
                                 '(needs the linear CLI).')

@@ -156,6 +156,34 @@ def test_parse_findings_no_findings():
     assert p.parse_findings('all good here', 'Ada', 1) == []
 
 
+def test_parse_findings_captures_support():
+    # A finding's one-line headline is followed by 1-2 supporting paragraphs, which are kept
+    # with the finding (internal blank lines separate paragraphs); a bare headline has no support.
+    text = ('A1 [MAJOR] foo.py:10 - missing sort\n'
+            'The spec requires sorted output, but line 10 returns it unsorted.\n'
+            'Confirmed with `git show HEAD:foo.py:10`; the oracle asserts sorted order.\n'
+            '\n'
+            'B1 [MINOR] foo.py:20 - naming\n')
+    fs = p.parse_findings(text, 'Ada', 1)
+    assert [f['label'] for f in fs] == ['A1', 'B1']
+    assert fs[0]['desc'] == 'missing sort'
+    assert fs[0]['support'] == (
+        'The spec requires sorted output, but line 10 returns it unsorted.\n'
+        'Confirmed with `git show HEAD:foo.py:10`; the oracle asserts sorted order.')
+    assert fs[1]['support'] == ''
+
+
+def test_drop_unsupported_findings():
+    # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
+    # unverified claim and is dropped before it is reported (the parser itself stays lenient so
+    # its labeling logic can be tested with minimal fixtures).
+    bare = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
+            'desc': 'd', 'support': ''}
+    backed = dict(bare, label='B1', support='The spec requires it.')
+    assert p.drop_unsupported([]) == []
+    assert p.drop_unsupported([bare, backed]) == [backed]
+
+
 # --- Finding model ----------------------------------------------------------
 
 def _f(name, label, severity, desc):
@@ -251,7 +279,7 @@ def test_run_personas_ignores_failing_persona():
         async def run(self, user_message):
             if 'review #1' in self.system:
                 raise Exception('boom')
-            return 'A2 [MAJOR] x - ok\n'
+            return 'A2 [MAJOR] x - ok\nI confirmed the defect with git show HEAD:x.'
 
     async def scenario():
         reviewers = [('Ada', 'body', 1), ('Vera', 'body', 2)]
@@ -278,3 +306,53 @@ def test_split_preamble_missing_header_raises():
         assert False, 'expected an exception'
     except Exception:
         pass
+
+
+# --- Determinism knobs (review path) ----------------------------------------
+
+def test_run_personas_forwards_reasoning_and_seed():
+    # The review path passes a higher reasoning effort and a fixed seed; run_personas must forward
+    # both to each reviewer's mapper (they are what make a pass more reliable/reproducible).
+    captured = {}
+
+    class FakeMapper:
+        def __init__(self, system, **k):
+            captured.update(k)
+
+        async def run(self, user):
+            return 'NO FINDINGS'
+
+    with patch.object(p, 'get_mapper', new=lambda *a, **k: FakeMapper(*a, **k)):
+        reviewers = [('Sage', 'you are sage', 1)]
+        fs = asyncio.run(p.run_personas(
+            reviewers, 'msg', 'model', 'review', tool_ctx=None,
+            reasoning_effort='medium', seed=9))
+    assert fs == []
+    assert captured['reasoning_effort'] == 'medium'
+    assert captured['seed'] == 9
+
+
+def test_chatgpt_mapper_includes_seed_and_effort():
+    # ChatGPTMapper forwards seed and reasoning_effort into the request (seed for reproducibility
+    # on providers that honor it; gpt-5-mini ignores it harmlessly).
+    import types
+    from marsha.mappers import chatgpt as chatgpt_mod
+    queries = []
+
+    async def fake_retry(query, model=None, max_tries=3, n_results=1, label=None):
+        queries.append(query)
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content='ok'))],
+            usage=types.SimpleNamespace(total_tokens=1))
+
+    with patch.object(chatgpt_mod, 'retry_chat_completion', new=fake_retry):
+        m = chatgpt_mod.ChatGPTMapper(
+            'sys', seed=7, reasoning_effort='medium', model='gpt-5-mini')
+        asyncio.run(m.run('hi'))
+        m2 = chatgpt_mod.ChatGPTMapper('sys', model='gpt-5-mini')
+        asyncio.run(m2.run('hi'))
+    assert queries[0]['seed'] == 7
+    assert queries[0]['reasoning_effort'] == 'medium'
+    assert 'seed' not in queries[1]
+    assert 'reasoning_effort' not in queries[1]

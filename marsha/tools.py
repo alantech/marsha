@@ -46,7 +46,8 @@ import sys
 import urllib.parse
 import urllib.request
 
-from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.context import (
+    budget_tokens, CHARS_PER_TOKEN, estimate_tokens, fits, resolve_context_window)
 from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
@@ -127,6 +128,21 @@ class ToolContext:
     # Per-reviewer scratchpad (the `notes` tool). A fresh list per reviewer; on a
     # context compaction the notes are re-attached so they survive. Empty elsewhere.
     notes: list = dataclasses.field(default_factory=list)
+    # Per-reviewer evidence ledger: the (command line, raw output) of every git command the
+    # reviewer actually ran, captured as the tool loop executes. Unlike the message history it is
+    # NOT summarized away by context compaction, so it is the faithful record of what the reviewer
+    # really retrieved — the basis for the review's anti-hallucination evidence gate. A fresh list
+    # per reviewer so their ledgers do not leak across reviewers.
+    evidence: list = dataclasses.field(default_factory=list)
+    # When True (the review panel), the loop will not accept a findings response until the
+    # reviewer has actually run a git command — the changed-file summary (names + line counts) is
+    # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
+    # conventions gate) so a stage is never blocked from answering.
+    require_evidence: bool = False
+    # The model's context window (in tokens), resolved by the tool loop. Bounds the git tool's
+    # whole-file read guard (a file over half the window is refused rather than buffered). None
+    # when it cannot be resolved, in which case the guard is skipped.
+    context_window: int = None
 
 
 @dataclasses.dataclass
@@ -141,6 +157,9 @@ class ToolCommand:
     usage: str
     description: str
     handler: 'callable'
+    # True for a command whose handler accepts a `page=` keyword (long output is returned
+    # page by page instead of truncated). Only the git tool uses this today.
+    accepts_page: bool = False
 
 
 @dataclasses.dataclass
@@ -150,6 +169,9 @@ class PendingCommand:
     name: str
     args: list
     malformed: bool = False
+    # A `PAGE=<n>` prefix on the command line, when present: the page of the output to
+    # return for a command that paginates long results (currently git). None otherwise.
+    page: int = None
 
 
 # --- small shared helpers -------------------------------------------------------
@@ -162,6 +184,64 @@ def truncate(text, limit=RESULT_CHAR_LIMIT):
     if len(text) <= limit:
         return text
     return text[:limit] + '\n…[truncated]'
+
+
+def _git_page_result(result, sub, rest, page=None):
+    # Bound a git result by explicit pagination instead of a silent truncation, so a reviewer
+    # can never act on a partial view it mistakes for the whole file (the root of the "this
+    # function is truncated, so the call must be missing / the file is corrupted" findings).
+    # Small outputs pass through unchanged. Large output is NOT shown until a page is named:
+    # a bare request returns an error stating the page count and the exact `PAGE=<n>`
+    # re-requests, so the boundaries stay unambiguous (no header buried beside the code to be
+    # misread as content). Pages are grouped by LINE (bounded by the char limit) so a page never
+    # chops a line or string in the middle, and each names its 1-based line range so the reviewer
+    # can cite real line numbers instead of guessing.
+    if len(result) <= GIT_RESULT_CHAR_LIMIT:
+        return result
+    text = result[:-1] if result.endswith('\n') else result
+    lines = text.split('\n')
+    # (first_line, last_line, page_text), 1-based line numbers
+    pages = []
+    page_start = 0
+    cur = []
+    cur_len = 0
+    _line_trunc = '…[line truncated]'
+    for i, ln in enumerate(lines):
+        # A single line longer than the whole page bound (a minified or generated file)
+        # would otherwise be returned intact, defeating the limit; truncate it so a page
+        # stays bounded even when one line alone exceeds it.
+        if len(ln) > GIT_RESULT_CHAR_LIMIT:
+            ln = ln[:GIT_RESULT_CHAR_LIMIT - len(_line_trunc)] + _line_trunc
+        # +1 for the newline that joins this line on
+        add = len(ln) + (1 if cur else 0)
+        if cur and cur_len + add > GIT_RESULT_CHAR_LIMIT:
+            pages.append((page_start + 1, i, '\n'.join(cur)))
+            page_start, cur, cur_len = i, [ln], len(ln)
+        else:
+            cur.append(ln)
+            cur_len += add
+    if cur:
+        pages.append((page_start + 1, len(lines), '\n'.join(cur)))
+    total = len(pages)
+    cmd = f'git {sub} {" ".join(rest)}'
+    if not page or page < 1:
+        return (
+            f'error: `{cmd}` produced {len(result)} chars across {len(lines)} lines — more '
+            f'than one page can return (limit {GIT_RESULT_CHAR_LIMIT} chars); it has {total} '
+            f'page(s) and I have shown you none of it yet. To read it, name a page '
+            f'(1..{total}):\n'
+            f'  $ PAGE=1 {cmd}\n'
+            f'  $ PAGE={total} {cmd}\n'
+            'Or, to check a symbol/call/import, search it instead of reading the file:\n'
+            f'  $ git grep <pattern> -- <path>\n'
+            'This is pagination of the tool output, not the file — the file is complete.')
+    if page > total:
+        return f'error: page {page} is out of range; this output has {total} page(s).'
+    lo, hi, body = pages[page - 1]
+    marker = f'[page {page} of {total}: lines {lo}-{hi} of {len(lines)}'
+    marker += (f' — more follows, next: `$ PAGE={page + 1} {cmd}`'
+               if page < total else ' — end of output') + ']'
+    return marker + '\n' + body
 
 
 def wrap_untrusted(name, content):
@@ -665,17 +745,78 @@ GIT_READONLY_COMMANDS = {
     'rev-list', 'show-ref', 'for-each-ref', 'count-objects', 'ls-remote',
     'remote',
 }
+# `git remote` is read-only only for listing (bare `remote`, `remote -v`, `remote get-url`,
+# `remote show`); every other subcommand mutates the repo (rewriting .git/config or updating
+# remote-tracking refs). The read-only subcommands are allowlisted and the rest refused, so a
+# new or aliased mutating subcommand (e.g. `rm` for `remove`) cannot slip through.
+GIT_REMOTE_READONLY_SUBCOMMANDS = {'get-url', 'show'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
+# Flags that make an otherwise-repository-scoped command read files OUTSIDE the repository
+# (e.g. `git diff --no-index /etc/passwd /etc/shadow`); rejected so the reviewer cannot pull
+# local secrets or arbitrary files into the LLM context.
+GIT_EXTERNAL_FILE_FLAGS = {'--no-index'}
+# Flags that make an otherwise-read-only command run an EXTERNAL program: `git diff --ext-diff`
+# shells out to the configured $diff.external tool, and `--textconv` runs the configured textconv
+# filters (both can execute arbitrary commands); rejected so a configured external helper cannot be
+# run by the read-only tool. The `--no-ext-diff` / `--no-textconv` negations are safe and not blocked.
+GIT_EXTERNAL_EXEC_FLAGS = {'--ext-diff', '--textconv'}
 GIT_TIMEOUT = 60
 
 
-async def git(args, ctx=None):
+def _whole_file_object(sub, rest):
+    # The object a command dumps whole — `git show <rev>:<path>` or
+    # `git cat-file [-p] <rev>:<path>` — or None when it does not read a single blob (a commit,
+    # a tree listing, a size/existence/type probe, a diff, or a grep). Only a whole-blob read can
+    # grow without bound, so only those need the size guard.
+    if sub == 'show':
+        for a in rest:
+            if not a.startswith('-') and ':' in a:
+                return a
+        return None
+    if sub == 'cat-file':
+        mode, objs = None, []
+        for a in rest:
+            if a.startswith('-'):
+                mode = a
+            else:
+                objs.append(a)
+        if mode in ('-s', '--size', '-e', '--exists', '-t', '--type'):
+            return None
+        return objs[0] if len(objs) == 1 and ':' in objs[0] else None
+    return None
+
+
+async def _git_object_size(obj, workdir):
+    # The byte size of a git object via `git cat-file -s`, without reading its content, so a
+    # whole-file read can be refused before it is buffered. None when it cannot be resolved.
+    env = dict(os.environ)
+    env['GIT_TERMINAL_PROMPT'] = '0'
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'cat-file', '-s', obj, cwd=workdir, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, _err = await run_subprocess(proc, GIT_TIMEOUT)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(out.strip())
+    except (AttributeError, ValueError):
+        return None
+
+
+async def git(args, ctx=None, page=None):
     """`git <subcommand> [args...]` — run a read-only git command in the
-    repository's working directory and return its output (truncated). Only
-    read-only subcommands are permitted; mutating ones (commit/push/pull/
-    checkout/reset/...) are refused, as are flags that write to disk."""
+    repository's working directory and return its output. Only read-only
+    subcommands are permitted; mutating ones (commit/push/pull/checkout/
+    reset/...) are refused, as are flags that write to disk. Output longer
+    than one page is not shown until a page is named: a bare request returns
+    an error naming the page count and the exact `PAGE=<n>` re-requests, and
+    a named page (e.g. `PAGE=2 git show HEAD:<path>`) returns that slice with
+    its 1-based line range so the total and the line numbers are unambiguous."""
     if not args:
         return 'error: git needs a subcommand, e.g. $ git diff <base>...HEAD'
     sub = args[0]
@@ -685,13 +826,42 @@ async def git(args, ctx=None):
             'commands (diff, log, show, blame, grep, ls-files, ...). You may not '
             'modify the git tree.')
     rest = args[1:]
+    if sub == 'remote':
+        # `git remote` lists, but its mutating subcommands (add/remove/rm/rename/set-url/
+        # set-head/set-branches/update/prune) mutate the repo — refuse anything that is not an
+        # explicitly read-only listing subcommand.
+        first = next((a for a in rest if not a.startswith('-')), None)
+        if first is not None and first not in GIT_REMOTE_READONLY_SUBCOMMANDS:
+            return (
+                f'error: `git remote {first}` is not allowed (it would modify the '
+                'repository); only `git remote`, `git remote -v`, '
+                '`git remote get-url` and `git remote show` are permitted.')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:
             return f'error: the flag `{flag}` is not allowed (it writes to disk).'
+        if flag.split('=', 1)[0] in GIT_EXTERNAL_FILE_FLAGS:
+            return (f'error: the flag `{flag}` is not allowed (it would read files '
+                    f'outside the repository).')
+        if flag.split('=', 1)[0] in GIT_EXTERNAL_EXEC_FLAGS:
+            return (f'error: the flag `{flag}` is not allowed (it would run an external '
+                    f'program).')
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: git has no working directory (not run inside a repository).'
+    # A whole-file read of a file larger than half the context window would buffer more than the
+    # model can usefully hold, so it is refused before the read — whether whole or paged, since a
+    # paged read still buffers the whole file. The reviewer should `git grep` it for what it needs.
+    blob = _whole_file_object(sub, rest)
+    if blob is not None and ctx is not None and ctx.context_window:
+        size = await _git_object_size(blob, workdir)
+        if size is not None:
+            limit = budget_tokens(ctx.context_window, 0.5) * CHARS_PER_TOKEN
+            if size > limit:
+                return (
+                    f'error: `git {sub} {blob}` reads a whole file of {size} bytes — more '
+                    f'than half the context window ({limit} chars), whether whole or paged. Do '
+                    f'not read it: search it with `git grep <pattern> -- {blob}` instead.')
     env = dict(os.environ)
     env['GIT_TERMINAL_PROMPT'] = '0'  # never block on a credential prompt
     try:
@@ -702,13 +872,20 @@ async def git(args, ctx=None):
         out, err = await run_subprocess(proc, GIT_TIMEOUT)
     except Exception as e:
         return f'error: `git {sub}` could not be run (timed out or failed): {e}'
-    result = (out or '').strip()
+    # rstrip (not strip): only drop the trailing newline, never leading blank lines, so the
+    # 1-based line ranges _git_page_result reports match the file's real lines (a file that
+    # begins with blank lines would otherwise have its page ranges shifted).
+    result = (out or '').rstrip()
     errtxt = (err or '').strip()
-    if proc.returncode != 0 and not result:
+    # `git grep` exits 1 on a clean no-match (empty output) — a valid empty result, not a failure.
+    # Treating it as an error would hide the no-match from the reviewer (and drop it from the
+    # evidence ledger), so it is the one nonzero exit we do not report as a failure.
+    grep_no_match = sub == 'grep' and proc.returncode == 1
+    if proc.returncode != 0 and not result and not grep_no_match:
         return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'
     if errtxt:
         result = (result + '\n[git stderr]\n' + errtxt).strip()
-    return truncate(result, limit=GIT_RESULT_CHAR_LIMIT)
+    return _git_page_result(result, sub, rest, page)
 
 
 async def notes(args, ctx=None):
@@ -762,10 +939,15 @@ def agnostic_tool_commands(ctx=None):
                             'final expression is returned (use print()/console.log() for extra lines)',
                             lambda args, _c=ctx: calc(args, _c)),
         'git': ToolCommand('git', CATEGORY_GIT,
-                           '$ git <subcommand> [args...]',
+                           '$ git <subcommand> [args...]'
+                           '   (long output: prefix `PAGE=<n>`)',
                            'run a read-only git command in the repository (diff, log, show, '
-                           'blame, grep, ls-files, ...); mutating commands are refused',
-                           lambda args, _c=ctx: git(args, _c)),
+                           'blame, grep, ls-files, ...); mutating commands are refused; long '
+                           'output is not shown until you name a page (`PAGE=<n> git ...`) — '
+                           'prefer `git grep` to check for a symbol/call/import rather than '
+                           'reading a whole file',
+                           lambda args, _c=ctx, page=None: git(args, _c, page),
+                           accepts_page=True),
         'notes': ToolCommand('notes', CATEGORY_NOTES,
                              '$ notes add <text> | notes show',
                              'a per-reviewer scratchpad: `notes add` records a note (survives '
@@ -825,6 +1007,10 @@ def tool_instructions(ctx=None):
 
 
 _COMMAND_RE = re.compile(r'^\$\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
+# A `PAGE=<n>` prefix (env-var style) selects a page of a paged command's output, e.g.
+# `$ PAGE=2 git show HEAD:<path>`. Matched before the plain command so the prefix is stripped.
+_PAGE_COMMAND_RE = re.compile(
+    r'^\$\s+PAGE=(\d+)\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
 
 
 def extract_pending_command(text):
@@ -842,6 +1028,16 @@ def extract_pending_command(text):
             last = line.strip()
     if last is None or not last.startswith('$'):
         return None
+    pm = _PAGE_COMMAND_RE.match(last)
+    if pm is not None:
+        name = pm.group(2)
+        rest = pm.group(3) or ''
+        try:
+            args = shlex.split(rest)
+        except ValueError:
+            return PendingCommand(line=last, name=name, args=[], malformed=True)
+        return PendingCommand(line=last, name=name, args=args,
+                              page=int(pm.group(1)))
     m = _COMMAND_RE.match(last)
     if m is None:
         return PendingCommand(line=last, name=last, args=[], malformed=True)
@@ -854,18 +1050,23 @@ def extract_pending_command(text):
     return PendingCommand(line=last, name=name, args=args)
 
 
-async def execute_command(commands, name, args):
+async def execute_command(commands, name, args, page=None):
     """Run one fake-terminal command and return its output text. Errors are
     returned as `error: ...` text so the model can see what went wrong and
-    adapt, instead of the loop raising."""
+    adapt, instead of the loop raising. `page` is forwarded only to commands
+    that paginate long output (ToolCommand.accepts_page); others ignore it."""
     cmd = commands.get(name)
     if cmd is None:
         available = '; '.join(c.usage for c in commands.values())
         return f'error: unknown command: {name}. Available commands: {available}'
     try:
+        if cmd.accepts_page:
+            return await cmd.handler(args, page=page)
         return await cmd.handler(args)
     except Exception as e:
-        return f'error: command {name} failed: {e}'
+        # Include the exception type: some exceptions stringify to the empty string, in which
+        # case `failed: ` alone would give the model (and a debugger) nothing to go on.
+        return f'error: command {name} failed ({type(e).__name__}): {e}'
 
 
 _TOOL_COMPACT_PROMPT = '''You are compacting a code-review exploration conversation so it fits a smaller context budget. The conversation is a reviewer probing a git repository with read-only commands (diff/log/show/blame/grep) and recording notes. Summarize it into a short state that preserves: (1) the original review task, (2) the files and line numbers examined and the concrete facts discovered, and (3) every candidate finding with its file:line location. Preserve file paths and line numbers exactly. Add nothing that is not in the conversation. Output only the summary, with no preamble.
@@ -911,6 +1112,18 @@ async def _maybe_compact_tool_history(messages, mapper, ctx, debug=False):
     return [{'role': 'user', 'content': content}]
 
 
+# A finding headline carries a severity tag, e.g. "A1 [MAJOR] ...". A response with none of these
+# is a "no findings" answer (exempt from mandatory probing) rather than a findings report.
+_FINDING_SEVERITY_RE = re.compile(
+    r'\[(?:MAJOR|MINOR|NIT|NITPICK)\]', re.IGNORECASE)
+
+
+def _is_no_findings_response(text):
+    # True when a tool-loop response reports no findings (so it needs no git probe to back up):
+    # it contains no finding headline. A report of any finding (any severity tag) is not exempt.
+    return _FINDING_SEVERITY_RE.search(text or '') is None
+
+
 async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_TOOL_ROUNDS):
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
     the response's final line is a `$` command, execute it and feed the
@@ -923,6 +1136,14 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
         raise Exception(
             'run_with_tools requires a single-result mapper (n_results=1)')
     ctx = ctx or ToolContext()
+    if ctx.context_window is None:
+        # Resolve the model's context window once (cached) so the git whole-file guard can refuse
+        # a read that would outgrow the model; on any failure the guard is simply skipped.
+        try:
+            ctx.context_window = await resolve_context_window(
+                model=mapper.model, client=get_client())
+        except Exception:
+            ctx.context_window = None
     commands = build_commands(ctx)
     messages = [{'role': 'user', 'content': request}]
     last_text = ''
@@ -932,12 +1153,42 @@ async def run_with_tools(mapper, request, ctx=None, debug=False, max_rounds=MAX_
         last_text = text
         pending = extract_pending_command(text)
         if pending is None:
+            # Mandatory probing: a findings response is only accepted once the reviewer has
+            # actually run a git command. The changed-file summary (file names + line counts) is
+            # not a basis for a finding, so a report made without reading the code is bounced back
+            # with an instruction to probe. "NO FINDINGS" is exempt — there is nothing to verify.
+            if (ctx.require_evidence and not ctx.evidence
+                    and not _is_no_findings_response(text)):
+                if debug:
+                    print(
+                        '[tools] findings reported without a git probe; requesting one')
+                block = (
+                    'You reported findings but you have not run a single `git` command, and the '
+                    'changed-file summary (file names and line counts) is not a basis for a '
+                    'finding. Before you report, read the code: for each finding you will keep, '
+                    '`git show HEAD:<path>` the exact lines you cite, and `git grep` for any logic '
+                    'you claim is missing or duplicated. Then re-issue your findings. If, after '
+                    'reading the code, you have no real finding, respond with exactly: NO FINDINGS')
+                messages.extend([
+                    {'role': 'assistant', 'content': text},
+                    {'role': 'user', 'content': block},
+                ])
+                continue
             return text
         if debug:
             print(f'[tools] round {round_ + 1}/{max_rounds}: {pending.name}')
         log(f'tools round {round_ + 1}/{max_rounds}: {pending.name}')
         label = pending.name if pending.name in commands else 'command'
-        result = await execute_command(commands, pending.name, pending.args)
+        result = await execute_command(commands, pending.name, pending.args,
+                                       page=pending.page)
+        # Record what the reviewer actually retrieved (the command and its raw output) so the
+        # evidence gate can later prove a finding was grounded in real git output, not a guess.
+        # An `error:` result carries no code — a git failure, or the "name a page" reply for a
+        # file too large to show at once — so it is not evidence: recording it would let the
+        # mandatory-probing and file-opened checks pass on a command whose basename merely
+        # appears in the echoed command line, with no code actually read.
+        if pending.name == 'git' and not result.startswith('error:'):
+            ctx.evidence.append((pending.line, result))
         block = (wrap_untrusted(label, result)
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '

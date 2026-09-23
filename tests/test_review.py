@@ -32,9 +32,31 @@ def _clear_repo_name_cache():
     review._repo_name_cache.clear()
 
 
+# The review loop runs a critic gate (Vera) alongside the conventions gate. The tests no-op it by
+# default so no integration test makes a real critic LLM call (matching the "gates are mocked"
+# intent); the critic's own tests call the real function, captured here before the fixture patches
+# the module attribute.
+_CRITIC_GATE = review.critic_gate
+
+
+@pytest.fixture(autouse=True)
+def _critic_quiet():
+    async def _quiet(*a, **k):
+        return ''
+    with patch.object(review, 'critic_gate', new=_quiet):
+        yield
+
+
 def _git(cwd, *args):
     subprocess.run(['git', *args], cwd=cwd, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _rev(cwd, ref):
+    out = subprocess.run(['git', 'rev-parse', ref], cwd=cwd, check=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True)
+    return out.stdout.strip()
 
 
 @pytest.fixture
@@ -58,7 +80,9 @@ def repo(tmp_path, monkeypatch):
 
 
 def _args(**kw):
-    base = dict(pr=None, linear=None, post_review=False, personas=None,
+    base = dict(pr=None, remote=False, consensus=0, reasoning_effort=None,
+                linear=None,
+                post_review=False, personas=None,
                 review_rounds=0, target='python',
                 target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
@@ -135,6 +159,37 @@ def test_render_findings():
     assert '(Sage)' in out
 
 
+def test_render_findings_includes_support():
+    # A finding's supporting paragraphs are rendered under its headline.
+    f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+          'location': 'foo.py:10', 'desc': 'off by one',
+          'support': 'the evidence, why it matters, and the impact'}]
+    out = review.render_findings(f, 'main')
+    assert '[MAJOR] foo.py:10 - off by one' in out
+    assert 'the evidence, why it matters, and the impact' in out
+    # A finding with no support renders just its headline (no dangling support).
+    out2 = review.render_findings(
+        [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+          'location': 'foo.py:10', 'desc': 'off by one', 'support': ''}], 'main')
+    assert 'off by one' in out2 and '\n\n' not in out2.split('\n', 2)[-1]
+
+
+def test_order_findings_by_severity_then_location():
+    # The final set leads with the most severe, then is ordered by location within a severity.
+    fs = [
+        {'name': 'E', 'label': 'E1', 'severity': 'NIT', 'location': 'b.py:2', 'desc': 'n'},
+        {'name': 'B', 'label': 'B1', 'severity': 'MAJOR', 'location': 'z.py:9', 'desc': 'm'},
+        {'name': 'C', 'label': 'C1', 'severity': 'MINOR', 'location': 'a.py:1', 'desc': 'i'},
+        {'name': 'D', 'label': 'D1', 'severity': 'MAJOR', 'location': 'a.py:5', 'desc': 'm2'},
+        {'name': 'F', 'label': 'F1', 'severity': 'MINOR', 'location': 'a.py:10', 'desc': 'i2'},
+    ]
+    out = review.order_findings(fs)
+    assert [(f['severity'], f['location']) for f in out] == [
+        ('MAJOR', 'a.py:5'), ('MAJOR', 'z.py:9'),
+        ('MINOR', 'a.py:1'), ('MINOR', 'a.py:10'),
+        ('NIT', 'b.py:2')]
+
+
 # --- the git tool: read-only allowlist ---------------------------------------
 
 
@@ -195,6 +250,51 @@ def test_run_personas_gives_fresh_notes_clone():
     assert captured[0].notes is not captured[1].notes
 
 
+def test_run_personas_gives_fresh_evidence_clone():
+    # Each reviewer's git evidence ledger lives on a fresh clone of the shared ctx (not the shared
+    # list), so one reviewer's retrieved code cannot leak into another reviewer's findings.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[], evidence=[])
+    captured = []
+
+    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
+                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+        captured.append(ctx)
+        return 'NO FINDINGS'
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1), ('Eli', 'body', 2)], 'msg', 'm', 'review',
+            tool_ctx=base))
+    assert len(captured) == 2
+    for ctx in captured:
+        assert ctx is not base
+        assert ctx.evidence is not base.evidence
+    assert captured[0].evidence is not captured[1].evidence
+
+
+def test_run_personas_attaches_evidence_to_findings():
+    # A reviewer's findings carry the git evidence it actually retrieved, so the evidence gate can
+    # later verify each finding against real tool output. The shared base ledger is not mutated.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[], evidence=[])
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]
+
+    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
+                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+        ctx.evidence.extend(ev)
+        return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        fs = asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base))
+    assert len(fs) == 1
+    assert fs[0]['evidence'] == ev
+    assert base.evidence == []
+
+
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
@@ -245,6 +345,420 @@ def test_compaction_noop_when_fits():
     assert out is messages  # no compaction -> unchanged, notes not re-attached
 
 
+# --- the evidence gate (deterministic anti-hallucination filter) ---------------
+
+
+def _gate_finding(desc, location, evidence, support=''):
+    return {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+            'location': location, 'desc': desc, 'support': support,
+            'evidence': evidence}
+
+
+def test_gate_keeps_finding_grounded_in_evidence(repo):
+    # A named symbol that appears in the reviewer's git output grounds the finding.
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total ignores the x term', 'a.txt:2', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo):
+    # The core case: a finding citing a symbol that appears NOWHERE in the reviewer's git
+    # evidence is a guess, dropped even though the cited file exists and the line is in bounds.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('phantomHandler leaks memory', 'a.txt:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_drops_finding_with_no_symbol_and_no_location(repo):
+    # A finding that names no symbol and cites no file cannot be grounded in the code the
+    # reviewer read, so it is dropped even when it carries (unrelated) git evidence such as a
+    # bare `git status`.
+    ev = [('$ git status', 'On branch main\nnothing to commit, working tree clean')]
+    f = _gate_finding('the overall approach is flawed', '', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_drops_finding_grounded_only_in_grep_query(repo):
+    # A reviewer greps for a symbol that does not exist (git grep returns nothing) and reads a
+    # file that lacks it. The symbol appears only in the grep QUERY, not in any retrieved output,
+    # so the finding is a fabrication and is dropped — the query string is not evidence.
+    ev = [
+        ('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour'),
+        ('$ git grep -n "phantomHandler"', ''),
+    ]
+    f = _gate_finding('phantomHandler leaks memory', 'a.txt:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def _add_code_file(repo, name, content):
+    with open(f'{repo}/{name}', 'w') as fh:
+        fh.write(content)
+    _git(repo, 'add', name)
+    _git(repo, 'commit', '-q', '-m', f'add {name}')
+
+
+def test_gate_drops_finding_falsified_by_present_symbol(repo):
+    # A finding asserts a symbol is undefined, yet the symbol is present in the tree (and in the
+    # reviewer's own evidence, so it clears the grounding check). The contradiction check drops it,
+    # because the claim and the code cannot both be true.
+    _add_code_file(repo, 'impl.py', 'def presentHelper():\n    return 1\n')
+    ev = [('$ git show HEAD:impl.py', 'def presentHelper():\n    return 1')]
+    f = _gate_finding('presentHelper is undefined and will raise a NameError',
+                      'impl.py:1', ev,
+                      support='git grep -n "presentHelper" returns no matches; '
+                              'presentHelper is not defined')
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_absence_claim_not_falsified(repo):
+    # "missingThing is undefined, though presentHelper is defined": the accused symbol is genuinely
+    # absent from the tree, so nothing contradicts the claim; the co-cited present symbol (nearest
+    # to its own, positive "is defined") is never mistaken for the one the finding says is absent.
+    _add_code_file(repo, 'impl.py', 'def presentHelper():\n    return 1\n')
+    ev = [('$ git show HEAD:impl.py', 'def presentHelper():\n    return 1')]
+    f = _gate_finding('missingThing is undefined; add a guard', 'impl.py:1', ev,
+                      support='missingThing is not defined, though presentHelper is defined')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_keeps_absence_finding_on_read_file(repo):
+    # "no maxItems": the missing symbol is absent from the evidence, but a co-cited real symbol
+    # (minItems) that the reviewer read is present, so the finding survives on at least one anchor.
+    # schema.json is a real file, so it is excluded from the anchor set (a filename, not a symbol).
+    _add_code_file(repo, 'schema.json', 'impressions: { minItems: 1 }\n')
+    ev = [('$ git show HEAD:schema.json', 'impressions: { minItems: 1 }')]
+    f = _gate_finding('impressions has no maxItems cap', 'a.txt:1', ev,
+                      support='schema.json declares only minItems, no maxItems')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_drops_finding_with_invented_subject_co_cited(repo):
+    # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented one
+    # (expand_globs) that is in neither the evidence nor the tree. The "at least one" primary check
+    # passes on compute_total, but the fabricated-subject tripwire trips on expand_globs.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total calls expand_globs which never resolves',
+                      'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_drops_finding_with_invented_camelcase_co_cited(repo):
+    # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented
+    # camelCase one (phantomHandler) in neither the evidence nor the tree; the tripwire trips on
+    # camelCase identifiers too, not only underscored ones (wistful is Python + TypeScript).
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total calls phantomHandler which never resolves',
+                      'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_symbol_match_is_whole_word_not_substring(repo):
+    # The anchor check is a whole-word match, not a substring match: a fabricated symbol that is
+    # a prefix of a symbol the reviewer actually read (phantomHand on phantomHandler) does not
+    # ground the finding.
+    _add_code_file(repo, 'calc.py', 'def phantomHandler():\n    return 1\n')
+    ev = [('$ git show HEAD:calc.py', 'def phantomHandler():\n    return 1')]
+    f = _gate_finding('phantomHand leaks memory', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_post_consolidation_drops_invented_camelcase(repo):
+    # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
+    # is the only symbol-level backstop; it must catch a camelCase symbol a consolidator rewords in
+    # (phantomHandler) that is in neither the evidence nor the tree.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total routes through phantomHandler', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
+def test_gate_keeps_finding_grounded_on_opened_file_in_support(repo):
+    # A finding with no code-symbol anchor whose support cites the file it opened (a.txt, a real
+    # file in the repo) is grounded on the file being opened, not dropped because the filename
+    # does not appear in the retrieved output — a.txt is a file, not a code symbol.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:2', ev,
+                      support='confirmed the line via git show HEAD:a.txt')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
+    # Two real snake_case symbols: compute_total is in the reviewer's evidence, helper_fn is in the
+    # tree but not in this finding's evidence. The tripwire grounds helper_fn on the tree (a real
+    # symbol is never a fabrication), so the finding is kept rather than dropped.
+    _add_code_file(repo, 'calc.py',
+                   'def compute_total():\n    return x + y\n\n'
+                   'def helper_fn():\n    return z\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total and helper_fn disagree on z', 'calc.py:2', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_post_consolidation_keeps_rephrased_real_finding(repo):
+    # The consolidator rewords a finding to name a symbol the reviewer did not literally retrieve
+    # (compute_total is in the tree but not in this finding's git output). Pre-consolidation the
+    # "at least one symbol in the reviewer's evidence" check drops it; post_consolidation skips that
+    # check, so a real symbol (grounded in the tree) is kept rather than mistaken for ungrounded.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git show HEAD:calc.py', 'def add_pair():\n    return x + y')]
+    f = _gate_finding('compute_total drops an operand', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main', post_consolidation=True))
+    assert kept == [f]
+
+
+def test_gate_drops_finding_whose_file_was_never_opened(repo):
+    # No distinctive symbol and a cited file the reviewer never opened -> not grounded -> dropped.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the config is wrong', 'zeta.conf:5', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_backstop_drops_nonexistent_file(repo):
+    # Even grounded in retrieved evidence, a finding citing a file that does not exist anywhere
+    # (HEAD or base) is fabricated and dropped by the file-data backstop.
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total ignores the x term', 'does_not_exist.py:3', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_backstop_drops_line_beyond_file(repo):
+    # A cited line past the end of the real file is a fabricated line number -> dropped.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:999', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_backstop_drops_citation_into_empty_file(repo):
+    # An existing but empty file has 0 lines, so a citation to any line is out of range ->
+    # dropped. (Before the fix an empty file read as "unknown length" and the check was skipped.)
+    _add_code_file(repo, 'empty.txt', '')
+    ev = [('$ git show HEAD:empty.txt', '')]
+    f = _gate_finding('the value here is wrong', 'empty.txt:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_counts_blank_boundary_lines_in_file(repo):
+    # A file with blank lines at its start/end: _file_info counts them from the raw (unstripped)
+    # content, so a citation to a real line is in range rather than mis-dropped as out of range.
+    _add_code_file(repo, 'pad.txt', '\n\nvalue\n\n')  # 4 lines: blank, blank, value, blank
+    ev = [('$ git show HEAD:pad.txt', 'value')]
+    f = _gate_finding('the value line is wrong', 'pad.txt:3', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_git_line_count_matches_splitlines(repo):
+    # _git_line_count streams the file (no whole-file buffer) and must agree with splitlines() —
+    # counting blank boundary lines and a final line with no trailing newline.
+    cases = {'plain.txt': 'a\nb\nc\n', 'lead.txt': '\n\na\n',
+             'trail.txt': 'a\n\n\n', 'noeol.txt': 'a\nb', 'empty.txt': ''}
+    for name, content in cases.items():
+        _add_code_file(repo, name, content)
+        got = asyncio.run(review._git_line_count('HEAD', name, repo))
+        assert got == len(content.splitlines()), (name, got, content)
+
+
+def test_gate_drops_finding_with_no_evidence(repo):
+    # A finding reported without any git probe is unverified (mandatory probing failed to force one)
+    # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
+    f = _gate_finding('compute_total ignores the x term', 'a.txt:2', [])
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_empty_input_is_empty(repo):
+    assert asyncio.run(review.evidence_gate([], repo, 'main')) == []
+
+
+def test_gate_keeps_finding_with_line_range_location(repo):
+    # A line-range location (a.txt:1-4) is not a single "path:line", so the file-data backstop must
+    # not treat "a.txt:1-4" as a filename (that would fabricate a "missing file" and drop a real,
+    # grounded finding). The finding is grounded on the file its reviewer read.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('TWO is uppercase, breaks parsing', 'a.txt:1-4', ev,
+                      support='confirmed with git show that the block is wrong')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_keeps_finding_with_multi_file_location(repo):
+    # A multi-file location (a.txt + b.txt) cannot be checked as one file; a finding grounded on a
+    # real symbol it read survives rather than being dropped as a bogus "missing file".
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total and its caller disagree', 'a.txt + b.txt', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_keeps_finding_with_line_spec_suffixes(repo):
+    # ":12+", ":1-EOF", and multi-range specs all carry a real file; the backstop strips the line
+    # spec (everything after the ':' that starts with a digit) and checks the file, so these are
+    # not mistaken for nonexistent paths.
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    for loc in ('a.txt:2+', 'a.txt:1-EOF', 'a.txt:1-2,3-4'):
+        f = _gate_finding('the value here is wrong', loc, list(ev))
+        kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+        assert kept == [f], loc
+
+
+def test_gate_drops_out_of_range_line_range_location(repo):
+    # A line RANGE past the end of a real file is out of bounds: parse_location returns the
+    # largest number in the range (the end), so the backstop bounds-checks it rather than skipping
+    # ranges (which previously returned no line and let a fabricated range through).
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]  # a.txt has 4 lines
+    f = _gate_finding('the value here is wrong', 'a.txt:3-9', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+    # A range whose end is within the file is kept.
+    f = _gate_finding('the value here is wrong', 'a.txt:2-4', ev)
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_drops_citation_when_line_count_unknown(repo):
+    # A file that exists but whose line count cannot be read: a cited line cannot be verified
+    # against the file's end, so it is dropped (an out-of-range citation must not pass an
+    # unverified backstop).
+    async def fake_line_count(ref, path, cwd):
+        return None  # counting failed
+    with patch.object(review, '_git_line_count', new=fake_line_count):
+        ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+        f = _gate_finding('the value here is wrong', 'a.txt:999', ev)
+        assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_drops_zero_based_line_citation(repo):
+    # Citations are 1-based; a :0 line is not a valid line and is dropped (the bounds check used
+    # to reject only lines past the end, so a zero-based citation slipped through).
+    ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:0', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_symbol_present_tri_state_on_grep_error(repo):
+    # A git grep error (rc >= 2) is not proof of absence: _symbol_present distinguishes a clean
+    # no-match (False) from a failed grep (None). A grep error must therefore neither fabricate a
+    # symbol (fabricated-subject drops only on a definitive no-match) nor fail to falsify an
+    # absence claim (contradiction drops only on a positive match).
+    assert asyncio.run(review._symbol_present('TWO', repo, {})) is True
+    assert asyncio.run(review._symbol_present('zzzabsent', repo, {})) is False
+    with patch.object(review, '_git', new=AsyncMock(return_value=(2, '', 'fatal: bad'))):
+        assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
+
+
+def test_gate_drops_cited_file_match_in_unrelated_command(repo):
+    # The cited-file check matches a whole path component, not a substring: a command that read
+    # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
+    # different file's name, not the file that command actually opened.
+    ev = [('$ git show HEAD:a.txt.backup', 'one\nTWO\nthree\nfour')]
+    f = _gate_finding('the value here is wrong', 'a.txt:2', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_drops_same_basename_different_directory(repo):
+    # A full-path citation (src/foo.py, with a directory) matches only that exact path, not just
+    # its basename: a command that read vendor/foo.py does not ground a finding cited at src/foo.py,
+    # even though both files share the name foo.py (the cited file was never actually read).
+    os.makedirs(f'{repo}/src', exist_ok=True)
+    _add_code_file(repo, 'src/foo.py', 'def f():\n    return 1\n')
+    ev = [('$ git show HEAD:vendor/foo.py', 'def v():\n    return 2')]
+    f = _gate_finding('the value here is wrong', 'src/foo.py:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
+    # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
+    # is the only symbol-level backstop. A consolidator can invent a dotted chain (svc.foo.bar); it
+    # must be checked in full, not skipped as dotted and not grounded on its `bar` leaf (a real,
+    # present symbol), so the finding is dropped when that exact chain is in neither the evidence
+    # nor the tree.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n\nbar = 1\n')
+    ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+    f = _gate_finding('compute_total routes through svc.foo.bar', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
+def test_gate_post_consolidation_drops_grepped_invented_symbol(repo):
+    # Post-consolidation, an invented symbol the reviewer only GREPPED for (a query, not an opened
+    # file) is still dropped: the fabricated-subject check has no command-text exemption (a
+    # `git grep <name>` argument is a search term, not a path), so a grep'd-but-absent invented
+    # name cannot ground itself in its own lookup.
+    _add_code_file(repo, 'calc.py', 'def compute_total():\n    return x + y\n')
+    ev = [('$ git grep -F phantomHandler HEAD', '')]
+    f = _gate_finding('compute_total routes through phantomHandler', 'calc.py:2', ev)
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
+
+
+def test_gate_file_opened_check_ignores_grep_pathspec(repo):
+    # A location-only finding (no symbol) must be grounded on a file OPEN (git show), not on a git
+    # grep whose pathspec merely names the file: a clean no-match grep read no code from the cited
+    # file, so it does not establish that the reviewer opened it.
+    os.makedirs(f'{repo}/src', exist_ok=True)
+    _add_code_file(repo, 'src/config.py', 'a = 1\n')
+    ev = [('$ git grep -n needle -- src/config.py', '')]
+    f = _gate_finding('the value here is wrong', 'src/config.py:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_deleted_file_finding(repo):
+    # A finding about a file the change deleted (present at the base, absent at HEAD): its dotted
+    # filename must be recognized as a file (from the base tree, not just HEAD), so the gate falls
+    # to the file-opened branch and grounds it on the `git show <base>:<path>` the reviewer ran,
+    # instead of treating the filename as a code symbol and dropping it as "never retrieved".
+    _git(repo, 'checkout', '-q', 'main')
+    with open(f'{repo}/removed.txt', 'w') as fh:
+        fh.write('alpha\nbeta\n')
+    _git(repo, 'add', 'removed.txt')
+    _git(repo, 'commit', '-q', '-m', 'add removed.txt')
+    # Checking back out to feature drops removed.txt from the working tree (it is tracked on the
+    # base, not on HEAD), so it is the deleted-file case: present at base, absent at HEAD.
+    _git(repo, 'checkout', '-q', 'feature')
+    ev = [('$ git show main:removed.txt', 'alpha\nbeta')]
+    f = _gate_finding('removed.txt handling is wrong', 'removed.txt:1', ev,
+                      support='read the deleted file via git show main:removed.txt')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_review_pass_merges_evidence_across_rounds(repo):
+    # A reviewer that verifies with git in round 1 and re-states the finding in round 2 (without
+    # re-probing) must keep its round-1 evidence on the final finding, so the gate can verify it
+    # against the code the reviewer actually read over the whole pass.
+    round1 = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+               'location': 'a.txt:2', 'desc': 'bad thing in compute_total', 'support': '',
+               'evidence': [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]}]
+    round2 = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+               'location': 'a.txt:2', 'desc': 'bad thing in compute_total', 'support': '',
+               'evidence': []}]
+    calls = {'n': 0}
+
+    async def fake_personas(reviewers, user_message, model, stage, **k):
+        calls['n'] += 1
+        return round1 if calls['n'] == 1 else round2
+
+    async def fake_gate(actionable, tool_ctx, model, base_name, base_ref, debug, **k):
+        return '[Sage-A1] - a convention'  # non-empty preamble forces a second round
+
+    with patch.object(review, 'run_personas', new=fake_personas), \
+         patch.object(review, 'conventions_gate', new=fake_gate):
+        out = asyncio.run(review._review_pass(
+            [('Sage', 'body', 1)], 'msg', 'm', 'main', 'main', 1, '',
+            tools.ToolContext(phase='review', workdir=repo, notes=[]),
+            {}, {}, None, 0, False))
+    assert len(out) == 1
+    assert out[0]['evidence'] == [
+        ('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
+
+
 # --- the conventions gate -----------------------------------------------------
 
 
@@ -288,12 +802,54 @@ def test_conventions_gate_rebuts_and_noobjections(repo):
     assert out == ''
 
 
+def test_critic_gate_refutes_and_noobjections(repo):
+    # The critic refutes a finding whose claim the code contradicts (citing counter-evidence),
+    # or reports NO OBJECTIONS when every finding holds up.
+    class RefuteMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *a, **k):
+            return '[Sage-A1] - compute_total is called at calc.py:40'
+
+    class QuietMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *a, **k):
+            return 'NO OBJECTIONS'
+
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'compute_total is never called'}]
+    ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
+
+    async def no_compact(messages, mapper, ctx, debug=False):
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: RefuteMapper()):
+        out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
+    assert 'Sage-A1' in out and 'calc.py:40' in out
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
+        out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
+    assert out == ''
+
+
 # --- the multi-round review loop ---------------------------------------------
 
 
 def _finding():
+    # Carries git evidence (a.txt was read) so it passes the strict evidence gate.
     return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
-             'location': 'a.txt:2', 'desc': 'bad thing'}]
+             'location': 'a.txt:2', 'desc': 'bad thing',
+             'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
 
 
 def test_review_loop_converges_when_gate_quiet(repo, capsys):
@@ -304,7 +860,7 @@ def test_review_loop_converges_when_gate_quiet(repo, capsys):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return ''
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -328,7 +884,7 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return '[Sage-A1] - repo uses no type hints; drop it'
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -348,6 +904,36 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
     assert 'very confident' in panel_calls[1]
 
 
+def test_review_loop_revises_when_critic_refutes(repo, capsys):
+    # The conventions gate is quiet but the critic refutes a finding -> the panel re-runs (round 2)
+    # with the refutation, so each reviewer can drop the finding the code contradicts.
+    panel_calls = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        panel_calls.append(message)
+        return _finding()
+
+    async def fake_conv(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+        return ''  # conventions gate is quiet
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+        return '[Sage-A1] - the claimed-missing call is present at a.txt:5'
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'conventions_gate', new=fake_conv), \
+         patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args(review_rounds=1)))
+    assert rc == 0
+    assert len(panel_calls) == 2  # initial round + one revision round driven by the critic
+    assert 'Previous review round' in panel_calls[1]
+    assert 'critic' in panel_calls[1]
+    assert '[Sage-A1]' in panel_calls[1]
+
+
 def test_review_loop_stops_at_round_budget(repo):
     # Even if the gate keeps rebuting, the loop stops after the round budget.
     panel_calls = []
@@ -356,7 +942,7 @@ def test_review_loop_stops_at_round_budget(repo):
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False):
+    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
         return '[Sage-A1] - always rebutting'
 
     async def fake_consolidate(context_block, findings, model, **k):
@@ -367,6 +953,119 @@ def test_review_loop_stops_at_round_budget(repo):
          patch.object(review, 'consolidate_findings', new=fake_consolidate):
         asyncio.run(review.run_review(_args(review_rounds=2)))
     assert len(panel_calls) == 3  # rounds 0,1,2 then the budget is exhausted
+
+
+def test_per_persona_critique_revises_refuted_reviewer(repo):
+    # A reviewer's finding is refuted by the critic; _per_persona_critique gives that reviewer one
+    # revision pass and keeps the corrected findings, merging the code it read in round 0 so a
+    # re-stated finding is still grounded by the evidence gate.
+    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'phantomThing is undefined', 'support': '',
+                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]}]
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+        return '[Sage-A1] - phantomThing is defined at a.txt:3'
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        assert 'the critic' in message and '[Sage-A1]' in message  # it saw the refutation
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'corrected finding', 'support': '',
+                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO')]}]
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'run_personas', new=fake_panel):
+        out = asyncio.run(review._per_persona_critique(
+            [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
+            ctx, None, None, None, False))
+    assert [f['desc'] for f in out] == ['corrected finding']
+    # The revision-round evidence is merged with what the reviewer read in round 0.
+    assert ('$ git show HEAD:a.txt', 'one\nTWO') in out[0]['evidence']
+    assert ('$ git show HEAD:a.txt', 'one\nTWO\nthree') in out[0]['evidence']
+
+
+def test_per_persona_critique_keeps_unrefuted_reviewer(repo):
+    # Nothing refuted -> the reviewer's findings pass through unchanged and no revision runs.
+    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+                 'desc': 'a real finding', 'support': '', 'evidence': []}]
+
+    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+        return ''
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        raise AssertionError('no revision should run when nothing is refuted')
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'run_personas', new=fake_panel):
+        out = asyncio.run(review._per_persona_critique(
+            [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
+            ctx, None, None, None, False))
+    assert out == findings
+
+
+def test_corroborated_keeps_only_recurring_concerns():
+    # A concern restated across a majority of passes survives; a one-pass fluke is dropped.
+    def f(label, loc, desc):
+        return {'name': 'Sage', 'label': label, 'severity': 'MAJOR',
+                'location': loc, 'desc': desc}
+
+    p1 = [f('A1', 'a.txt:2', 'null pointer dereference'),
+          f('B1', 'a.txt:9', 'unused variable foo')]
+    p2 = [f('A2', 'a.txt:2', 'null pointer check missing')]
+    p3 = [f('A3', 'a.txt:3', 'null pointer not checked')]
+    passes = [p1, p2, p3]
+    union = [f for p in passes for f in p]
+    kept = review._corroborated(union, passes, 2)
+    # The null-pointer concern (a.txt) recurs in all three passes; the other two are one-offs.
+    assert len(kept) == 3
+    assert all(k['location'].startswith('a.txt') for k in kept)
+    # With no corroboration required (threshold 1) every candidate is kept.
+    assert len(review._corroborated(union, passes, 1)) == len(union)
+
+
+def test_run_review_consensus_runs_panel_n_times(repo):
+    # --consensus N runs the full panel pass N times (one per independent sample).
+    panel_calls = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        panel_calls.append(1)
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args(consensus=3)))
+    assert rc == 0
+    assert len(panel_calls) == 3
+
+
+def test_run_review_rejects_invalid_consensus(repo):
+    # --consensus must be 0 (single pass) or >= 2; 1 and negatives are rejected rather than being
+    # silently clamped to a single pass.
+    for bad in (1, -2):
+        with pytest.raises(Exception, match='--consensus must be 0'):
+            asyncio.run(review.run_review(_args(consensus=bad)))
+
+
+def test_run_review_reasoning_effort_flag(repo):
+    # --reasoning-effort overrides the default; without it the default (medium) applies.
+    seen = []
+
+    async def fake_panel(reviewers, message, model, stage, **k):
+        seen.append(k.get('reasoning_effort'))
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        asyncio.run(review.run_review(_args(reasoning_effort='high')))
+        asyncio.run(review.run_review(_args()))
+    assert seen == ['high', review.REVIEW_REASONING_EFFORT]
 
 
 # --- the panel path end-to-end (real personas, mocked LLM) -------------------
@@ -388,6 +1087,89 @@ def test_run_review_reports_findings(repo, capsys):
     assert '[MAJOR] a.txt:2 - bad thing' in out
 
 
+def test_run_review_evidence_gate_drops_ungrounded(repo, capsys):
+    # End to end: a finding whose named symbol never appears in the reviewer's git evidence is
+    # dropped by the deterministic gate before consolidation, so it never reaches the output.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'phantomHandler leaks memory',
+                'support': '',
+                'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    assert rc == 0
+    assert 'phantomHandler' not in capsys.readouterr().out
+
+
+def test_run_review_evidence_gate_keeps_grounded(repo, capsys):
+    # The mirror case: a finding whose symbol IS in the reviewer's evidence survives the gate into
+    # the final output.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'bad thing in compute_total',
+                'support': '',
+                'evidence': [('$ git show HEAD:calc.py',
+                              'def compute_total():\n    return x + y')]}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    assert rc == 0
+    assert 'compute_total' in capsys.readouterr().out
+
+
+def test_run_review_drops_symbol_invented_by_consolidator(repo, capsys):
+    # The panel's finding is grounded and passes the pre-consolidation gate; consolidation then
+    # rewrites its description to name a function the reviewers never read and that is not in the
+    # tree. The post-consolidation evidence gate drops it, so the invented name is never posted.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'the value here is wrong',
+                'support': '',
+                'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                 'location': 'a.txt:2', 'desc': 'ensure_tool_probing can spin forever',
+                 'support': ''}]
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    assert rc == 0
+    assert 'ensure_tool_probing' not in capsys.readouterr().out
+
+
+def test_run_review_preserves_support_through_consolidation(repo, capsys):
+    # The panel finding carries supporting paragraphs; the real consolidation re-emits a
+    # one-line finding (support dropped), but the reviewer's evidence is re-attached by
+    # (name, label) so it survives into the final output.
+    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                'location': 'a.txt:2', 'desc': 'bad thing',
+                'support': 'verified with git show; the oracle asserts X',
+                'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                 'location': 'a.txt:2', 'desc': 'bad thing', 'support': ''}]
+
+    with patch.object(review, 'run_personas',
+                      new=AsyncMock(return_value=finding)), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate):
+        rc = asyncio.run(review.run_review(_args()))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert 'verified with git show; the oracle asserts X' in out
+
+
 def test_run_review_end_to_end_with_real_personas(repo, capsys):
     # Runs the REAL run_personas (real persona files + FINDINGS_CONTRACT + parse_findings)
     # against the real git/notes tool wiring, mocking only the LLM mapper, so the whole
@@ -398,10 +1180,15 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
         model = 'm'
 
         def __init__(self, *a, **k):
-            pass
+            self.n = 0
 
         async def run(self, *a, **k):
-            return 'A1 [MAJOR] a.txt:2 - bad thing'
+            # Probe first (mandatory probing requires a git command before a finding is accepted),
+            # then report.
+            self.n += 1
+            if self.n == 1:
+                return '$ git show HEAD:a.txt'
+            return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
 
     async def no_compact(messages, mapper, ctx, debug=False):
         return messages
@@ -442,16 +1229,158 @@ def test_run_review_pr_requires_gh(repo, monkeypatch):
 
 def test_run_review_pr_dirty_tree_errors(repo, monkeypatch):
     monkeypatch.setattr(review, 'gh_available', lambda: True)
+
+    async def fake_head(num, cwd=None):
+        return ('feature', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')
+
+    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+        return False
+
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', not_ahead)
     with open(os.path.join(repo, 'dirty.txt'), 'w') as f:
         f.write('x')
     with pytest.raises(Exception, match='uncommitted changes'):
         asyncio.run(review.run_review(_args(pr=123)))
 
 
+def test_gh_pr_head_parses():
+    payload = json.dumps({'headRefName': 'feature/x', 'headRefOid': 'abc123'})
+
+    async def fake_gh(*a, **k):
+        return (0, payload, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        ref, oid = asyncio.run(review.gh_pr_head(7))
+    assert ref == 'feature/x' and oid == 'abc123'
+
+
+def test_local_branch_ahead_of(repo):
+    # The checked-out feature branch is one commit ahead of main, so main's commit is an ancestor
+    # of HEAD. There is no `origin` remote in the fixture, so the fetch is best-effort (skipped
+    # when the object is already local).
+    main_oid = _rev(repo, 'main')
+    assert asyncio.run(review.local_branch_ahead_of(repo, 'main', main_oid)) is True
+    assert asyncio.run(review.commits_ahead(repo, main_oid)) == 1
+    # A commit that is not an ancestor of HEAD reports False.
+    assert asyncio.run(
+        review.local_branch_ahead_of(repo, 'main', 'f' * 40)) is False
+
+
+def _fake_review_downstream():
+    # Shared fakes so a --pr review runs end-to-end without a network or the LLM.
+    async def fake_panel(reviewers, message, model, stage, **k):
+        return _finding()
+
+    async def fake_consolidate(context_block, findings, model, **k):
+        return findings
+
+    async def fake_gh(*a, **k):
+        if a[0] == 'repo':
+            return (0, json.dumps({'nameWithOwner': ''}), '')
+        return (0, json.dumps({'title': 't', 'body': 'b', 'comments': []}), '')
+
+    return fake_panel, fake_consolidate, fake_gh
+
+
+def test_run_review_prefers_local_when_ahead(repo, capsys, monkeypatch):
+    # The checked-out branch contains the PR head (main's commit is an ancestor of HEAD), so the
+    # local commits are reviewed instead of checking the PR out (which would drop unpushed fixes).
+    main_oid = _rev(repo, 'main')
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', main_oid)
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123)))
+    assert rc == 0
+    assert checkout_calls == []  # did not check the PR out
+    assert 'local branch' in capsys.readouterr().out
+
+
+def test_run_review_checks_out_when_not_ahead(repo, capsys, monkeypatch):
+    # The local branch does not contain the PR head, so the PR is checked out.
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', 'f' * 40)
+
+    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+        return False
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', not_ahead)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123)))
+    assert rc == 0
+    assert checkout_calls == [123]
+    assert 'Checked out PR' in capsys.readouterr().out
+
+
+def test_run_review_remote_forces_checkout(repo, capsys, monkeypatch):
+    # Even when the local branch is ahead of the PR head, --remote checks the remote head out.
+    main_oid = _rev(repo, 'main')
+    checkout_calls = []
+
+    async def fake_head(num, cwd=None):
+        return ('feature', main_oid)
+
+    async def ahead(cwd=None, head_ref='', head_oid=''):
+        return True
+
+    async def fake_checkout(num, cwd=None):
+        checkout_calls.append(num)
+
+    fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
+    monkeypatch.setattr(review, 'gh_pr_head', fake_head)
+    monkeypatch.setattr(review, 'local_branch_ahead_of', ahead)
+    monkeypatch.setattr(review, 'gh_pr_checkout', fake_checkout)
+    with patch.object(review, 'run_personas', new=fake_panel), \
+         patch.object(review, 'consolidate_findings', new=fake_consolidate), \
+         patch.object(review, '_gh', new=fake_gh):
+        rc = asyncio.run(review.run_review(_args(pr=123, remote=True)))
+    assert rc == 0
+    assert checkout_calls == [123]
+    assert 'Checked out PR' in capsys.readouterr().out
+
+
 def test_run_review_linear_requires_linear(repo, monkeypatch):
     monkeypatch.setattr(review, 'linear_available', lambda: False)
     with pytest.raises(Exception, match='requires the `linear` CLI'):
         asyncio.run(review.run_review(_args(linear='ACME-1')))
+
+
+def test_linear_context_uses_issue_view_json(repo):
+    # The linear CLI (v2.x) fetches one issue with `linear issue view <id> --json`, not the
+    # older `linear issue <id> --output json`; pin the exact command we shell out to.
+    calls = {}
+
+    async def fake_run(cmd, *args, **k):
+        calls['cmd'] = cmd
+        calls['args'] = args
+        return (0, '{"identifier": "ACME-1"}', '')
+
+    with patch.object(review, '_run', new=fake_run):
+        out = asyncio.run(review.linear_context('ACME-1'))
+    assert calls['cmd'] == 'linear'
+    assert calls['args'] == ('issue', 'view', 'ACME-1', '--json', '--no-pager')
+    assert out == '{"identifier": "ACME-1"}'
 
 
 def test_gh_pr_context_flattens_reviews():
