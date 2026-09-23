@@ -757,6 +757,19 @@ def test_git_remote_mutating_subcommands_refused(tmp_path):
         assert 'would modify the repository' not in out
 
 
+def test_git_refuses_no_index_reads_external_files(tmp_path):
+    # `git diff --no-index` reads files outside the repository (e.g. /etc/passwd), which would
+    # leak local secrets to the LLM; the flag is refused.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init', '--allow-empty'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.git(
+        ['diff', '--no-index', '/etc/hostname', '/etc/passwd'], ctx))
+    assert out.startswith('error:') and 'outside the repository' in out
+
+
 def test_run_with_tools_does_not_record_error_evidence(tmp_path):
     # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
     # too large to show at once), so it is not recorded as evidence: only actual output grounds a

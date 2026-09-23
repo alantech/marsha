@@ -753,6 +753,10 @@ GIT_REMOTE_READONLY_SUBCOMMANDS = {'get-url', 'show'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
+# Flags that make an otherwise-repository-scoped command read files OUTSIDE the repository
+# (e.g. `git diff --no-index /etc/passwd /etc/shadow`); rejected so the reviewer cannot pull
+# local secrets or arbitrary files into the LLM context.
+GIT_EXTERNAL_FILE_FLAGS = {'--no-index'}
 GIT_TIMEOUT = 60
 
 
@@ -831,6 +835,9 @@ async def git(args, ctx=None, page=None):
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:
             return f'error: the flag `{flag}` is not allowed (it writes to disk).'
+        if flag.split('=', 1)[0] in GIT_EXTERNAL_FILE_FLAGS:
+            return (f'error: the flag `{flag}` is not allowed (it would read files '
+                    f'outside the repository).')
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: git has no working directory (not run inside a repository).'
