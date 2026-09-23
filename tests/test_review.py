@@ -370,6 +370,15 @@ def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_drops_finding_with_no_symbol_and_no_location(repo):
+    # A finding that names no symbol and cites no file cannot be grounded in the code the
+    # reviewer read, so it is dropped even when it carries (unrelated) git evidence such as a
+    # bare `git status`.
+    ev = [('$ git status', 'On branch main\nnothing to commit, working tree clean')]
+    f = _gate_finding('the overall approach is flawed', '', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_drops_finding_grounded_only_in_grep_query(repo):
     # A reviewer greps for a symbol that does not exist (git grep returns nothing) and reads a
     # file that lacks it. The symbol appears only in the grep QUERY, not in any retrieved output,

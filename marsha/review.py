@@ -1057,6 +1057,12 @@ async def evidence_gate(findings, cwd, base_ref, debug=False, post_consolidation
             base = file_path.rsplit('/', 1)[-1]
             if file_path not in command_scope and base not in command_scope:
                 ok, reason = False, f'cited file {file_path} was never opened in the reviewer\'s git evidence'
+        elif not post_consolidation:
+            # A finding that names no symbol and cites no file references nothing we can check
+            # against the code the reviewer read, so any nonempty evidence (even an unrelated
+            # `git status`) would ground it; drop it as ungrounded.
+            ok, reason = False, (
+                'names no symbol and cites no file, so it cannot be grounded in the code read')
         if ok and file_path:
             exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
             if not exists:
