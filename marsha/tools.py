@@ -869,7 +869,11 @@ async def git(args, ctx=None, page=None):
     # begins with blank lines would otherwise have its page ranges shifted).
     result = (out or '').rstrip()
     errtxt = (err or '').strip()
-    if proc.returncode != 0 and not result:
+    # `git grep` exits 1 on a clean no-match (empty output) — a valid empty result, not a failure.
+    # Treating it as an error would hide the no-match from the reviewer (and drop it from the
+    # evidence ledger), so it is the one nonzero exit we do not report as a failure.
+    grep_no_match = sub == 'grep' and proc.returncode == 1
+    if proc.returncode != 0 and not result and not grep_no_match:
         return f'error: `git {sub} {" ".join(rest)}` failed: {errtxt}'
     if errtxt:
         result = (result + '\n[git stderr]\n' + errtxt).strip()

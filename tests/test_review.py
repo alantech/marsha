@@ -660,6 +660,17 @@ def test_gate_drops_cited_file_match_in_unrelated_command(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
+def test_gate_drops_same_basename_different_directory(repo):
+    # A full-path citation (src/foo.py, with a directory) matches only that exact path, not just
+    # its basename: a command that read vendor/foo.py does not ground a finding cited at src/foo.py,
+    # even though both files share the name foo.py (the cited file was never actually read).
+    os.makedirs(f'{repo}/src', exist_ok=True)
+    _add_code_file(repo, 'src/foo.py', 'def f():\n    return 1\n')
+    ev = [('$ git show HEAD:vendor/foo.py', 'def v():\n    return 2')]
+    f = _gate_finding('the value here is wrong', 'src/foo.py:1', ev)
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
     # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
     # is the only symbol-level backstop. A consolidator can invent a dotted chain (svc.foo.bar); it

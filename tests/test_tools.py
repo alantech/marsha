@@ -770,6 +770,24 @@ def test_git_refuses_no_index_reads_external_files(tmp_path):
     assert out.startswith('error:') and 'outside the repository' in out
 
 
+def test_git_grep_no_match_is_not_an_error(tmp_path):
+    # A clean `git grep` with no matches exits 1 with empty output: that is a valid empty result,
+    # not a failure. It must not be reported as `error:` (which run_with_tools excludes from the
+    # evidence ledger), so a reviewer can show a symbol is genuinely absent rather than a failed
+    # search. A grep that DOES match returns its matches, not an error.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'code.txt').write_text('alpha\nbeta\n')
+    subprocess.run(['git', 'add', 'code.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    hit = asyncio.run(tools.git(['grep', '-F', 'alpha', 'HEAD'], ctx))
+    assert not hit.startswith('error:') and 'alpha' in hit
+    miss = asyncio.run(tools.git(['grep', '-F', 'zzzabsent', 'HEAD'], ctx))
+    assert not miss.startswith('error:') and miss == ''
+
+
 def test_run_with_tools_does_not_record_error_evidence(tmp_path):
     # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
     # too large to show at once), so it is not recorded as evidence: only actual output grounds a

@@ -1040,14 +1040,16 @@ async def _symbol_present(symbol, cwd, cache):
 
 
 def _path_token_match(command_scope, file_path):
-    # Whether `file_path` (or its basename) appears in the command text as a whole path component,
-    # not as a substring of a longer name. The commands are split on whitespace and the ':' ref
-    # separator (so `git show HEAD:src/a.py` yields the path `src/a.py` as a token); a match is an
-    # exact token, or a token whose final path component is the basename. This is what stops a
-    # command that read `a.txt.backup` from grounding a finding that cites `a.txt`.
-    base = file_path.rsplit('/', 1)[-1]
+    # Whether `file_path` appears in the command text as a whole path component, not as a substring
+    # of a longer name. The commands are split on whitespace and the ':' ref separator (so
+    # `git show HEAD:src/a.py` yields the path `src/a.py` as a token). A full path (one with a
+    # directory) matches only on the exact path, so a command that read vendor/foo.py cannot ground
+    # a cite of src/foo.py; a bare filename (no directory) also matches any token whose final
+    # component is that name, since the cite alone cannot say which directory it meant. This is
+    # what stops a command that read a.txt.backup from grounding a finding that cites a.txt.
+    bare = '/' not in file_path
     for tok in re.split(r'[\s:]+', command_scope):
-        if tok == file_path or tok == base or tok.rsplit('/', 1)[-1] == base:
+        if tok == file_path or (bare and tok.rsplit('/', 1)[-1] == file_path):
             return True
     return False
 
