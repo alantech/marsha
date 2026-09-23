@@ -69,8 +69,6 @@ ignore_missing_imports = true
 # term, meta, parse, model_match, stats, llm_client) are checked strictly.
 [[tool.mypy.overrides]]
     module = [
-        "marsha.base",
-        "marsha.__main__",
     # tests/ has no __init__.py, so mypy names these top-level modules (not tests.test_*).
     "test_backend",
     "test_cli",
