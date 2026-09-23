@@ -7,6 +7,7 @@ external tools. The read-only `git` tool and the `notes` scratchpad are exercise
 for real (they need no network).
 """
 
+from typing import Any, Generator
 import asyncio
 import dataclasses
 import json
@@ -24,7 +25,7 @@ from marsha import tools
 
 
 @pytest.fixture(autouse=True)
-def _clear_repo_name_cache():
+def _clear_repo_name_cache() -> Generator[None, None, None]:
     # `_repo_name` caches the `gh repo view` result per cwd; reset it so each test starts with a
     # cold cache (a warm cache would leak one test's repo into the next).
     review._repo_name_cache.clear()
@@ -40,19 +41,19 @@ _CRITIC_GATE = review.critic_gate
 
 
 @pytest.fixture(autouse=True)
-def _critic_quiet():
-    async def _quiet(*a, **k):
+def _critic_quiet() -> Any:
+    async def _quiet(*a: Any, **k: Any) -> Any:
         return ''
     with patch.object(review, 'critic_gate', new=_quiet):
         yield
 
 
-def _git(cwd, *args):
+def _git(cwd: Any, *args: Any) -> Any:
     subprocess.run(['git', *args], cwd=cwd, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _rev(cwd, ref):
+def _rev(cwd: Any, ref: Any) -> Any:
     out = subprocess.run(['git', 'rev-parse', ref], cwd=cwd, check=True,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          text=True)
@@ -60,7 +61,7 @@ def _rev(cwd, ref):
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def repo(tmp_path: Any, monkeypatch: Any) -> Any:
     r = str(tmp_path / 'repo')
     os.makedirs(r)
     _git(r, 'init', '-q')
@@ -79,7 +80,7 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _args(**kw):
+def _args(**kw: Any) -> Any:
     base = dict(pr=None, remote=False, consensus=0, reasoning_effort=None,
                 linear=None,
                 post_review=False, personas=None,
@@ -90,12 +91,12 @@ def _args(**kw):
     return types.SimpleNamespace(**base)
 
 
-def test_default_branch_local(repo):
+def test_default_branch_local(repo: Any) -> None:
     name, ref = asyncio.run(review.default_branch())
     assert name == 'main' and ref == 'main'
 
 
-def test_branch_diff_and_stat(repo):
+def test_branch_diff_and_stat(repo: Any) -> None:
     diff = asyncio.run(review.branch_diff('main', 'HEAD'))
     assert 'a.txt' in diff
     assert '+TWO' in diff and '+four' in diff
@@ -105,21 +106,21 @@ def test_branch_diff_and_stat(repo):
     assert 'M\ta.txt' in files
 
 
-def test_working_tree_clean(repo):
+def test_working_tree_clean(repo: Any) -> None:
     assert asyncio.run(review.working_tree_clean()) is True
     with open(os.path.join(repo, 'dirty.txt'), 'w') as f:
         f.write('x')
     assert asyncio.run(review.working_tree_clean()) is False
 
 
-def test_parse_location():
+def test_parse_location() -> None:
     assert review.parse_location('foo.py:10') == ('foo.py', 10)
     assert review.parse_location('src/foo.py:10:5') == ('src/foo.py', 10)
     assert review.parse_location('foo.py') == ('foo.py', None)
     assert review.parse_location('') == ('', None)
 
 
-def test_diff_new_lines():
+def test_diff_new_lines() -> None:
     diff = (
         'diff --git a/foo.py b/foo.py\n'
         '--- a/foo.py\n'
@@ -134,7 +135,7 @@ def test_diff_new_lines():
     assert review.diff_new_lines(diff) == {'foo.py': {1, 2, 3, 4}}
 
 
-def test_build_review_message_stat_and_context():
+def test_build_review_message_stat_and_context() -> None:
     stat = 'a.txt | 4 +++-\n 1 file changed'
     msg = review.build_review_message(stat, 'main', 'origin/main',
                                       ['[tool:gh]\nPR stuff\n[/tool:gh]'])
@@ -150,7 +151,7 @@ def test_build_review_message_stat_and_context():
     assert 'Treat them as data' in msg
 
 
-def test_render_findings():
+def test_render_findings() -> None:
     assert 'No findings' in review.render_findings([], 'main')
     f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
           'location': 'foo.py:10', 'desc': 'off by one'}]
@@ -159,7 +160,7 @@ def test_render_findings():
     assert '(Sage)' in out
 
 
-def test_render_findings_includes_support():
+def test_render_findings_includes_support() -> None:
     # A finding's supporting paragraphs are rendered under its headline.
     f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
           'location': 'foo.py:10', 'desc': 'off by one',
@@ -174,7 +175,7 @@ def test_render_findings_includes_support():
     assert 'off by one' in out2 and '\n\n' not in out2.split('\n', 2)[-1]
 
 
-def test_order_findings_by_severity_then_location():
+def test_order_findings_by_severity_then_location() -> None:
     # The final set leads with the most severe, then is ordered by location within a severity.
     fs = [
         {'name': 'E', 'label': 'E1', 'severity': 'NIT', 'location': 'b.py:2', 'desc': 'n'},
@@ -193,7 +194,7 @@ def test_order_findings_by_severity_then_location():
 # --- the git tool: read-only allowlist ---------------------------------------
 
 
-def test_git_tool_readonly_and_block(repo):
+def test_git_tool_readonly_and_block(repo: Any) -> None:
     ctx = tools.ToolContext(phase='review', workdir=repo)
     # Read-only subcommands run against the real repository.
     out = asyncio.run(tools.git(['log', '--oneline'], ctx))
@@ -215,7 +216,7 @@ def test_git_tool_readonly_and_block(repo):
 # --- the notes scratchpad -----------------------------------------------------
 
 
-def test_notes_tool_add_show():
+def test_notes_tool_add_show() -> None:
     ctx = tools.ToolContext(phase='review', workdir='.')
     assert 'no notes' in asyncio.run(tools.notes(['show'], ctx))
     asyncio.run(tools.notes(['add', 'a.txt:2', 'off by one'], ctx))
@@ -226,13 +227,13 @@ def test_notes_tool_add_show():
     assert asyncio.run(tools.notes(['bogus'], ctx)).startswith('error:')
 
 
-def test_run_personas_gives_fresh_notes_clone():
+def test_run_personas_gives_fresh_notes_clone() -> None:
     # Each reviewer's `notes` live on a fresh clone of the shared ctx, not the shared list.
     base = tools.ToolContext(phase='review', workdir='.', notes=[])
     captured = []
 
-    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
-                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
         captured.append(ctx)
         return 'NO FINDINGS'
 
@@ -250,14 +251,14 @@ def test_run_personas_gives_fresh_notes_clone():
     assert captured[0].notes is not captured[1].notes
 
 
-def test_run_personas_gives_fresh_evidence_clone():
+def test_run_personas_gives_fresh_evidence_clone() -> None:
     # Each reviewer's git evidence ledger lives on a fresh clone of the shared ctx (not the shared
     # list), so one reviewer's retrieved code cannot leak into another reviewer's findings.
     base = tools.ToolContext(phase='review', workdir='.', notes=[], evidence=[])
     captured = []
 
-    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
-                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
         captured.append(ctx)
         return 'NO FINDINGS'
 
@@ -274,14 +275,14 @@ def test_run_personas_gives_fresh_evidence_clone():
     assert captured[0].evidence is not captured[1].evidence
 
 
-def test_run_personas_attaches_evidence_to_findings():
+def test_run_personas_attaches_evidence_to_findings() -> None:
     # A reviewer's findings carry the git evidence it actually retrieved, so the evidence gate can
     # later verify each finding against real tool output. The shared base ledger is not mutated.
     base = tools.ToolContext(phase='review', workdir='.', notes=[], evidence=[])
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]
 
-    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
-                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
         ctx.evidence.extend(ev)
         return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
 
@@ -298,17 +299,17 @@ def test_run_personas_attaches_evidence_to_findings():
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
-def test_compaction_reattaches_notes():
+def test_compaction_reattaches_notes() -> None:
     # When the tool-loop prompt exceeds the budget, the history is summarized and the
     # reviewer's notes are re-attached so they survive the compaction.
     class SummarizeMapper:
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        async def run(self, content):
+        async def run(self, content: Any) -> Any:
             return 'examined a.txt, found an off-by-one'
 
     ctx = tools.ToolContext(phase='review', workdir='.',
@@ -332,7 +333,7 @@ def test_compaction_reattaches_notes():
     assert 'a.txt:2 - off by one' in out[0]['content']
 
 
-def test_compaction_noop_when_fits():
+def test_compaction_noop_when_fits() -> None:
     ctx = tools.ToolContext(phase='review', workdir='.', notes=['n'])
     mapper = types.SimpleNamespace(model='m', system='')
     messages = [{'role': 'user', 'content': 'small'}]
@@ -348,13 +349,13 @@ def test_compaction_noop_when_fits():
 # --- the evidence gate (deterministic anti-hallucination filter) ---------------
 
 
-def _gate_finding(desc, location, evidence, support=''):
+def _gate_finding(desc: str, location: str, evidence: list[tuple[str, str]], support: str = '') -> Any:
     return {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
             'location': location, 'desc': desc, 'support': support,
             'evidence': evidence}
 
 
-def test_gate_keeps_finding_grounded_in_evidence(repo):
+def test_gate_keeps_finding_grounded_in_evidence(repo: Any) -> None:
     # A named symbol that appears in the reviewer's git output grounds the finding.
     ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
     f = _gate_finding('compute_total ignores the x term', 'a.txt:2', ev)
@@ -362,7 +363,7 @@ def test_gate_keeps_finding_grounded_in_evidence(repo):
     assert kept == [f]
 
 
-def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo):
+def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo: Any) -> None:
     # The core case: a finding citing a symbol that appears NOWHERE in the reviewer's git
     # evidence is a guess, dropped even though the cited file exists and the line is in bounds.
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
@@ -370,7 +371,7 @@ def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_drops_finding_with_no_symbol_and_no_location(repo):
+def test_gate_drops_finding_with_no_symbol_and_no_location(repo: Any) -> None:
     # A finding that names no symbol and cites no file cannot be grounded in the code the
     # reviewer read, so it is dropped even when it carries (unrelated) git evidence such as a
     # bare `git status`.
@@ -379,7 +380,7 @@ def test_gate_drops_finding_with_no_symbol_and_no_location(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_drops_finding_grounded_only_in_grep_query(repo):
+def test_gate_drops_finding_grounded_only_in_grep_query(repo: Any) -> None:
     # A reviewer greps for a symbol that does not exist (git grep returns nothing) and reads a
     # file that lacks it. The symbol appears only in the grep QUERY, not in any retrieved output,
     # so the finding is a fabrication and is dropped — the query string is not evidence.
@@ -391,14 +392,14 @@ def test_gate_drops_finding_grounded_only_in_grep_query(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def _add_code_file(repo, name, content):
+def _add_code_file(repo: Any, name: str, content: str) -> Any:
     with open(f'{repo}/{name}', 'w') as fh:
         fh.write(content)
     _git(repo, 'add', name)
     _git(repo, 'commit', '-q', '-m', f'add {name}')
 
 
-def test_gate_drops_finding_falsified_by_present_symbol(repo):
+def test_gate_drops_finding_falsified_by_present_symbol(repo: Any) -> None:
     # A finding asserts a symbol is undefined, yet the symbol is present in the tree (and in the
     # reviewer's own evidence, so it clears the grounding check). The contradiction check drops it,
     # because the claim and the code cannot both be true.
@@ -411,7 +412,7 @@ def test_gate_drops_finding_falsified_by_present_symbol(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_keeps_absence_claim_not_falsified(repo):
+def test_gate_keeps_absence_claim_not_falsified(repo: Any) -> None:
     # "missingThing is undefined, though presentHelper is defined": the accused symbol is genuinely
     # absent from the tree, so nothing contradicts the claim; the co-cited present symbol (nearest
     # to its own, positive "is defined") is never mistaken for the one the finding says is absent.
@@ -423,7 +424,7 @@ def test_gate_keeps_absence_claim_not_falsified(repo):
     assert kept == [f]
 
 
-def test_gate_keeps_absence_finding_on_read_file(repo):
+def test_gate_keeps_absence_finding_on_read_file(repo: Any) -> None:
     # "no maxItems": the missing symbol is absent from the evidence, but a co-cited real symbol
     # (minItems) that the reviewer read is present, so the finding survives on at least one anchor.
     # schema.json is a real file, so it is excluded from the anchor set (a filename, not a symbol).
@@ -435,7 +436,7 @@ def test_gate_keeps_absence_finding_on_read_file(repo):
     assert kept == [f]
 
 
-def test_gate_drops_finding_with_invented_subject_co_cited(repo):
+def test_gate_drops_finding_with_invented_subject_co_cited(repo: Any) -> None:
     # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented one
     # (expand_globs) that is in neither the evidence nor the tree. The "at least one" primary check
     # passes on compute_total, but the fabricated-subject tripwire trips on expand_globs.
@@ -446,7 +447,7 @@ def test_gate_drops_finding_with_invented_subject_co_cited(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_drops_finding_with_invented_camelcase_co_cited(repo):
+def test_gate_drops_finding_with_invented_camelcase_co_cited(repo: Any) -> None:
     # A real, grounded symbol (compute_total, which the reviewer read) sits next to an invented
     # camelCase one (phantomHandler) in neither the evidence nor the tree; the tripwire trips on
     # camelCase identifiers too, not only underscored ones (wistful is Python + TypeScript).
@@ -457,7 +458,7 @@ def test_gate_drops_finding_with_invented_camelcase_co_cited(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_symbol_match_is_whole_word_not_substring(repo):
+def test_gate_symbol_match_is_whole_word_not_substring(repo: Any) -> None:
     # The anchor check is a whole-word match, not a substring match: a fabricated symbol that is
     # a prefix of a symbol the reviewer actually read (phantomHand on phantomHandler) does not
     # ground the finding.
@@ -467,7 +468,7 @@ def test_gate_symbol_match_is_whole_word_not_substring(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_post_consolidation_drops_invented_camelcase(repo):
+def test_gate_post_consolidation_drops_invented_camelcase(repo: Any) -> None:
     # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
     # is the only symbol-level backstop; it must catch a camelCase symbol a consolidator rewords in
     # (phantomHandler) that is in neither the evidence nor the tree.
@@ -478,7 +479,7 @@ def test_gate_post_consolidation_drops_invented_camelcase(repo):
         [f], repo, 'main', post_consolidation=True)) == []
 
 
-def test_gate_keeps_finding_grounded_on_opened_file_in_support(repo):
+def test_gate_keeps_finding_grounded_on_opened_file_in_support(repo: Any) -> None:
     # A finding with no code-symbol anchor whose support cites the file it opened (a.txt, a real
     # file in the repo) is grounded on the file being opened, not dropped because the filename
     # does not appear in the retrieved output — a.txt is a file, not a code symbol.
@@ -489,7 +490,7 @@ def test_gate_keeps_finding_grounded_on_opened_file_in_support(repo):
     assert kept == [f]
 
 
-def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
+def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo: Any) -> None:
     # Two real snake_case symbols: compute_total is in the reviewer's evidence, helper_fn is in the
     # tree but not in this finding's evidence. The tripwire grounds helper_fn on the tree (a real
     # symbol is never a fabrication), so the finding is kept rather than dropped.
@@ -502,7 +503,7 @@ def test_gate_keeps_finding_with_real_tree_symbol_not_in_evidence(repo):
     assert kept == [f]
 
 
-def test_gate_post_consolidation_keeps_rephrased_real_finding(repo):
+def test_gate_post_consolidation_keeps_rephrased_real_finding(repo: Any) -> None:
     # The consolidator rewords a finding to name a symbol the reviewer did not literally retrieve
     # (compute_total is in the tree but not in this finding's git output). Pre-consolidation the
     # "at least one symbol in the reviewer's evidence" check drops it; post_consolidation skips that
@@ -515,14 +516,14 @@ def test_gate_post_consolidation_keeps_rephrased_real_finding(repo):
     assert kept == [f]
 
 
-def test_gate_drops_finding_whose_file_was_never_opened(repo):
+def test_gate_drops_finding_whose_file_was_never_opened(repo: Any) -> None:
     # No distinctive symbol and a cited file the reviewer never opened -> not grounded -> dropped.
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
     f = _gate_finding('the config is wrong', 'zeta.conf:5', ev)
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_backstop_drops_nonexistent_file(repo):
+def test_gate_backstop_drops_nonexistent_file(repo: Any) -> None:
     # Even grounded in retrieved evidence, a finding citing a file that does not exist anywhere
     # (HEAD or base) is fabricated and dropped by the file-data backstop.
     ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
@@ -530,14 +531,14 @@ def test_gate_backstop_drops_nonexistent_file(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_backstop_drops_line_beyond_file(repo):
+def test_gate_backstop_drops_line_beyond_file(repo: Any) -> None:
     # A cited line past the end of the real file is a fabricated line number -> dropped.
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
     f = _gate_finding('the value here is wrong', 'a.txt:999', ev)
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_backstop_drops_citation_into_empty_file(repo):
+def test_gate_backstop_drops_citation_into_empty_file(repo: Any) -> None:
     # An existing but empty file has 0 lines, so a citation to any line is out of range ->
     # dropped. (Before the fix an empty file read as "unknown length" and the check was skipped.)
     _add_code_file(repo, 'empty.txt', '')
@@ -546,7 +547,7 @@ def test_gate_backstop_drops_citation_into_empty_file(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_counts_blank_boundary_lines_in_file(repo):
+def test_gate_counts_blank_boundary_lines_in_file(repo: Any) -> None:
     # A file with blank lines at its start/end: _file_info counts them from the raw (unstripped)
     # content, so a citation to a real line is in range rather than mis-dropped as out of range.
     _add_code_file(repo, 'pad.txt', '\n\nvalue\n\n')  # 4 lines: blank, blank, value, blank
@@ -556,7 +557,7 @@ def test_gate_counts_blank_boundary_lines_in_file(repo):
     assert kept == [f]
 
 
-def test_git_line_count_matches_splitlines(repo):
+def test_git_line_count_matches_splitlines(repo: Any) -> None:
     # _git_line_count streams the file (no whole-file buffer) and must agree with splitlines() —
     # counting blank boundary lines and a final line with no trailing newline.
     cases = {'plain.txt': 'a\nb\nc\n', 'lead.txt': '\n\na\n',
@@ -567,18 +568,18 @@ def test_git_line_count_matches_splitlines(repo):
         assert got == len(content.splitlines()), (name, got, content)
 
 
-def test_gate_drops_finding_with_no_evidence(repo):
+def test_gate_drops_finding_with_no_evidence(repo: Any) -> None:
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
     f = _gate_finding('compute_total ignores the x term', 'a.txt:2', [])
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_empty_input_is_empty(repo):
+def test_gate_empty_input_is_empty(repo: Any) -> None:
     assert asyncio.run(review.evidence_gate([], repo, 'main')) == []
 
 
-def test_gate_keeps_finding_with_line_range_location(repo):
+def test_gate_keeps_finding_with_line_range_location(repo: Any) -> None:
     # A line-range location (a.txt:1-4) is not a single "path:line", so the file-data backstop must
     # not treat "a.txt:1-4" as a filename (that would fabricate a "missing file" and drop a real,
     # grounded finding). The finding is grounded on the file its reviewer read.
@@ -589,7 +590,7 @@ def test_gate_keeps_finding_with_line_range_location(repo):
     assert kept == [f]
 
 
-def test_gate_keeps_finding_with_multi_file_location(repo):
+def test_gate_keeps_finding_with_multi_file_location(repo: Any) -> None:
     # A multi-file location (a.txt + b.txt) cannot be checked as one file; a finding grounded on a
     # real symbol it read survives rather than being dropped as a bogus "missing file".
     ev = [('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
@@ -598,7 +599,7 @@ def test_gate_keeps_finding_with_multi_file_location(repo):
     assert kept == [f]
 
 
-def test_gate_keeps_finding_with_line_spec_suffixes(repo):
+def test_gate_keeps_finding_with_line_spec_suffixes(repo: Any) -> None:
     # ":12+", ":1-EOF", and multi-range specs all carry a real file; the backstop strips the line
     # spec (everything after the ':' that starts with a digit) and checks the file, so these are
     # not mistaken for nonexistent paths.
@@ -609,7 +610,7 @@ def test_gate_keeps_finding_with_line_spec_suffixes(repo):
         assert kept == [f], loc
 
 
-def test_gate_drops_out_of_range_line_range_location(repo):
+def test_gate_drops_out_of_range_line_range_location(repo: Any) -> None:
     # A line RANGE past the end of a real file is out of bounds: parse_location returns the
     # largest number in the range (the end), so the backstop bounds-checks it rather than skipping
     # ranges (which previously returned no line and let a fabricated range through).
@@ -622,11 +623,11 @@ def test_gate_drops_out_of_range_line_range_location(repo):
     assert kept == [f]
 
 
-def test_gate_drops_citation_when_line_count_unknown(repo):
+def test_gate_drops_citation_when_line_count_unknown(repo: Any) -> None:
     # A file that exists but whose line count cannot be read: a cited line cannot be verified
     # against the file's end, so it is dropped (an out-of-range citation must not pass an
     # unverified backstop).
-    async def fake_line_count(ref, path, cwd):
+    async def fake_line_count(ref: Any, path: Any, cwd: Any) -> Any:
         return None  # counting failed
     with patch.object(review, '_git_line_count', new=fake_line_count):
         ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
@@ -634,7 +635,7 @@ def test_gate_drops_citation_when_line_count_unknown(repo):
         assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_drops_zero_based_line_citation(repo):
+def test_gate_drops_zero_based_line_citation(repo: Any) -> None:
     # Citations are 1-based; a :0 line is not a valid line and is dropped (the bounds check used
     # to reject only lines past the end, so a zero-based citation slipped through).
     ev = [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]
@@ -642,7 +643,7 @@ def test_gate_drops_zero_based_line_citation(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_symbol_present_tri_state_on_grep_error(repo):
+def test_symbol_present_tri_state_on_grep_error(repo: Any) -> None:
     # A git grep error (rc >= 2) is not proof of absence: _symbol_present distinguishes a clean
     # no-match (False) from a failed grep (None). A grep error must therefore neither fabricate a
     # symbol (fabricated-subject drops only on a definitive no-match) nor fail to falsify an
@@ -653,7 +654,7 @@ def test_symbol_present_tri_state_on_grep_error(repo):
         assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
 
 
-def test_gate_drops_cited_file_match_in_unrelated_command(repo):
+def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:
     # The cited-file check matches a whole path component, not a substring: a command that read
     # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
     # different file's name, not the file that command actually opened.
@@ -662,7 +663,7 @@ def test_gate_drops_cited_file_match_in_unrelated_command(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_drops_same_basename_different_directory(repo):
+def test_gate_drops_same_basename_different_directory(repo: Any) -> None:
     # A full-path citation (src/foo.py, with a directory) matches only that exact path, not just
     # its basename: a command that read vendor/foo.py does not ground a finding cited at src/foo.py,
     # even though both files share the name foo.py (the cited file was never actually read).
@@ -673,7 +674,7 @@ def test_gate_drops_same_basename_different_directory(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
+def test_gate_post_consolidation_drops_invented_dotted_chain(repo: Any) -> None:
     # Post-consolidation the primary evidence check is skipped, so the fabricated-subject tripwire
     # is the only symbol-level backstop. A consolidator can invent a dotted chain (svc.foo.bar); it
     # must be checked in full, not skipped as dotted and not grounded on its `bar` leaf (a real,
@@ -686,7 +687,7 @@ def test_gate_post_consolidation_drops_invented_dotted_chain(repo):
         [f], repo, 'main', post_consolidation=True)) == []
 
 
-def test_gate_post_consolidation_drops_grepped_invented_symbol(repo):
+def test_gate_post_consolidation_drops_grepped_invented_symbol(repo: Any) -> None:
     # Post-consolidation, an invented symbol the reviewer only GREPPED for (a query, not an opened
     # file) is still dropped: the fabricated-subject check has no command-text exemption (a
     # `git grep <name>` argument is a search term, not a path), so a grep'd-but-absent invented
@@ -698,7 +699,7 @@ def test_gate_post_consolidation_drops_grepped_invented_symbol(repo):
         [f], repo, 'main', post_consolidation=True)) == []
 
 
-def test_gate_file_opened_check_ignores_grep_pathspec(repo):
+def test_gate_file_opened_check_ignores_grep_pathspec(repo: Any) -> None:
     # A location-only finding (no symbol) must be grounded on a file OPEN (git show), not on a git
     # grep whose pathspec merely names the file: a clean no-match grep read no code from the cited
     # file, so it does not establish that the reviewer opened it.
@@ -709,7 +710,7 @@ def test_gate_file_opened_check_ignores_grep_pathspec(repo):
     assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
-def test_gate_keeps_deleted_file_finding(repo):
+def test_gate_keeps_deleted_file_finding(repo: Any) -> None:
     # A finding about a file the change deleted (present at the base, absent at HEAD): its dotted
     # filename must be recognized as a file (from the base tree, not just HEAD), so the gate falls
     # to the file-opened branch and grounds it on the `git show <base>:<path>` the reviewer ran,
@@ -729,7 +730,7 @@ def test_gate_keeps_deleted_file_finding(repo):
     assert kept == [f]
 
 
-def test_review_pass_merges_evidence_across_rounds(repo):
+def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
     # A reviewer that verifies with git in round 1 and re-states the finding in round 2 (without
     # re-probing) must keep its round-1 evidence on the final finding, so the gate can verify it
     # against the code the reviewer actually read over the whole pass.
@@ -741,11 +742,11 @@ def test_review_pass_merges_evidence_across_rounds(repo):
                'evidence': []}]
     calls = {'n': 0}
 
-    async def fake_personas(reviewers, user_message, model, stage, **k):
+    async def fake_personas(reviewers: Any, user_message: Any, model: Any, stage: Any, **k: Any) -> Any:
         calls['n'] += 1
         return round1 if calls['n'] == 1 else round2
 
-    async def fake_gate(actionable, tool_ctx, model, base_name, base_ref, debug, **k):
+    async def fake_gate(actionable: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: Any, **k: Any) -> Any:
         return '[Sage-A1] - a convention'  # non-empty preamble forces a second round
 
     with patch.object(review, 'run_personas', new=fake_personas), \
@@ -762,32 +763,32 @@ def test_review_pass_merges_evidence_across_rounds(repo):
 # --- the conventions gate -----------------------------------------------------
 
 
-def test_conventions_gate_rebuts_and_noobjections(repo):
+def test_conventions_gate_rebuts_and_noobjections(repo: Any) -> None:
     class RebutMapper:
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        async def run(self, *a, **k):
+        async def run(self, *a: Any, **k: Any) -> Any:
             return '[Sage-A1] - this repo uses no type hints anywhere'
 
     class QuietMapper:
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        async def run(self, *a, **k):
+        async def run(self, *a: Any, **k: Any) -> Any:
             return 'NO OBJECTIONS'
 
     finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'add type hints'}]
     ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
 
-    async def no_compact(messages, mapper, ctx, debug=False):
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
         return messages
 
     with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
@@ -802,34 +803,34 @@ def test_conventions_gate_rebuts_and_noobjections(repo):
     assert out == ''
 
 
-def test_critic_gate_refutes_and_noobjections(repo):
+def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
     # The critic refutes a finding whose claim the code contradicts (citing counter-evidence),
     # or reports NO OBJECTIONS when every finding holds up.
     class RefuteMapper:
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        async def run(self, *a, **k):
+        async def run(self, *a: Any, **k: Any) -> Any:
             return '[Sage-A1] - compute_total is called at calc.py:40'
 
     class QuietMapper:
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        async def run(self, *a, **k):
+        async def run(self, *a: Any, **k: Any) -> Any:
             return 'NO OBJECTIONS'
 
     finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'compute_total is never called'}]
     ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
 
-    async def no_compact(messages, mapper, ctx, debug=False):
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
         return messages
 
     with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
@@ -845,25 +846,25 @@ def test_critic_gate_refutes_and_noobjections(repo):
 # --- the multi-round review loop ---------------------------------------------
 
 
-def _finding():
+def _finding() -> Any:
     # Carries git evidence (a.txt was read) so it passes the strict evidence gate.
     return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
              'location': 'a.txt:2', 'desc': 'bad thing',
              'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
 
 
-def test_review_loop_converges_when_gate_quiet(repo, capsys):
+def test_review_loop_converges_when_gate_quiet(repo: Any, capsys: Any) -> None:
     # Panel finds something, the gate reports no convention violation -> one round only.
     panel_calls = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+    async def fake_gate(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: bool = False, **k: Any) -> Any:
         return ''
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -875,19 +876,19 @@ def test_review_loop_converges_when_gate_quiet(repo, capsys):
     assert 'a.txt:2' in capsys.readouterr().out
 
 
-def test_review_loop_revises_when_gate_rebuts(repo, capsys):
+def test_review_loop_revises_when_gate_rebuts(repo: Any, capsys: Any) -> None:
     # The gate rebuts a finding -> the panel re-runs (round 2) with the prior findings
     # and the rebuttal, so each reviewer can drop its rebutted point.
     panel_calls = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+    async def fake_gate(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: bool = False, **k: Any) -> Any:
         return '[Sage-A1] - repo uses no type hints; drop it'
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -904,22 +905,22 @@ def test_review_loop_revises_when_gate_rebuts(repo, capsys):
     assert 'very confident' in panel_calls[1]
 
 
-def test_review_loop_revises_when_critic_refutes(repo, capsys):
+def test_review_loop_revises_when_critic_refutes(repo: Any, capsys: Any) -> None:
     # The conventions gate is quiet but the critic refutes a finding -> the panel re-runs (round 2)
     # with the refutation, so each reviewer can drop the finding the code contradicts.
     panel_calls = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         panel_calls.append(message)
         return _finding()
 
-    async def fake_conv(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+    async def fake_conv(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: bool = False, **k: Any) -> Any:
         return ''  # conventions gate is quiet
 
-    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+    async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: bool = False, **k: Any) -> Any:
         return '[Sage-A1] - the claimed-missing call is present at a.txt:5'
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -934,18 +935,18 @@ def test_review_loop_revises_when_critic_refutes(repo, capsys):
     assert '[Sage-A1]' in panel_calls[1]
 
 
-def test_review_loop_stops_at_round_budget(repo):
+def test_review_loop_stops_at_round_budget(repo: Any) -> None:
     # Even if the gate keeps rebuting, the loop stops after the round budget.
     panel_calls = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         panel_calls.append(message)
         return _finding()
 
-    async def fake_gate(findings, tool_ctx, model, base_name, base_ref, debug=False, **k):
+    async def fake_gate(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, debug: bool = False, **k: Any) -> Any:
         return '[Sage-A1] - always rebutting'
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -955,7 +956,7 @@ def test_review_loop_stops_at_round_budget(repo):
     assert len(panel_calls) == 3  # rounds 0,1,2 then the budget is exhausted
 
 
-def test_per_persona_critique_revises_refuted_reviewer(repo):
+def test_per_persona_critique_revises_refuted_reviewer(repo: Any) -> None:
     # A reviewer's finding is refuted by the critic; _per_persona_critique gives that reviewer one
     # revision pass and keeps the corrected findings, merging the code it read in round 0 so a
     # re-stated finding is still grounded by the evidence gate.
@@ -963,10 +964,10 @@ def test_per_persona_critique_revises_refuted_reviewer(repo):
                  'desc': 'phantomThing is undefined', 'support': '',
                  'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]}]
 
-    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+    async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, **k: Any) -> Any:
         return '[Sage-A1] - phantomThing is defined at a.txt:3'
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         assert 'the critic' in message and '[Sage-A1]' in message  # it saw the refutation
         return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
                  'desc': 'corrected finding', 'support': '',
@@ -977,22 +978,22 @@ def test_per_persona_critique_revises_refuted_reviewer(repo):
          patch.object(review, 'run_personas', new=fake_panel):
         out = asyncio.run(review._per_persona_critique(
             [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
-            ctx, None, None, None, False))
+            ctx, {}, None, None, False))
     assert [f['desc'] for f in out] == ['corrected finding']
     # The revision-round evidence is merged with what the reviewer read in round 0.
     assert ('$ git show HEAD:a.txt', 'one\nTWO') in out[0]['evidence']
     assert ('$ git show HEAD:a.txt', 'one\nTWO\nthree') in out[0]['evidence']
 
 
-def test_per_persona_critique_keeps_unrefuted_reviewer(repo):
+def test_per_persona_critique_keeps_unrefuted_reviewer(repo: Any) -> None:
     # Nothing refuted -> the reviewer's findings pass through unchanged and no revision runs.
     findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
                  'desc': 'a real finding', 'support': '', 'evidence': []}]
 
-    async def fake_critic(findings, tool_ctx, model, base_name, base_ref, **k):
+    async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, **k: Any) -> Any:
         return ''
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         raise AssertionError('no revision should run when nothing is refuted')
 
     ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
@@ -1000,13 +1001,13 @@ def test_per_persona_critique_keeps_unrefuted_reviewer(repo):
          patch.object(review, 'run_personas', new=fake_panel):
         out = asyncio.run(review._per_persona_critique(
             [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
-            ctx, None, None, None, False))
+            ctx, {}, None, None, False))
     assert out == findings
 
 
-def test_corroborated_keeps_only_recurring_concerns():
+def test_corroborated_keeps_only_recurring_concerns() -> None:
     # A concern restated across a majority of passes survives; a one-pass fluke is dropped.
-    def f(label, loc, desc):
+    def f(label: str, loc: str, desc: str) -> Any:
         return {'name': 'Sage', 'label': label, 'severity': 'MAJOR',
                 'location': loc, 'desc': desc}
 
@@ -1024,15 +1025,15 @@ def test_corroborated_keeps_only_recurring_concerns():
     assert len(review._corroborated(union, passes, 1)) == len(union)
 
 
-def test_run_review_consensus_runs_panel_n_times(repo):
+def test_run_review_consensus_runs_panel_n_times(repo: Any) -> None:
     # --consensus N runs the full panel pass N times (one per independent sample).
     panel_calls = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         panel_calls.append(1)
         return _finding()
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -1042,7 +1043,7 @@ def test_run_review_consensus_runs_panel_n_times(repo):
     assert len(panel_calls) == 3
 
 
-def test_run_review_rejects_invalid_consensus(repo):
+def test_run_review_rejects_invalid_consensus(repo: Any) -> None:
     # --consensus must be 0 (single pass) or >= 2; 1 and negatives are rejected rather than being
     # silently clamped to a single pass.
     for bad in (1, -2):
@@ -1050,15 +1051,15 @@ def test_run_review_rejects_invalid_consensus(repo):
             asyncio.run(review.run_review(_args(consensus=bad)))
 
 
-def test_run_review_reasoning_effort_flag(repo):
+def test_run_review_reasoning_effort_flag(repo: Any) -> None:
     # --reasoning-effort overrides the default; without it the default (medium) applies.
     seen = []
 
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         seen.append(k.get('reasoning_effort'))
         return _finding()
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas', new=fake_panel), \
@@ -1071,10 +1072,10 @@ def test_run_review_reasoning_effort_flag(repo):
 # --- the panel path end-to-end (real personas, mocked LLM) -------------------
 
 
-def test_run_review_reports_findings(repo, capsys):
+def test_run_review_reports_findings(repo: Any, capsys: Any) -> None:
     finding = _finding()
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas',
@@ -1087,7 +1088,7 @@ def test_run_review_reports_findings(repo, capsys):
     assert '[MAJOR] a.txt:2 - bad thing' in out
 
 
-def test_run_review_evidence_gate_drops_ungrounded(repo, capsys):
+def test_run_review_evidence_gate_drops_ungrounded(repo: Any, capsys: Any) -> None:
     # End to end: a finding whose named symbol never appears in the reviewer's git evidence is
     # dropped by the deterministic gate before consolidation, so it never reaches the output.
     finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
@@ -1095,7 +1096,7 @@ def test_run_review_evidence_gate_drops_ungrounded(repo, capsys):
                 'support': '',
                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas',
@@ -1106,7 +1107,7 @@ def test_run_review_evidence_gate_drops_ungrounded(repo, capsys):
     assert 'phantomHandler' not in capsys.readouterr().out
 
 
-def test_run_review_evidence_gate_keeps_grounded(repo, capsys):
+def test_run_review_evidence_gate_keeps_grounded(repo: Any, capsys: Any) -> None:
     # The mirror case: a finding whose symbol IS in the reviewer's evidence survives the gate into
     # the final output.
     finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
@@ -1115,7 +1116,7 @@ def test_run_review_evidence_gate_keeps_grounded(repo, capsys):
                 'evidence': [('$ git show HEAD:calc.py',
                               'def compute_total():\n    return x + y')]}]
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(review, 'run_personas',
@@ -1126,7 +1127,7 @@ def test_run_review_evidence_gate_keeps_grounded(repo, capsys):
     assert 'compute_total' in capsys.readouterr().out
 
 
-def test_run_review_drops_symbol_invented_by_consolidator(repo, capsys):
+def test_run_review_drops_symbol_invented_by_consolidator(repo: Any, capsys: Any) -> None:
     # The panel's finding is grounded and passes the pre-consolidation gate; consolidation then
     # rewrites its description to name a function the reviewers never read and that is not in the
     # tree. The post-consolidation evidence gate drops it, so the invented name is never posted.
@@ -1135,7 +1136,7 @@ def test_run_review_drops_symbol_invented_by_consolidator(repo, capsys):
                 'support': '',
                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                  'location': 'a.txt:2', 'desc': 'ensure_tool_probing can spin forever',
                  'support': ''}]
@@ -1148,7 +1149,7 @@ def test_run_review_drops_symbol_invented_by_consolidator(repo, capsys):
     assert 'ensure_tool_probing' not in capsys.readouterr().out
 
 
-def test_run_review_preserves_support_through_consolidation(repo, capsys):
+def test_run_review_preserves_support_through_consolidation(repo: Any, capsys: Any) -> None:
     # The panel finding carries supporting paragraphs; the real consolidation re-emits a
     # one-line finding (support dropped), but the reviewer's evidence is re-attached by
     # (name, label) so it survives into the final output.
@@ -1157,7 +1158,7 @@ def test_run_review_preserves_support_through_consolidation(repo, capsys):
                 'support': 'verified with git show; the oracle asserts X',
                 'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree\nfour')]}]
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                  'location': 'a.txt:2', 'desc': 'bad thing', 'support': ''}]
 
@@ -1170,7 +1171,7 @@ def test_run_review_preserves_support_through_consolidation(repo, capsys):
     assert 'verified with git show; the oracle asserts X' in out
 
 
-def test_run_review_end_to_end_with_real_personas(repo, capsys):
+def test_run_review_end_to_end_with_real_personas(repo: Any, capsys: Any) -> None:
     # Runs the REAL run_personas (real persona files + FINDINGS_CONTRACT + parse_findings)
     # against the real git/notes tool wiring, mocking only the LLM mapper, so the whole
     # panel path is exercised deterministically. The conventions gate is disabled
@@ -1179,10 +1180,10 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
         system = ''
         model = 'm'
 
-        def __init__(self, *a, **k):
+        def __init__(self, *a: Any, **k: Any) -> None:
             self.n = 0
 
-        async def run(self, *a, **k):
+        async def run(self, *a: Any, **k: Any) -> Any:
             # Probe first (mandatory probing requires a git command before a finding is accepted),
             # then report.
             self.n += 1
@@ -1190,10 +1191,10 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
                 return '$ git show HEAD:a.txt'
             return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
 
-    async def no_compact(messages, mapper, ctx, debug=False):
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
         return messages
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
     with patch.object(personas, 'get_mapper', new=lambda *a, **k: FakeMapper()), \
@@ -1209,31 +1210,31 @@ def test_run_review_end_to_end_with_real_personas(repo, capsys):
     assert out.count('a.txt:2') == 1
 
 
-def test_run_review_no_changes(repo, capsys):
+def test_run_review_no_changes(repo: Any, capsys: Any) -> None:
     _git(repo, 'checkout', '-q', 'main')
     rc = asyncio.run(review.run_review(_args()))
     assert rc == 0
     assert 'No changes to review' in capsys.readouterr().out
 
 
-def test_run_review_post_requires_pr(repo):
+def test_run_review_post_requires_pr(repo: Any) -> None:
     with pytest.raises(Exception, match='--post-review requires --pr'):
         asyncio.run(review.run_review(_args(post_review=True)))
 
 
-def test_run_review_pr_requires_gh(repo, monkeypatch):
+def test_run_review_pr_requires_gh(repo: Any, monkeypatch: Any) -> None:
     monkeypatch.setattr(review, 'gh_available', lambda: False)
     with pytest.raises(Exception, match='requires the `gh` CLI'):
         asyncio.run(review.run_review(_args(pr=123)))
 
 
-def test_run_review_pr_dirty_tree_errors(repo, monkeypatch):
+def test_run_review_pr_dirty_tree_errors(repo: Any, monkeypatch: Any) -> None:
     monkeypatch.setattr(review, 'gh_available', lambda: True)
 
-    async def fake_head(num, cwd=None):
+    async def fake_head(num: int, cwd: Any = None) -> Any:
         return ('feature', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')
 
-    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+    async def not_ahead(cwd: Any = None, head_ref: str = '', head_oid: str = '') -> Any:
         return False
 
     monkeypatch.setattr(review, 'gh_pr_head', fake_head)
@@ -1244,10 +1245,10 @@ def test_run_review_pr_dirty_tree_errors(repo, monkeypatch):
         asyncio.run(review.run_review(_args(pr=123)))
 
 
-def test_gh_pr_head_parses():
+def test_gh_pr_head_parses() -> None:
     payload = json.dumps({'headRefName': 'feature/x', 'headRefOid': 'abc123'})
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         return (0, payload, '')
 
     with patch.object(review, '_gh', new=fake_gh):
@@ -1255,7 +1256,7 @@ def test_gh_pr_head_parses():
     assert ref == 'feature/x' and oid == 'abc123'
 
 
-def test_local_branch_ahead_of(repo):
+def test_local_branch_ahead_of(repo: Any) -> None:
     # The checked-out feature branch is one commit ahead of main, so main's commit is an ancestor
     # of HEAD. There is no `origin` remote in the fixture, so the fetch is best-effort (skipped
     # when the object is already local).
@@ -1267,15 +1268,15 @@ def test_local_branch_ahead_of(repo):
         review.local_branch_ahead_of(repo, 'main', 'f' * 40)) is False
 
 
-def _fake_review_downstream():
+def _fake_review_downstream() -> Any:
     # Shared fakes so a --pr review runs end-to-end without a network or the LLM.
-    async def fake_panel(reviewers, message, model, stage, **k):
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
         return _finding()
 
-    async def fake_consolidate(context_block, findings, model, **k):
+    async def fake_consolidate(context_block: Any, findings: Any, model: Any, **k: Any) -> Any:
         return findings
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a[0] == 'repo':
             return (0, json.dumps({'nameWithOwner': ''}), '')
         return (0, json.dumps({'title': 't', 'body': 'b', 'comments': []}), '')
@@ -1283,16 +1284,16 @@ def _fake_review_downstream():
     return fake_panel, fake_consolidate, fake_gh
 
 
-def test_run_review_prefers_local_when_ahead(repo, capsys, monkeypatch):
+def test_run_review_prefers_local_when_ahead(repo: Any, capsys: Any, monkeypatch: Any) -> None:
     # The checked-out branch contains the PR head (main's commit is an ancestor of HEAD), so the
     # local commits are reviewed instead of checking the PR out (which would drop unpushed fixes).
     main_oid = _rev(repo, 'main')
     checkout_calls = []
 
-    async def fake_head(num, cwd=None):
+    async def fake_head(num: int, cwd: Any = None) -> Any:
         return ('feature', main_oid)
 
-    async def fake_checkout(num, cwd=None):
+    async def fake_checkout(num: int, cwd: Any = None) -> Any:
         checkout_calls.append(num)
 
     fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
@@ -1307,17 +1308,17 @@ def test_run_review_prefers_local_when_ahead(repo, capsys, monkeypatch):
     assert 'local branch' in capsys.readouterr().out
 
 
-def test_run_review_checks_out_when_not_ahead(repo, capsys, monkeypatch):
+def test_run_review_checks_out_when_not_ahead(repo: Any, capsys: Any, monkeypatch: Any) -> None:
     # The local branch does not contain the PR head, so the PR is checked out.
     checkout_calls = []
 
-    async def fake_head(num, cwd=None):
+    async def fake_head(num: int, cwd: Any = None) -> Any:
         return ('feature', 'f' * 40)
 
-    async def not_ahead(cwd=None, head_ref='', head_oid=''):
+    async def not_ahead(cwd: Any = None, head_ref: str = '', head_oid: str = '') -> Any:
         return False
 
-    async def fake_checkout(num, cwd=None):
+    async def fake_checkout(num: int, cwd: Any = None) -> Any:
         checkout_calls.append(num)
 
     fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
@@ -1333,18 +1334,18 @@ def test_run_review_checks_out_when_not_ahead(repo, capsys, monkeypatch):
     assert 'Checked out PR' in capsys.readouterr().out
 
 
-def test_run_review_remote_forces_checkout(repo, capsys, monkeypatch):
+def test_run_review_remote_forces_checkout(repo: Any, capsys: Any, monkeypatch: Any) -> None:
     # Even when the local branch is ahead of the PR head, --remote checks the remote head out.
     main_oid = _rev(repo, 'main')
     checkout_calls = []
 
-    async def fake_head(num, cwd=None):
+    async def fake_head(num: int, cwd: Any = None) -> Any:
         return ('feature', main_oid)
 
-    async def ahead(cwd=None, head_ref='', head_oid=''):
+    async def ahead(cwd: Any = None, head_ref: str = '', head_oid: str = '') -> Any:
         return True
 
-    async def fake_checkout(num, cwd=None):
+    async def fake_checkout(num: int, cwd: Any = None) -> Any:
         checkout_calls.append(num)
 
     fake_panel, fake_consolidate, fake_gh = _fake_review_downstream()
@@ -1360,18 +1361,18 @@ def test_run_review_remote_forces_checkout(repo, capsys, monkeypatch):
     assert 'Checked out PR' in capsys.readouterr().out
 
 
-def test_run_review_linear_requires_linear(repo, monkeypatch):
+def test_run_review_linear_requires_linear(repo: Any, monkeypatch: Any) -> None:
     monkeypatch.setattr(review, 'linear_available', lambda: False)
     with pytest.raises(Exception, match='requires the `linear` CLI'):
         asyncio.run(review.run_review(_args(linear='ACME-1')))
 
 
-def test_linear_context_uses_issue_view_json(repo):
+def test_linear_context_uses_issue_view_json(repo: Any) -> None:
     # The linear CLI (v2.x) fetches one issue with `linear issue view <id> --json`, not the
     # older `linear issue <id> --output json`; pin the exact command we shell out to.
-    calls = {}
+    calls: dict[str, Any] = {}
 
-    async def fake_run(cmd, *args, **k):
+    async def fake_run(cmd: Any, *args: Any, **k: Any) -> Any:
         calls['cmd'] = cmd
         calls['args'] = args
         return (0, '{"identifier": "ACME-1"}', '')
@@ -1383,7 +1384,7 @@ def test_linear_context_uses_issue_view_json(repo):
     assert out == '{"identifier": "ACME-1"}'
 
 
-def test_gh_pr_context_flattens_reviews():
+def test_gh_pr_context_flattens_reviews() -> None:
     pr_payload = json.dumps({
         'title': 'My PR',
         'body': 'the description',
@@ -1400,7 +1401,7 @@ def test_gh_pr_context_flattens_reviews():
             ]}},
         ]}}}}})
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a[0] == 'pr':
             return (0, pr_payload, '')
         if a[0] == 'repo':
@@ -1418,7 +1419,7 @@ def test_gh_pr_context_flattens_reviews():
     assert 'reply says invalid' in out and '(reply)' in out
 
 
-def test_gh_pr_context_skips_hidden_comments():
+def test_gh_pr_context_skips_hidden_comments() -> None:
     # A minimized (hidden) comment is left out of the reviewer's context: issue comments via the
     # `isMinimized` flag, inline comments via GraphQL `isMinimized`.
     pr_payload = json.dumps({
@@ -1440,7 +1441,7 @@ def test_gh_pr_context_skips_hidden_comments():
             ]}},
         ]}}}}})
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a[0] == 'pr':
             return (0, pr_payload, '')
         if a[0] == 'repo':
@@ -1457,12 +1458,12 @@ def test_gh_pr_context_skips_hidden_comments():
     assert 'hidden inline' not in out
 
 
-def test_repo_name_is_cached_per_cwd():
+def test_repo_name_is_cached_per_cwd() -> None:
     # `_repo_name` resolves the repo once per cwd and caches it, so the several helpers that each
     # need the owner/name don't each shell out to `gh repo view` in the same run.
     calls = {'n': 0}
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         calls['n'] += 1
         return (0, '{"nameWithOwner": "acme/widget"}', '')
 
@@ -1472,11 +1473,11 @@ def test_repo_name_is_cached_per_cwd():
     assert calls['n'] == 1  # the second call is served from the cache
 
 
-def test_repo_name_does_not_cache_failure():
+def test_repo_name_does_not_cache_failure() -> None:
     # A failed resolution is not cached, so a later call retries instead of reusing an empty name.
     results = iter([(1, '', 'boom'), (0, '{"nameWithOwner": "acme/widget"}', '')])
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         return next(results)
 
     with patch.object(review, '_gh', new=fake_gh):
@@ -1484,7 +1485,7 @@ def test_repo_name_does_not_cache_failure():
         assert asyncio.run(review._repo_name(None)) == 'acme/widget'
 
 
-def test_same_concern_matches_by_file_and_identifier():
+def test_same_concern_matches_by_file_and_identifier() -> None:
     # Same file + a shared identifier (or enough word overlap) is the same concern, even on a
     # different line; a different file, or an unrelated description, is not.
     a = {'location': 'marsha/review.py:1',
@@ -1499,7 +1500,7 @@ def test_same_concern_matches_by_file_and_identifier():
         prior)
 
 
-def test_filter_duplicate_findings_drops_reraises():
+def test_filter_duplicate_findings_drops_reraises() -> None:
     threads = {'C9': {'path': 'marsha/review.py', 'line': 1,
                       'desc': 'build_review_message embeds example-driven instructions'}}
     body = [{'path': 'pyproject.toml',
@@ -1519,7 +1520,7 @@ def test_filter_duplicate_findings_drops_reraises():
     assert [f['label'] for f in kept] == ['C9', 'B2']
 
 
-def test_fetch_prior_body_findings_parses_marsha_bodies():
+def test_fetch_prior_body_findings_parses_marsha_bodies() -> None:
     reviews = [
         {'body': 'Marsha review \u2014 findings:\n\n'
                  '- **[A1] MAJOR** `pyproject.toml:9`: dev deps in runtime\n'
@@ -1528,7 +1529,7 @@ def test_fetch_prior_body_findings_parses_marsha_bodies():
     ]
     payload = json.dumps(reviews)
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         return (0, payload, '')
 
     with patch.object(review, '_gh', new=fake_gh):
@@ -1538,7 +1539,7 @@ def test_fetch_prior_body_findings_parses_marsha_bodies():
     assert out[1]['path'] == 'marsha/tools.py'
 
 
-def test_thread_settled_detects_user_reply_or_resolution():
+def test_thread_settled_detects_user_reply_or_resolution() -> None:
     # A thread is settled if resolved, or if it has any human reply (a Marsha re-raise leads with
     # **[label] and does not count).
     assert review._thread_settled({'is_resolved': True, 'replies': []})
@@ -1549,7 +1550,7 @@ def test_thread_settled_detects_user_reply_or_resolution():
     assert not review._thread_settled({'is_resolved': False, 'replies': []})
 
 
-def test_filter_duplicate_drops_reraise_of_settled_thread():
+def test_filter_duplicate_drops_reraise_of_settled_thread() -> None:
     # A re-raise that reuses the exact label of a thread the user already settled is dropped; an
     # unrelated new finding is kept.
     threads = {'B9': {'path': 'marsha/review.py', 'line': 169, 'desc': 'renumbering'}}
@@ -1564,7 +1565,7 @@ def test_filter_duplicate_drops_reraise_of_settled_thread():
     assert [f['label'] for f in kept] == ['A1']
 
 
-def test_post_review_maps_inline_and_body():
+def test_post_review_maps_inline_and_body() -> None:
     diff = ('diff --git a/foo.py b/foo.py\n'
             '--- a/foo.py\n'
             '+++ b/foo.py\n'
@@ -1578,9 +1579,9 @@ def test_post_review_maps_inline_and_body():
         {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
          'location': 'bar.py:99', 'desc': 'not in diff'},
     ]
-    calls = {}
+    calls: dict[str, Any] = {}
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         calls['args'] = a
@@ -1600,11 +1601,11 @@ def test_post_review_maps_inline_and_body():
     assert '**[B1] MINOR**' in payload['body']
 
 
-def test_post_review_all_clear_posts_note():
+def test_post_review_all_clear_posts_note() -> None:
     # A no-finding --post-review still posts a short all-clear note to the PR.
-    calls = {}
+    calls: dict[str, Any] = {}
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         calls['args'] = a
@@ -1620,7 +1621,7 @@ def test_post_review_all_clear_posts_note():
     assert 'no issues found' in payload['body']
 
 
-def test_post_review_replies_on_existing_thread():
+def test_post_review_replies_on_existing_thread() -> None:
     # A finding re-raised under a label that already has a thread is posted as a reply on that
     # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.
     diff = ('diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n'
@@ -1639,10 +1640,10 @@ def test_post_review_replies_on_existing_thread():
                 {'databaseId': 999, 'path': 'foo.py', 'line': 2,
                  'body': '**[A1] MAJOR**: earlier finding'}]}},
         ]}}}}})
-    review_payload = None
-    reply_payload = None
+    review_payload: Any = None
+    reply_payload: Any = None
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         joined = ' '.join(a)
@@ -1670,7 +1671,7 @@ def test_post_review_replies_on_existing_thread():
     assert reply['body'] == '**[A1] MAJOR**: re-raised point'
 
 
-def test_post_review_resolves_conceded_thread():
+def test_post_review_resolves_conceded_thread() -> None:
     # A prior thread whose label the reviewer no longer raises (and whose reviewer ran this pass)
     # is closed by resolving its thread; threads for reviewers not re-run are left alone.
     findings = [
@@ -1694,7 +1695,7 @@ def test_post_review_resolves_conceded_thread():
         ]}}}}})
     resolved = []
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         joined = ' '.join(a)
@@ -1717,7 +1718,7 @@ def test_post_review_resolves_conceded_thread():
     assert resolved == ['PRRT_C2']
 
 
-def test_fetch_review_threads_parses_labels():
+def test_fetch_review_threads_parses_labels() -> None:
     # Only threads whose root comment leads with a [label] are matched; the label is the key and
     # the thread id / root databaseId / resolved flag are carried through for reply + resolve.
     payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
@@ -1733,7 +1734,7 @@ def test_fetch_review_threads_parses_labels():
                  'body': 'no label here'}]}},
         ]}}}}})
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         assert a[:2] == ('api', 'graphql')
         return (0, payload, '')
 
@@ -1747,10 +1748,10 @@ def test_fetch_review_threads_parses_labels():
     assert threads['B2']['is_resolved'] is True
 
 
-def test_resolve_thread_posts_mutation():
+def test_resolve_thread_posts_mutation() -> None:
     sent = {}
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         sent['args'] = a
         return (0, '{"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}', '')
 
@@ -1763,7 +1764,7 @@ def test_resolve_thread_posts_mutation():
     assert any('PRRT_1' in str(part) for part in sent['args'])
 
 
-def test_finding_matches_thread_same_line():
+def test_finding_matches_thread_same_line() -> None:
     # Same file + same line is a conclusive match; a different file is not, regardless of text.
     assert review._finding_matches_thread(
         {'location': 'foo.py:10', 'desc': 'x'},
@@ -1773,7 +1774,7 @@ def test_finding_matches_thread_same_line():
         {'path': 'foo.py', 'line': 10, 'desc': 'y'}) is False
 
 
-def test_desc_similar_threshold():
+def test_desc_similar_threshold() -> None:
     # A re-raised finding restates a prior one (high overlap); two near-siblings on the same file
     # share a common phrase but are distinct concerns and must NOT match (avoids the collision).
     assert review._desc_similar(
@@ -1784,7 +1785,7 @@ def test_desc_similar_threshold():
         'missing type hint on post_review function') is False
 
 
-def test_verify_finding_labels_reassigns_collision():
+def test_verify_finding_labels_reassigns_collision() -> None:
     # A finding that wears a prior thread's label but is a different concern (different file) is
     # reassigned a fresh label that skips all the reviewer's prior labels, freeing the old label.
     threads = {
@@ -1797,7 +1798,7 @@ def test_verify_finding_labels_reassigns_collision():
     assert findings[0]['label'] == 'C1'
 
 
-def test_verify_finding_labels_keeps_genuine_reraise():
+def test_verify_finding_labels_keeps_genuine_reraise() -> None:
     # A finding that reuses a prior label and matches it (same file + line) is a genuine re-raise;
     # the label is kept so it replies on that thread.
     threads = {'A1': {'path': 'foo.py', 'line': 10, 'desc': 'missing type hint'}}
@@ -1807,7 +1808,7 @@ def test_verify_finding_labels_keeps_genuine_reraise():
     assert findings[0]['label'] == 'A1'
 
 
-def test_verify_finding_labels_reraise_line_shifted():
+def test_verify_finding_labels_reraise_line_shifted() -> None:
     # Same file, shifted line, near-identical description: still the same concern (a line moved
     # between runs), so the label is kept rather than reassigned.
     threads = {'A1': {'path': 'foo.py', 'line': 10,
@@ -1819,7 +1820,7 @@ def test_verify_finding_labels_reraise_line_shifted():
     assert findings[0]['label'] == 'A1'
 
 
-def test_verify_finding_labels_dedupes_inrun():
+def test_verify_finding_labels_dedupes_inrun() -> None:
     # Two findings sharing one label in a single run (a parser slip) get distinct labels.
     findings = [
         {'label': 'A1', 'location': 'a.py:1', 'desc': 'one'},
@@ -1830,7 +1831,7 @@ def test_verify_finding_labels_dedupes_inrun():
     assert [f['label'] for f in findings] == ['A1', 'B1']
 
 
-def test_prior_findings_by_reviewer_groups_by_number():
+def test_prior_findings_by_reviewer_groups_by_number() -> None:
     # Threads are grouped by the reviewer number in the label; resolved threads and unlabeled
     # (human) comments are skipped, and replies are attached to their finding.
     payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
@@ -1855,7 +1856,7 @@ def test_prior_findings_by_reviewer_groups_by_number():
             ]}},
         ]}}}}})
 
-    async def fake_gh(*a, **k):
+    async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
             return (0, '{"nameWithOwner": "acme/widget"}', '')
         return (0, payload, '')
@@ -1870,7 +1871,7 @@ def test_prior_findings_by_reviewer_groups_by_number():
     assert [f['label'] for f in out[2]] == ['B2']
 
 
-def test_reviewer_prior_block_format():
+def test_reviewer_prior_block_format() -> None:
     prior = [
         {'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:3', 'desc': 'keep this',
          'replies': ['user: actually fixed it']},
@@ -1884,7 +1885,7 @@ def test_reviewer_prior_block_format():
     assert 'EXACT label' in block
 
 
-def test_prior_conversations_block_lists_settled():
+def test_prior_conversations_block_lists_settled() -> None:
     # Every prior conversation not re-raised this pass is listed (with its replies + status) for
     # the consolidator to drop; re-raised ones are not, and an empty input yields no block.
     convs = [
@@ -1901,12 +1902,12 @@ def test_prior_conversations_block_lists_settled():
     assert review._prior_conversations_block([], {'A1'}) == ''
 
 
-def test_run_personas_appends_prior_block():
+def test_run_personas_appends_prior_block() -> None:
     # The per-reviewer prior block is appended only to the reviewer its number is keyed under.
     captured = []
 
-    async def fake_run_with_tools(mapper, request, ctx=None, debug=False,
-                                  max_rounds=tools.MAX_TOOL_ROUNDS):
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
         m = re.search(r'You are review #(\d+)', mapper.system)
         captured.append((int(m.group(1)) if m else None, request))
         return 'NO FINDINGS'

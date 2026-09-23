@@ -64,20 +64,4 @@ untyped_calls_exclude = ["mistletoe.ast_renderer"]
 module = ["quickjs.*", "pycodestyle.*", "pyflakes.*", "autopep8.*"]
 ignore_missing_imports = true
 
-# Not yet converted to strict (issue #217, P2/P3). Drop a module from this list as it reaches
-# zero errors so the gate keeps tightening. The leaf modules (utils, config, context, log,
-# term, meta, parse, model_match, stats, llm_client) are checked strictly.
-[[tool.mypy.overrides]]
-    module = [
-    # tests/ has no __init__.py, so mypy names these top-level modules (not tests.test_*).
-    "test_backend",
-    "test_cli",
-    "test_context",
-    "test_model_match",
-    "test_optimize",
-    "test_personas",
-    "test_review",
-    "test_tools",
-    "test_utils",
-]
-ignore_errors = true
+# Every module (the whole marsha/ package and tests/) is now checked under strict.

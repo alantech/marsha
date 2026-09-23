@@ -68,12 +68,12 @@ def load_config_file() -> ConfigFile:
     return config
 
 
-def set_cli_model(model: str) -> None:
+def set_cli_model(model: str | None) -> None:
     global _cli_model
     _cli_model = model
 
 
-def set_cli_strong_model(model: str) -> None:
+def set_cli_strong_model(model: str | None) -> None:
     global _cli_strong_model
     _cli_strong_model = model
 

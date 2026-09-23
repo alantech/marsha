@@ -6,6 +6,7 @@ to the pre-refactor hardcoded values, and exercise the toolchain leaves (helper 
 toolchain detection, test execution) against the real Python toolchain.
 """
 
+from typing import Any, cast
 import asyncio
 import os
 import sys
@@ -17,7 +18,7 @@ from marsha.meta import MarshaMeta
 from marsha.utils import read_file, write_file
 
 
-def make_meta(filename='example', void_funcs=()):
+def make_meta(filename: str = 'example', void_funcs: tuple[str, ...] = ()) -> MarshaMeta:
     meta = MarshaMeta(f'{filename}.mrsh')
     meta.filename = filename
     meta.functions = []
@@ -28,14 +29,14 @@ def make_meta(filename='example', void_funcs=()):
 
 # --- registry / --target resolution ------------------------------------------
 
-def test_registry_resolves_python_by_id_and_alias():
+def test_registry_resolves_python_by_id_and_alias() -> None:
     assert backends.resolve_target('python').id == 'python'
     assert backends.resolve_target('py').id == 'python'
     assert backends.resolve_target('PY').id == 'python'
     assert backends.current().id == 'python'
 
 
-def test_registry_rejects_unknown_target():
+def test_registry_rejects_unknown_target() -> None:
     try:
         backends.resolve_target('rust')
         assert False, 'expected an exception'
@@ -45,7 +46,7 @@ def test_registry_rejects_unknown_target():
 
 # --- naming / contract ---------------------------------------------------------
 
-def test_naming():
+def test_naming() -> None:
     b = PythonBackend()
     assert b.id == 'python'
     assert 'py' in b.aliases
@@ -55,7 +56,7 @@ def test_naming():
     assert b.manifest_name() == 'pyproject.toml'
 
 
-def test_artifact_contract():
+def test_artifact_contract() -> None:
     b = PythonBackend()
     assert b.artifact_contract('example') == [
         ('source', 'example.py'),
@@ -64,23 +65,23 @@ def test_artifact_contract():
     ]
 
 
-def test_code_block():
+def test_code_block() -> None:
     assert PythonBackend().code_block('x') == '```py\nx\n```'
 
 
 # --- target version (--target-version, issue #206) -----------------------------
 
-def test_resolve_target_version_defaults_to_running_interpreter():
+def test_resolve_target_version_defaults_to_running_interpreter() -> None:
     b = PythonBackend()
     assert b.target_version == f'{sys.version_info.major}.{sys.version_info.minor}'
 
 
-def test_resolve_target_version_explicit():
+def test_resolve_target_version_explicit() -> None:
     assert PythonBackend('3.12').target_version == '3.12'
     assert PythonBackend('3').target_version == '3'
 
 
-def test_resolve_target_version_rejects_invalid():
+def test_resolve_target_version_rejects_invalid() -> None:
     for bad in ('latest', '3.x', '3..1', '', 'v3.12', '3.14.1', '3.12.1.2'):
         try:
             PythonBackend(bad)
@@ -89,14 +90,14 @@ def test_resolve_target_version_rejects_invalid():
             assert 'Invalid target version' in str(e)
 
 
-def test_impl_prompt_renders_target_version():
+def test_impl_prompt_renders_target_version() -> None:
     meta = make_meta()
     assert 'requires-python = ">=3.12"' in PythonBackend('3.12').impl_prompt(meta)
     assert 'requires-python = ">=3.13"' in PythonBackend('3.13').impl_prompt(meta)
     assert 'requires-python = ">=3.12"' in PythonBackend('3.12').fix_impl_prompt(meta)
 
 
-def test_impl_editor_template_renders_target_version():
+def test_impl_editor_template_renders_target_version() -> None:
     from marsha import personas
     _, system = personas.load_editor('impl')
     out = system.format(filename='example', void_note='', target_version='3.13')
@@ -105,7 +106,7 @@ def test_impl_editor_template_renders_target_version():
 
 # --- compose layout -------------------------------------------------------------
 
-def test_compose_with_manifest():
+def test_compose_with_manifest() -> None:
     b = PythonBackend()
     impl = ('# example.py\n\n```py\ncode\n```\n\n'
             '# pyproject.toml\n\n```toml\n[project]\nname = "example"\ndependencies = ["numpy"]\n```\n')
@@ -122,14 +123,14 @@ def test_compose_with_manifest():
     assert list(composed) == ['example.py', 'pyproject.toml', 'example_test.py']
 
 
-def test_compose_without_manifest():
+def test_compose_without_manifest() -> None:
     b = PythonBackend()
     impl = '# example.py\n\n```py\ncode\n```\n'
     oracle = '# example_test.py\n\n```py\ntests\n```\n'
     assert list(b.compose(impl, oracle)) == ['example.py', 'example_test.py']
 
 
-def test_compose_skips_empty_fences():
+def test_compose_skips_empty_fences() -> None:
     b = PythonBackend()
     impl = ('# example.py\n\n```py\ncode\n```\n\n'
             '# pyproject.toml\n\n```toml\n```\n')
@@ -147,7 +148,7 @@ SKELETON = ('[project]\nname = "example"\nversion = "0.1.0"\n'
             '[tool.setuptools]\npy-modules = ["example"]\n')
 
 
-def test_validate_impl():
+def test_validate_impl() -> None:
     b = PythonBackend()
     ok = '# example.py\n\n```py\nx\n```\n'
     ok_manifest = (ok + f'\n# pyproject.toml\n\n```toml\n{SKELETON}```\n')
@@ -159,11 +160,11 @@ def test_validate_impl():
     assert not b.validate_markdown('# example.py\n', 'impl', 'example')
 
 
-def test_validate_impl_manifest_must_follow_structure():
+def test_validate_impl_manifest_must_follow_structure() -> None:
     b = PythonBackend()
     code = '# example.py\n\n```py\nx\n```\n'
 
-    def with_manifest(toml):
+    def with_manifest(toml: str) -> Any:
         return code + f'\n# pyproject.toml\n\n```toml\n{toml}```\n'
 
     # The full expected structure validates.
@@ -179,7 +180,7 @@ def test_validate_impl_manifest_must_follow_structure():
                                        'py-modules = ["example_test"]')), 'impl', 'example')
 
 
-def test_validate_oracle():
+def test_validate_oracle() -> None:
     b = PythonBackend()
     ok = '# example_test.py\n\n```py\nx\n```\n'
     assert b.validate_markdown(ok, 'oracle', 'example')
@@ -187,7 +188,7 @@ def test_validate_oracle():
     assert not b.validate_markdown('# example.py\n\n```py\nx\n```\n', 'oracle', 'example')
 
 
-def test_validate_unit_uses_verbatim_name():
+def test_validate_unit_uses_verbatim_name() -> None:
     b = PythonBackend()
     full = '# /tmp/x/example.py\n\n```py\nx\n```\n'
     assert b.validate_markdown(full, 'unit', '/tmp/x/example.py')
@@ -196,7 +197,7 @@ def test_validate_unit_uses_verbatim_name():
         full + '\n# more.py\n\n```py\ny\n```\n', 'unit', '/tmp/x/example.py')
 
 
-def test_validate_unknown_kind_is_false():
+def test_validate_unknown_kind_is_false() -> None:
     assert not PythonBackend().validate_markdown('# a\n\n```py\nx\n```\n', 'bogus', 'a')
 
 
@@ -228,7 +229,7 @@ IMPL_FIX = 'You are a senior software engineer fixing a Python 3 implementation 
 TEST_CORRECT = 'You are a senior software engineer correcting a faulty unit test.\nYou are given the assignment, the implementation, the unit test suite, and the test results.\nA diagnosis has determined that a TEST (not the implementation) is at fault: it asserts behavior the assignment does not actually require — for example it is over-strict, it contradicts the assignment, it tests an implementation detail, or it pins down an exact error-message wording or output format that the assignment leaves open.\nCorrect ONLY the faulty test(s) so that the test suite faithfully tests the assignment. Every change you make must be justified by the assignment: reference the part of the assignment that makes the current test wrong.\nYou must NOT weaken a test that is actually correct: if a failing assertion is genuinely required by the assignment, leave that test unchanged.\nYou must NOT modify the implementation, and you must not write new tests beyond correcting the faulty ones.\nYour response must not comment on what you changed.\nYour response must not add any additional comments, clarifications, notes, information, explanations, details, examples or thoughts.\nYour response must be a markdown file.\nThe first section header must be the filename `example_test.py`.\nThe content of the first section must be a python code block with the corrected test code.\nThe file should end with the code block, nothing else should be added to the file.\nThe desired response must look like the following:\n\n# example_test.py\n\n```py\n<corrected code>\n```\n\n'
 
 
-def test_prompts_are_byte_exact():
+def test_prompts_are_byte_exact() -> None:
     # Pin the target version explicitly so the prompt pins do not depend on the
     # interpreter running the test suite (the default is the running interpreter).
     b = PythonBackend('3.12')
@@ -242,34 +243,34 @@ def test_prompts_are_byte_exact():
     assert b.lint_fix_prompt(LINT_FILENAME) == LINT_FIX
 
 
-def test_oracle_prompt_includes_void_note():
+def test_oracle_prompt_includes_void_note() -> None:
     b = PythonBackend()
-    meta = make_meta(void_funcs=['# func print_thing(x: str)'])
+    meta = make_meta(void_funcs=('# func print_thing(x: str)',))
     assert ('Do not create any tests for the void functions: print_thing.'
             in b.oracle_prompt(meta))
 
 
 # --- persona guidance -------------------------------------------------------------
 
-def test_persona_guidance_carries_python_conventions():
+def test_persona_guidance_carries_python_conventions() -> None:
     g = PythonBackend().persona_guidance()
     for phrase in ('Python 3', 'type hints', 'PEP8', 'autopep8', 'pyproject.toml'):
         assert phrase in g
 
 
-def test_persona_guidance_injected_into_reviewer_prompt():
+def test_persona_guidance_injected_into_reviewer_prompt() -> None:
     from marsha import personas
 
     seen = {}
 
     class CapturingMapper:
-        def __init__(self, system, **kwargs):
+        def __init__(self, system: Any, **kwargs: Any) -> None:
             seen['system'] = system
 
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return 'NO FINDINGS'
 
-    async def go(guidance):
+    async def go(guidance: Any) -> Any:
         with patch.object(personas, 'get_mapper',
                           new=lambda *a, **k: CapturingMapper(*a, **k)):
             await personas.run_personas(
@@ -287,31 +288,31 @@ def test_persona_guidance_injected_into_reviewer_prompt():
 
 # --- toolchain leaves ---------------------------------------------------------------
 
-def test_make_executable_appends_helper(tmp_path):
+def test_make_executable_appends_helper(tmp_path: Any) -> None:
     b = PythonBackend()
     path = f'{tmp_path}/example.py'
     write_file(path, 'def f():\n    return 1\n')
     before = read_file(path)
     b.make_executable(path)
     after = read_file(path)
-    assert after.startswith(before)
+    assert cast(str, after).startswith(cast(str, before))
     assert "if __name__ == '__main__':" in after
 
 
-def test_toolchain():
+def test_toolchain() -> None:
     b = PythonBackend()
     assert b.toolchain() in ('python', 'python3')
     assert b.toolchain_ok()
 
 
-def test_run_tests_pass_and_fail(tmp_path):
+def test_run_tests_pass_and_fail(tmp_path: Any) -> None:
     b = PythonBackend()
     code = f'{tmp_path}/example.py'
     write_file(code, 'def add(a, b):\n    return a + b\n')
     header = ('import unittest\nfrom example import add\n\n'
               'class TestAdd(unittest.TestCase):\n')
 
-    def write_test(name, expected):
+    def write_test(name: str, expected: Any) -> Any:
         body = (f'    def test_add(self):\n        self.assertEqual(add(1, 2), {expected})\n\n'
                 'if __name__ == "__main__":\n    unittest.main()\n')
         write_file(f'{tmp_path}/{name}', header + body)
@@ -327,7 +328,7 @@ def test_run_tests_pass_and_fail(tmp_path):
 
 # --- pyproject.toml manifests (issue #206) ---------------------------------------
 
-def test_valid_manifest_structure():
+def test_valid_manifest_structure() -> None:
     b = PythonBackend()
     assert b._valid_manifest(SKELETON, 'example')
     # Dependencies do not affect the structure check.
@@ -338,7 +339,7 @@ def test_valid_manifest_structure():
     dashed = dashed.replace('py-modules = ["example"]', 'py-modules = ["data_mangling"]')
     assert b._valid_manifest(dashed, 'data_mangling')
 
-    def broken(toml):
+    def broken(toml: str | None) -> Any:
         assert not b._valid_manifest(toml, 'example'), toml
 
     broken('')
@@ -362,7 +363,7 @@ def test_valid_manifest_structure():
                             'py-modules = ["example", "example_test"]'))
 
 
-def test_manifest_deps(tmp_path):
+def test_manifest_deps(tmp_path: Any) -> None:
     b = PythonBackend()
     p = f'{tmp_path}/pyproject.toml'
     write_file(p, '[project]\nname = "example"\ndependencies = [\n    "numpy",\n    "six",\n]\n')
@@ -376,7 +377,7 @@ def test_manifest_deps(tmp_path):
     assert b._manifest_deps(f'{tmp_path}/missing.toml') is None
 
 
-def test_run_tests_with_pyproject_manifest(tmp_path):
+def test_run_tests_with_pyproject_manifest(tmp_path: Any) -> None:
     # A manifest without dependencies runs the suite with the system interpreter: no venv,
     # no installs.
     b = PythonBackend()
@@ -394,7 +395,7 @@ def test_run_tests_with_pyproject_manifest(tmp_path):
     assert not os.path.exists(f'{tmp_path}/.venv')
 
 
-def test_run_tests_surfaces_unreadable_manifest(tmp_path):
+def test_run_tests_surfaces_unreadable_manifest(tmp_path: Any) -> None:
     # A manifest that is not a readable pyproject.toml is reported in the results so the
     # diagnose/fix loop can repair it, even when the suite itself passes.
     b = PythonBackend()

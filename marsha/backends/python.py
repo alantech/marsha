@@ -684,7 +684,7 @@ The desired response must look like the following:
             return False
         return True
 
-    def _valid_manifest(self, text: str, marsha_filename: str) -> bool:
+    def _valid_manifest(self, text: str | None, marsha_filename: str) -> bool:
         # A dependency manifest must follow the generated project's expected structure:
         # a PEP 621 [project] table that names (and versions) the project, plus the
         # setuptools build configuration that makes the flat single-module layout

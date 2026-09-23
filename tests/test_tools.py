@@ -7,6 +7,7 @@ the installed-env tools run against a mocked venv-python. The tool loop is
 driven by a scripted fake mapper.
 """
 
+from typing import Any
 import asyncio
 import importlib.util
 import json
@@ -25,7 +26,7 @@ from marsha.meta import MarshaMeta
 HAS_QUICKJS = importlib.util.find_spec('quickjs') is not None
 
 
-def make_meta(filename='example'):
+def make_meta(filename: str = 'example') -> MarshaMeta:
     meta = MarshaMeta(f'{filename}.mrsh')
     meta.filename = filename
     meta.functions = []
@@ -41,7 +42,7 @@ VALID_IMPL = '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
 
 # --- $ command extraction (one per turn) --------------------------------------
 
-def test_extract_no_commands():
+def test_extract_no_commands() -> None:
     assert tools.extract_pending_command(DOC) is None
     assert tools.extract_pending_command('') is None
     assert tools.extract_pending_command(None) is None
@@ -50,9 +51,10 @@ def test_extract_no_commands():
     assert tools.extract_pending_command('# x.sh\n\n```sh\necho $HOME\n```\n') is None
 
 
-def test_extract_single_command():
+def test_extract_single_command() -> None:
     text = DOC + '\n$ web-search "pandas read_csv parameters"\n'
     pending = tools.extract_pending_command(text)
+    assert pending is not None
     assert pending.name == 'web-search'
     # A quoted phrase is a single argument (the handler joins args with spaces).
     assert pending.args == ['pandas read_csv parameters']
@@ -60,45 +62,51 @@ def test_extract_single_command():
     assert pending.malformed is False
 
 
-def test_extract_page_prefixed_command():
+def test_extract_page_prefixed_command() -> None:
     # A `PAGE=<n>` env-var prefix selects a page of a paged command's output; it is stripped
     # from the name/args and surfaced on pending.page. A plain command has page None.
     pending = tools.extract_pending_command(DOC + '\n$ PAGE=2 git show HEAD:src/x.py\n')
+    assert pending is not None
     assert pending.name == 'git'
     assert pending.args == ['show', 'HEAD:src/x.py']
     assert pending.page == 2
     assert pending.malformed is False
     plain = tools.extract_pending_command(DOC + '\n$ git show HEAD:src/x.py\n')
+    assert plain is not None
     assert plain.name == 'git' and plain.page is None
 
 
-def test_extract_only_last_nonempty_line_counts():
+def test_extract_only_last_nonempty_line_counts() -> None:
     # A $ command in the middle of the response is reasoning, not a command; only
     # the final non-empty line is read as a command.
     text = DOC + '\n$ web-search "earlier"\nsome more reasoning\n$ view-web-page "https://example.com"\n'
     pending = tools.extract_pending_command(text)
+    assert pending is not None
     assert pending.name == 'view-web-page'
     assert pending.args == ['https://example.com']
 
 
-def test_extract_ignores_trailing_blank_lines():
+def test_extract_ignores_trailing_blank_lines() -> None:
     text = DOC + '\n$ web-search "a"\n\n\n'
-    assert tools.extract_pending_command(text).name == 'web-search'
+    p = tools.extract_pending_command(text)
+    assert p is not None
+    assert p.name == 'web-search'
 
 
-def test_extract_non_command_final_line_is_none():
+def test_extract_non_command_final_line_is_none() -> None:
     # A $ line followed by prose: the final line is prose, so this is a (malformed) artifact, not a command.
     text = DOC + '\n$ web-search "a"\nand then a sentence\n'
     assert tools.extract_pending_command(text) is None
 
 
-def test_extract_url_argument_is_a_single_token():
+def test_extract_url_argument_is_a_single_token() -> None:
     text = DOC + '\n$ view-web-page "https://docs.python.org/3/library/json.html?x=1&y=2"\n'
-    assert tools.extract_pending_command(text).args == \
-        ['https://docs.python.org/3/library/json.html?x=1&y=2']
+    p = tools.extract_pending_command(text)
+    assert p is not None
+    assert p.args == ['https://docs.python.org/3/library/json.html?x=1&y=2']
 
 
-def test_extract_malformed_command_lines():
+def test_extract_malformed_command_lines() -> None:
     for bad in (DOC + '\n$\n',
                 DOC + '\n$web-search "a"\n',
                 DOC + '\n$ web-search "unterminated\n'):
@@ -108,14 +116,14 @@ def test_extract_malformed_command_lines():
 
 # --- command execution ---------------------------------------------------------
 
-def test_execute_unknown_command_lists_available():
+def test_execute_unknown_command_lists_available() -> None:
     cmds = tools.build_commands(tools.ToolContext('gen'))
     out = asyncio.run(tools.execute_command(cmds, 'frobnicate', ['x']))
     assert 'unknown command: frobnicate' in out
     assert '$ web-search' in out
 
 
-def test_execute_known_command_runs_handler():
+def test_execute_known_command_runs_handler() -> None:
     cmds = tools.build_commands(tools.ToolContext('gen'))
     with patch.object(cmds['web-search'], 'handler', new=AsyncMock(return_value='OK')) as h:
         out = asyncio.run(tools.execute_command(cmds, 'web-search', ['q']))
@@ -123,20 +131,20 @@ def test_execute_known_command_runs_handler():
     h.assert_awaited_once_with(['q'])
 
 
-def test_execute_command_forwards_page_only_to_paged_handlers():
+def test_execute_command_forwards_page_only_to_paged_handlers() -> None:
     # execute_command forwards `page` only to a command that paginates (accepts_page); other
     # handlers are called with no page kwarg, so they never see it.
     cmds = tools.build_commands(tools.ToolContext('review'))
     with patch.object(cmds['git'], 'handler', new=AsyncMock(return_value='OK')) as h:
         asyncio.run(tools.execute_command(cmds, 'git', ['show', 'HEAD:x'], page=3))
-        assert h.await_args.kwargs == {'page': 3}
+        assert h.await_args_list[0].kwargs == {'page': 3}
     with patch.object(cmds['notes'], 'handler', new=AsyncMock(return_value='OK')) as h2:
         asyncio.run(tools.execute_command(cmds, 'notes', ['show'], page=3))
-        assert h2.await_args.kwargs == {}
+        assert h2.await_args_list[0].kwargs == {}
 
 
-def test_execute_handler_exception_is_error_text():
-    async def boom(args, ctx=None):
+def test_execute_handler_exception_is_error_text() -> None:
+    async def boom(args: Any, ctx: Any = None) -> Any:
         raise Exception('kaput')
     cmds = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=boom: _h(args))}
     out = asyncio.run(tools.execute_command(cmds, 'kapow', []))
@@ -144,7 +152,7 @@ def test_execute_handler_exception_is_error_text():
     # distinguishes the failure when the message is empty.
     assert out == 'error: command kapow failed (Exception): kaput'
 
-    async def silent(args, ctx=None):
+    async def silent(args: Any, ctx: Any = None) -> Any:
         raise KeyError()
     cmds2 = {'kapow': tools.ToolCommand('kapow', tools.CATEGORY_WEB, '$ kapow', 'd', lambda args, _h=silent: _h(args))}
     out2 = asyncio.run(tools.execute_command(cmds2, 'kapow', []))
@@ -161,7 +169,7 @@ PY_REGISTRY = {'search-dependencies', 'dependency-docs'}
 ENV = {'list-dependencies', 'show-dependency', 'list-symbols', 'show-symbol'}
 
 
-def test_phase_scoping_base_phases():
+def test_phase_scoping_base_phases() -> None:
     b = backends.current()
     gen = set(tools.build_commands(tools.ToolContext('gen', backend=b)))
     oracle = set(tools.build_commands(tools.ToolContext('oracle-opt', backend=b)))
@@ -170,7 +178,7 @@ def test_phase_scoping_base_phases():
     assert not (gen & ENV)  # no installed-env tools in the base phases
 
 
-def test_phase_scoping_full_with_venv(tmp_path):
+def test_phase_scoping_full_with_venv(tmp_path: Any) -> None:
     venv_py = tmp_path / '.venv' / 'bin' / 'python'
     venv_py.parent.mkdir(parents=True)
     venv_py.write_text('')
@@ -180,20 +188,20 @@ def test_phase_scoping_full_with_venv(tmp_path):
     assert 'list-dependencies' in cmds
 
 
-def test_phase_scoping_full_without_venv():
+def test_phase_scoping_full_without_venv() -> None:
     # No usable venv: the installed-env tools are dropped, degrading to the base set.
     ctx = tools.ToolContext('correction', workdir='/does/not/exist',
                             backend=backends.current())
     assert set(tools.build_commands(ctx)) == AGNOSTIC | PY_REGISTRY
 
 
-def test_phase_scoping_no_backend_is_agnostic_only():
+def test_phase_scoping_no_backend_is_agnostic_only() -> None:
     # Without a backend (a bare test / unregistered target) only the shared
     # language-agnostic tools are available.
     assert set(tools.build_commands(tools.ToolContext('gen'))) == AGNOSTIC
 
 
-def test_backend_layers_tools_on_the_agnostic_base():
+def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # The point of the per-target design: a backend supplies the language-specific
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set
     # also carries the review-only git/notes tools (build_commands filters them per phase).
@@ -207,7 +215,7 @@ def test_backend_layers_tools_on_the_agnostic_base():
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
 
 
-def test_tool_instructions_lists_phase_tools():
+def test_tool_instructions_lists_phase_tools() -> None:
     gen = tools.tool_instructions(tools.ToolContext('gen', backend=backends.current()))
     assert 'search-dependencies' in gen and 'web-search' in gen and 'calc' in gen
     assert 'list-dependencies' not in gen  # gen has no installed-env tools
@@ -215,7 +223,7 @@ def test_tool_instructions_lists_phase_tools():
     assert 'training cutoff' in gen  # knowledge-cutoff reminder
 
 
-def test_truncate_and_untrusted_block():
+def test_truncate_and_untrusted_block() -> None:
     assert tools.truncate('abc') == 'abc'
     assert tools.truncate('x' * 100, 10).endswith('[truncated]')
     assert len(tools.truncate('x' * 100, 10)) <= 10 + 20
@@ -226,7 +234,7 @@ def test_truncate_and_untrusted_block():
 
 # --- web-search ----------------------------------------------------------------
 
-def _parallel_body():
+def _parallel_body() -> bytes:
     return json.dumps({
         'jsonrpc': '2.0', 'id': 1,
         'result': {
@@ -243,7 +251,7 @@ def _parallel_body():
     }).encode('utf-8')
 
 
-def _exa_body():
+def _exa_body() -> bytes:
     text = ('Title: pandas.read_csv docs\n'
             'URL: https://pandas.pydata.org/docs.html\n'
             'Published: N/A\nAuthor: N/A\nHighlights:\n'
@@ -259,10 +267,10 @@ def _exa_body():
     }) + '\n\n').encode('utf-8')
 
 
-def test_web_search_uses_parallel_mcp():
+def test_web_search_uses_parallel_mcp() -> None:
     calls = []
 
-    async def fake_post(url, body, headers=None, timeout=None):
+    async def fake_post(url: Any, body: Any, headers: Any = None, timeout: Any = None) -> Any:
         calls.append(url)
         assert url == tools.PARALLEL_MCP_URL
         assert json.loads(body)['params']['name'] == 'web_search'
@@ -277,8 +285,8 @@ def test_web_search_uses_parallel_mcp():
     assert 'view-web-page' in out
 
 
-def test_web_search_falls_back_to_exa_when_parallel_empty():
-    async def fake_post(url, body, headers=None, timeout=None):
+def test_web_search_falls_back_to_exa_when_parallel_empty() -> None:
+    async def fake_post(url: Any, body: Any, headers: Any = None, timeout: Any = None) -> Any:
         if url == tools.PARALLEL_MCP_URL:
             return 200, 'application/json', json.dumps(
                 {'jsonrpc': '2.0', 'id': 1,
@@ -294,11 +302,11 @@ def test_web_search_falls_back_to_exa_when_parallel_empty():
     assert 'view-web-page' in out
 
 
-def test_web_search_falls_back_to_ddg_instant_when_mcp_down():
-    async def fake_post(url, body, headers=None, timeout=None):
+def test_web_search_falls_back_to_ddg_instant_when_mcp_down() -> None:
+    async def fake_post(url: Any, body: Any, headers: Any = None, timeout: Any = None) -> Any:
         raise Exception('mcp endpoint unreachable')
 
-    async def fake_get(url, timeout=None):
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         assert 'api.duckduckgo.com' in url
         return 200, 'application/json', json.dumps({
             'Heading': 'pandas',
@@ -312,13 +320,13 @@ def test_web_search_falls_back_to_ddg_instant_when_mcp_down():
     assert 'https://pandas.pydata.org/' in out
 
 
-def test_web_search_no_results_is_error_text():
-    async def fake_post(url, body, headers=None, timeout=None):
+def test_web_search_no_results_is_error_text() -> None:
+    async def fake_post(url: Any, body: Any, headers: Any = None, timeout: Any = None) -> Any:
         return 200, 'application/json', json.dumps(
             {'jsonrpc': '2.0', 'id': 1,
              'result': {'structuredContent': {'results': []}}}).encode('utf-8')
 
-    async def fake_get(url, timeout=None):
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         return 200, 'application/json', b'{}'
 
     with patch.object(tools, 'http_post', new=fake_post), \
@@ -327,7 +335,7 @@ def test_web_search_no_results_is_error_text():
     assert out.startswith('error: no results')
 
 
-def test_web_search_requires_a_query():
+def test_web_search_requires_a_query() -> None:
     out = asyncio.run(tools.web_search([]))
     assert out.startswith('error:') and 'web-search' in out
 
@@ -343,8 +351,8 @@ PAGE_HTML = '''<!DOCTYPE html>
 </body></html>'''
 
 
-def test_view_web_page_renders_html_to_text():
-    async def fake_get(url, timeout=None):
+def test_view_web_page_renders_html_to_text() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         assert url == 'https://pandas.pydata.org/docs'
         return 200, 'text/html; charset=utf-8', PAGE_HTML.encode()
     with patch.object(tools, 'http_get', new=fake_get):
@@ -355,31 +363,31 @@ def test_view_web_page_renders_html_to_text():
     assert 'Ignore me' not in out
 
 
-def test_view_web_page_truncates_long_pages():
-    async def fake_get(url, timeout=None):
+def test_view_web_page_truncates_long_pages() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         return 200, 'text/plain', b'x' * (tools.PAGE_CHAR_LIMIT + 100)
     with patch.object(tools, 'http_get', new=fake_get):
         out = asyncio.run(tools.view_web_page(['https://example.com/big.txt']))
     assert out.rstrip().endswith('[page truncated]')
 
 
-def test_view_web_page_rejects_bad_urls():
+def test_view_web_page_rejects_bad_urls() -> None:
     assert asyncio.run(tools.view_web_page([])).startswith('error:')
     assert asyncio.run(tools.view_web_page(['a', 'b'])).startswith('error:')
     assert asyncio.run(tools.view_web_page(['ftp://example.com/x'])).startswith('error:')
     assert asyncio.run(tools.view_web_page(['not a url'])).startswith('error:')
 
 
-def test_view_web_page_blocks_private_host():
-    async def fake_get(url, timeout=None):
+def test_view_web_page_blocks_private_host() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         raise AssertionError('must not fetch a private host')
     with patch.object(tools, 'http_get', new=fake_get):
         out = asyncio.run(tools.view_web_page(['http://127.0.0.1/x']))
     assert out.startswith('error:') and 'blocked' in out
 
 
-def test_view_web_page_fetch_failure_is_error_text():
-    async def fake_get(url, timeout=None):
+def test_view_web_page_fetch_failure_is_error_text() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         raise Exception('Connection refused')
     with patch.object(tools, 'http_get', new=fake_get):
         out = asyncio.run(tools.view_web_page(['https://example.com/']))
@@ -404,8 +412,8 @@ DDG_PYPI_HTML = '''<html><body>
 </body></html>'''
 
 
-def test_search_dependencies_shapes_pypi_hits():
-    async def fake_get(url, timeout=None):
+def test_search_dependencies_shapes_pypi_hits() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         assert 'pypi.org' in url  # the site: qualifier is URL-encoded (site%3Apypi.org)
         return 200, 'text/html', DDG_PYPI_HTML.encode()
     with patch.object(pypy, 'http_get', new=fake_get):
@@ -416,8 +424,8 @@ def test_search_dependencies_shapes_pypi_hits():
     assert 'dependency-docs' in out
 
 
-def test_search_dependencies_no_results_is_error():
-    async def fake_get(url, timeout=None):
+def test_search_dependencies_no_results_is_error() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         return 200, 'text/html', b'<html></html>'
     with patch.object(pypy, 'http_get', new=fake_get):
         out = asyncio.run(pypy.search_dependencies(['zzz']))
@@ -426,14 +434,14 @@ def test_search_dependencies_no_results_is_error():
 
 # --- registry: dependency-docs ---------------------------------------------------
 
-def test_dependency_docs_builds_url_and_parses_info():
+def test_dependency_docs_builds_url_and_parses_info() -> None:
     pypi = json.dumps({'info': {
         'name': 'requests', 'version': '2.31.0', 'summary': 'HTTP library',
         'project_urls': {'Documentation': 'https://docs.python-requests.org'}}}).encode()
     docs_html = b'<html><body><h1>Requests</h1><p>A great HTTP library.</p></body></html>'
     calls = []
 
-    async def fake_get(url, timeout=None):
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         calls.append(url)
         if 'pypi.org' in url:
             return 200, 'application/json', pypi
@@ -441,7 +449,7 @@ def test_dependency_docs_builds_url_and_parses_info():
         return 200, 'text/html', docs_html
 
     with patch.object(pypy, 'http_get', new=fake_get), \
-         patch.object(tools.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
+         patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
         out = asyncio.run(pypy.dependency_docs(['requests']))
     assert calls[0] == 'https://pypi.org/pypi/requests/json'
     assert 'requests 2.31.0' in out
@@ -450,10 +458,10 @@ def test_dependency_docs_builds_url_and_parses_info():
     assert 'A great HTTP library.' in out
 
 
-def test_dependency_docs_pins_version():
+def test_dependency_docs_pins_version() -> None:
     pypi = b'{"info":{"name":"foo","version":"2.0"}}'
 
-    async def fake_get(url, timeout=None):
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         assert url == 'https://pypi.org/pypi/foo/2.0/json'
         return 200, 'application/json', pypi
     with patch.object(pypy, 'http_get', new=fake_get):
@@ -461,12 +469,12 @@ def test_dependency_docs_pins_version():
     assert 'foo 2.0' in out
 
 
-def test_dependency_docs_skips_private_docs_url():
+def test_dependency_docs_skips_private_docs_url() -> None:
     pypi = json.dumps({'info': {
         'name': 'foo', 'version': '1.0', 'summary': 's',
         'project_urls': {'Documentation': 'http://192.168.1.5/docs'}}}).encode()
 
-    async def fake_get(url, timeout=None):
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         assert 'pypi.org' in url  # only the metadata fetch is allowed
         return 200, 'application/json', pypi
     with patch.object(pypy, 'http_get', new=fake_get):
@@ -475,8 +483,8 @@ def test_dependency_docs_skips_private_docs_url():
     assert 'docs fetch skipped' in out
 
 
-def test_dependency_docs_fetch_failure_is_error():
-    async def fake_get(url, timeout=None):
+def test_dependency_docs_fetch_failure_is_error() -> None:
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
         raise Exception('no such package')
     with patch.object(pypy, 'http_get', new=fake_get):
         out = asyncio.run(pypy.dependency_docs(['does-not-exist']))
@@ -485,7 +493,7 @@ def test_dependency_docs_fetch_failure_is_error():
 
 # --- SSRF guard ------------------------------------------------------------------
 
-def test_ssrf_blocks_local_and_private_ips():
+def test_ssrf_blocks_local_and_private_ips() -> None:
     assert tools.is_blocked_host('localhost') is True
     assert tools.is_blocked_host('127.0.0.1') is True
     assert tools.is_blocked_host('10.1.2.3') is True
@@ -494,19 +502,19 @@ def test_ssrf_blocks_local_and_private_ips():
     assert tools.is_blocked_host('0.0.0.0') is True
 
 
-def test_ssrf_allows_public_ip():
+def test_ssrf_allows_public_ip() -> None:
     assert tools.is_blocked_host('93.184.216.34') is False
 
 
-def test_ssrf_resolves_hostnames():
-    with patch.object(tools.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
+def test_ssrf_resolves_hostnames() -> None:
+    with patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
         assert tools.is_blocked_host('example.com') is False
-    with patch.object(tools.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('10.1.2.3', 80))]):
+    with patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('10.1.2.3', 80))]):
         assert tools.is_blocked_host('internal.corp') is True
 
 
-def test_ssrf_assert_public_url():
-    with patch.object(tools.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
+def test_ssrf_assert_public_url() -> None:
+    with patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
         tools.assert_public_url('https://example.com/x')  # public: ok
     with pytest.raises(Exception):
         tools.assert_public_url('https://localhost/x')
@@ -518,18 +526,18 @@ def test_ssrf_assert_public_url():
 
 # --- calc (harness logic, mocked subprocess) --------------------------------------
 
-def test_calc_passes_scrubbed_env_and_files(tmp_path):
+def test_calc_passes_scrubbed_env_and_files(tmp_path: Any) -> None:
     (tmp_path / 'data.txt').write_text('hello-data')
     captured = {}
 
-    async def fake_spawn(payload, env, timeout):
+    async def fake_spawn(payload: Any, env: Any, timeout: Any) -> Any:
         captured['payload'] = payload
         captured['env'] = env
         captured['timeout'] = timeout
         return '42\n', ''
 
     with patch.object(tools, '_spawn_calc', new=fake_spawn), \
-         patch.object(tools.importlib.util, 'find_spec', return_value=object()), \
+         patch('importlib.util.find_spec', return_value=object()), \
          patch.dict(os.environ, {'OPENAI_API_KEY': 's1', 'CLAUDE_API_KEY': 's2',
                                  'ANTHROPIC_API_KEY': 's3', 'PATH': '/bin'}):
         out = asyncio.run(tools.calc(
@@ -545,28 +553,28 @@ def test_calc_passes_scrubbed_env_and_files(tmp_path):
     assert captured['timeout'] == tools.CALC_TIMEOUT
 
 
-def test_calc_timeout_is_error_text():
-    async def fake_spawn(payload, env, timeout):
+def test_calc_timeout_is_error_text() -> None:
+    async def fake_spawn(payload: Any, env: Any, timeout: Any) -> Any:
         raise Exception('run_subprocess timeout...')
     with patch.object(tools, '_spawn_calc', new=fake_spawn), \
-         patch.object(tools.importlib.util, 'find_spec', return_value=object()):
+         patch('importlib.util.find_spec', return_value=object()):
         out = asyncio.run(tools.calc(['while(true){}']))
     assert out.startswith('error:') and 'timed out' in out
 
 
-def test_calc_without_quickjs_is_error():
-    with patch.object(tools.importlib.util, 'find_spec', return_value=None):
+def test_calc_without_quickjs_is_error() -> None:
+    with patch('importlib.util.find_spec', return_value=None):
         out = asyncio.run(tools.calc(['print(1)']))
     assert out.startswith('error:') and 'quickjs' in out
 
 
-def test_calc_requires_a_script():
+def test_calc_requires_a_script() -> None:
     out = asyncio.run(tools.calc([]))
     assert out.startswith('error:') and 'calc' in out
 
 
 @pytest.mark.skipif(not HAS_QUICKJS, reason='quickjs not installed')
-def test_calc_real_quickjs():
+def test_calc_real_quickjs() -> None:
     # REPL semantics: the script's final-expression value is stringified and returned.
     assert asyncio.run(tools.calc(['6*7'])) == '42'
     assert asyncio.run(tools.calc(['Math.sqrt(2)'])) == '1.4142135623730951'
@@ -591,8 +599,8 @@ def test_calc_real_quickjs():
 
 # --- installed-env tools (mocked venv-python) --------------------------------------
 
-def test_list_dependencies_shapes_output():
-    async def fake(venv_python, argv, timeout=30):
+def test_list_dependencies_shapes_output() -> None:
+    async def fake(venv_python: Any, argv: Any, timeout: int = 30) -> Any:
         assert venv_python == '/v/.venv/bin/python'
         assert argv == ['-m', 'pip', 'list', '--format=freeze', '--disable-pip-version-check']
         return 'requests==2.31.0\nhttpx==0.27.0\n', None
@@ -602,8 +610,8 @@ def test_list_dependencies_shapes_output():
     assert 'requests==2.31.0' in out and 'httpx==0.27.0' in out
 
 
-def test_show_dependency_passes_name_and_formats():
-    async def fake(venv_python, argv, timeout=30):
+def test_show_dependency_passes_name_and_formats() -> None:
+    async def fake(venv_python: Any, argv: Any, timeout: int = 30) -> Any:
         assert argv == ['-c', pypy._SHOW_DEP_SCRIPT, 'requests']
         return 'requests 2.31.0\nSummary: HTTP library\n', None
     with patch.object(pypy, 'run_in_python', new=fake):
@@ -612,8 +620,8 @@ def test_show_dependency_passes_name_and_formats():
     assert 'requests 2.31.0' in out and 'Summary: HTTP library' in out
 
 
-def test_list_symbols_passes_module():
-    async def fake(venv_python, argv, timeout=30):
+def test_list_symbols_passes_module() -> None:
+    async def fake(venv_python: Any, argv: Any, timeout: int = 30) -> Any:
         assert argv == ['-c', pypy._LIST_SYMBOLS_SCRIPT, 'requests']
         return 'Session\nget\npost\n', None
     with patch.object(pypy, 'run_in_python', new=fake):
@@ -622,8 +630,8 @@ def test_list_symbols_passes_module():
     assert 'Session' in out and 'get' in out and 'post' in out
 
 
-def test_show_symbol_passes_module_and_symbol():
-    async def fake(venv_python, argv, timeout=30):
+def test_show_symbol_passes_module_and_symbol() -> None:
+    async def fake(venv_python: Any, argv: Any, timeout: int = 30) -> Any:
         assert argv == ['-c', pypy._SHOW_SYMBOL_SCRIPT, 'requests', 'get']
         return "get(url, **kwargs)\nMake a GET request.\n", None
     with patch.object(pypy, 'run_in_python', new=fake):
@@ -632,8 +640,8 @@ def test_show_symbol_passes_module_and_symbol():
     assert 'get(url, **kwargs)' in out and 'Make a GET request.' in out
 
 
-def test_installed_env_venv_missing_is_error():
-    async def fake(venv_python, argv, timeout=30):
+def test_installed_env_venv_missing_is_error() -> None:
+    async def fake(venv_python: Any, argv: Any, timeout: int = 30) -> Any:
         return None, '[Errno 2] No such file or directory'
     with patch.object(pypy, 'run_in_python', new=fake):
         out = asyncio.run(pypy.list_dependencies(
@@ -641,7 +649,7 @@ def test_installed_env_venv_missing_is_error():
     assert out.startswith('error:')
 
 
-def test_git_show_uses_larger_output_cap(tmp_path):
+def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
     # A cited file between the old 12KB cap and the git cap is returned in full (a reviewer
     # sees the whole file it cites); a file beyond the git cap is paged by LINE — never
     # silently truncated, no page chops a line — and each names its 1-based line range.
@@ -676,7 +684,7 @@ def test_git_show_uses_larger_output_cap(tmp_path):
     assert beyond.startswith('error: page 99 is out of range')
 
 
-def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path):
+def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:
     # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
     # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first
     # non-blank line (a .strip() would drop them and shift every cited line number).
@@ -695,7 +703,7 @@ def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path):
     assert body1[:50] == [''] * 50  # the leading blanks are present at lines 1-50
 
 
-def test_git_single_oversized_line_is_truncated(tmp_path):
+def test_git_single_oversized_line_is_truncated(tmp_path: Any) -> None:
     # A single line longer than the page bound (a minified or generated file) must not be
     # returned whole: it is truncated so a page stays bounded even when one line alone
     # exceeds the limit.
@@ -715,7 +723,7 @@ def test_git_single_oversized_line_is_truncated(tmp_path):
     assert len(body) <= tools.GIT_RESULT_CHAR_LIMIT
 
 
-def test_git_refuses_whole_file_read_over_half_context(tmp_path):
+def test_git_refuses_whole_file_read_over_half_context(tmp_path: Any) -> None:
     # A `git show <rev>:<path>` of a file larger than half the context window is refused before
     # it is buffered, so a pathologically large file cannot exhaust the model's context.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
@@ -738,7 +746,7 @@ def test_git_refuses_whole_file_read_over_half_context(tmp_path):
     assert not asyncio.run(tools.git(['show', 'HEAD'], ctx)).startswith('error:')
 
 
-def test_git_remote_mutating_subcommands_refused(tmp_path):
+def test_git_remote_mutating_subcommands_refused(tmp_path: Any) -> None:
     # `git remote` is on the read-only allowlist, but its mutating subcommands rewrite
     # .git/config, so they are refused even though `remote` itself is permitted; the plain
     # listing forms are not refused.
@@ -757,7 +765,7 @@ def test_git_remote_mutating_subcommands_refused(tmp_path):
         assert 'would modify the repository' not in out
 
 
-def test_git_refuses_no_index_reads_external_files(tmp_path):
+def test_git_refuses_no_index_reads_external_files(tmp_path: Any) -> None:
     # `git diff --no-index` reads files outside the repository (e.g. /etc/passwd), which would
     # leak local secrets to the LLM; the flag is refused.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
@@ -770,7 +778,7 @@ def test_git_refuses_no_index_reads_external_files(tmp_path):
     assert out.startswith('error:') and 'outside the repository' in out
 
 
-def test_git_grep_no_match_is_not_an_error(tmp_path):
+def test_git_grep_no_match_is_not_an_error(tmp_path: Any) -> None:
     # A clean `git grep` with no matches exits 1 with empty output: that is a valid empty result,
     # not a failure. It must not be reported as `error:` (which run_with_tools excludes from the
     # evidence ledger), so a reviewer can show a symbol is genuinely absent rather than a failed
@@ -788,7 +796,7 @@ def test_git_grep_no_match_is_not_an_error(tmp_path):
     assert not miss.startswith('error:') and miss == ''
 
 
-def test_git_refuses_ext_diff_external_program(tmp_path):
+def test_git_refuses_ext_diff_external_program(tmp_path: Any) -> None:
     # `git diff --ext-diff` shells out to the configured external diff tool ($diff.external), which
     # would let the read-only tool execute an arbitrary program; the flag is refused. The
     # --no-ext-diff negation (which merely disables the external tool) is not blocked.
@@ -807,7 +815,7 @@ def test_git_refuses_ext_diff_external_program(tmp_path):
         tools.git(['diff', '--no-ext-diff'], ctx)).startswith('error:')
 
 
-def test_run_with_tools_does_not_record_error_evidence(tmp_path):
+def test_run_with_tools_does_not_record_error_evidence(tmp_path: Any) -> None:
     # An `error:` git result carries no code (a failure, or the "name a page" reply for a file
     # too large to show at once), so it is not recorded as evidence: only actual output grounds a
     # finding. A real page result IS recorded.
@@ -834,24 +842,26 @@ def test_run_with_tools_does_not_record_error_evidence(tmp_path):
 
 class ScriptedMapper:
     n_results = 1
+    system: str = ''
+    model: str | None = None
 
-    def __init__(self, responses):
+    def __init__(self, responses: Any) -> None:
         self.responses = list(responses)
-        self.calls = []
+        self.calls: list[Any] = []
 
-    async def run(self, messages):
+    async def run(self, messages: Any) -> Any:
         self.calls.append([dict(m) for m in messages])
         return self.responses.pop(0)
 
 
-def test_run_with_tools_wraps_result_untrusted():
+def test_run_with_tools_wraps_result_untrusted() -> None:
     doc_with_cmd = DOC + '\n$ web-search "pandas read_csv"\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
-    assert ex.await_args.args[1] == 'web-search'
-    assert ex.await_args.args[2] == ['pandas read_csv']
+    assert ex.await_args_list[0].args[1] == 'web-search'
+    assert ex.await_args_list[0].args[2] == ['pandas read_csv']
     followup = mapper.calls[1][2]['content']
     assert '[tool:web-search]' in followup
     assert 'SEARCH-RESULT' in followup
@@ -860,7 +870,7 @@ def test_run_with_tools_wraps_result_untrusted():
     assert mapper.calls[1][1] == {'role': 'assistant', 'content': doc_with_cmd}
 
 
-def test_run_with_tools_single_call_without_commands():
+def test_run_with_tools_single_call_without_commands() -> None:
     mapper = ScriptedMapper([DOC])
     with patch.object(tools, 'execute_command', new=AsyncMock()) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
@@ -869,7 +879,7 @@ def test_run_with_tools_single_call_without_commands():
     assert len(mapper.calls) == 1
 
 
-def test_run_with_tools_records_git_evidence(tmp_path):
+def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
     # Every git command the reviewer runs is captured on ctx.evidence (command line + raw output),
     # independent of context compaction, so the review's evidence gate can later prove a finding
     # was grounded in real git output rather than a guess. Non-git commands are not recorded.
@@ -890,7 +900,7 @@ def test_run_with_tools_records_git_evidence(tmp_path):
     assert 'beta' in result
 
 
-def test_run_with_tools_does_not_record_non_git_evidence():
+def test_run_with_tools_does_not_record_non_git_evidence() -> None:
     # Only git output is evidence; a web-search result is not.
     mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
     ctx = tools.ToolContext('gen')
@@ -899,7 +909,7 @@ def test_run_with_tools_does_not_record_non_git_evidence():
     assert ctx.evidence == []
 
 
-def test_run_with_tools_requires_probe_before_findings(tmp_path):
+def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
     # With require_evidence set (the review panel), a findings response is bounced back until the
     # reviewer has run a git command — the file summary alone is not a basis for a finding. The
     # final finding is only accepted after the forced probe, which lands in the evidence ledger.
@@ -923,7 +933,7 @@ def test_run_with_tools_requires_probe_before_findings(tmp_path):
     assert out2 == 'NO FINDINGS' and ctx2.evidence == []
 
 
-def test_run_with_tools_unknown_command_feeds_error():
+def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
@@ -933,7 +943,7 @@ def test_run_with_tools_unknown_command_feeds_error():
     assert '[tool:command]' in followup
 
 
-def test_run_with_tools_malformed_command_feeds_error():
+def test_run_with_tools_malformed_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
@@ -941,7 +951,7 @@ def test_run_with_tools_malformed_command_feeds_error():
     assert 'error' in mapper.calls[1][2]['content'].lower()
 
 
-def test_run_with_tools_round_cap_returns_last_text():
+def test_run_with_tools_round_cap_returns_last_text() -> None:
     # On the round cap the last (still-a-command) response is returned so the
     # stage's validation fails and its normal retry takes over (no exception).
     cmd_doc = DOC + '\n$ web-search "x"\n'
@@ -952,7 +962,7 @@ def test_run_with_tools_round_cap_returns_last_text():
     assert len(mapper.calls) == 3
 
 
-def test_run_with_tools_requires_single_result_mapper():
+def test_run_with_tools_requires_single_result_mapper() -> None:
     class Multi(ScriptedMapper):
         n_results = 3
     try:
@@ -965,21 +975,21 @@ def test_run_with_tools_requires_single_result_mapper():
 # --- prompt wiring in the generation stages ------------------------------------------
 
 class CapturingMapper:
-    def __init__(self, system, **kwargs):
+    def __init__(self, system: Any, **kwargs: Any) -> None:
         self.system = system
         self.kwargs = kwargs
-        self.requests = []
-        self.responses = []
+        self.requests: list[Any] = []
+        self.responses: list[Any] = []
 
-    async def run(self, request):
+    async def run(self, request: Any) -> Any:
         self.requests.append(request)
         return self.responses.pop(0)
 
 
-def test_oracle_stage_appends_tool_instructions_when_enabled():
+def test_oracle_stage_appends_tool_instructions_when_enabled() -> None:
     seen = {}
 
-    def make(system, **kw):
+    def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
         m.responses = [VALID_ORACLE]
         seen['mapper'] = m
@@ -995,10 +1005,10 @@ def test_oracle_stage_appends_tool_instructions_when_enabled():
     assert isinstance(seen['mapper'].requests[0], list)
 
 
-def test_oracle_stage_omits_tool_instructions_when_disabled():
+def test_oracle_stage_omits_tool_instructions_when_disabled() -> None:
     seen = {}
 
-    def make(system, **kw):
+    def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
         m.responses = [VALID_ORACLE]
         seen['mapper'] = m
@@ -1011,10 +1021,10 @@ def test_oracle_stage_omits_tool_instructions_when_disabled():
     assert isinstance(seen['mapper'].requests[0], str)
 
 
-def test_oracle_stage_follows_up_on_commands():
+def test_oracle_stage_follows_up_on_commands() -> None:
     seen = {}
 
-    def make(system, **kw):
+    def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
         m.responses = [VALID_ORACLE + '\n$ web-search "pandas read_csv"\n', VALID_ORACLE]
         seen['mapper'] = m
@@ -1027,10 +1037,10 @@ def test_oracle_stage_follows_up_on_commands():
     assert len(seen['mapper'].requests) == 2
 
 
-def test_impl_stage_tool_use_runs_one_conversation_per_candidate():
+def test_impl_stage_tool_use_runs_one_conversation_per_candidate() -> None:
     seen = []
 
-    def make(system, **kw):
+    def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
         m.responses = [VALID_IMPL + '\n$ web-search "httpx post"\n', VALID_IMPL]
         seen.append(m)
@@ -1050,10 +1060,10 @@ def test_impl_stage_tool_use_runs_one_conversation_per_candidate():
     assert ex.await_count == 2
 
 
-def test_impl_stage_without_tools_keeps_single_call_fanout():
+def test_impl_stage_without_tools_keeps_single_call_fanout() -> None:
     seen = []
 
-    def make(system, **kw):
+    def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
         m.responses = [VALID_IMPL]
         seen.append(m)
@@ -1071,22 +1081,22 @@ def test_impl_stage_without_tools_keeps_single_call_fanout():
 
 # --- persona / editor tool threading -------------------------------------------------
 
-def test_run_personas_threads_tool_ctx():
+def test_run_personas_threads_tool_ctx() -> None:
     import marsha.personas as personas
     systems = []
 
     class M:
         n_results = 1
 
-        def __init__(self, system, **kw):
+        def __init__(self, system: Any, **kw: Any) -> None:
             systems.append(system)
 
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return 'NO FINDINGS'
 
     ctx = tools.ToolContext('oracle-opt')
     with patch.object(personas, 'get_mapper', new=lambda system, **kw: M(system, **kw)), \
-         patch.object(personas.tools, 'run_with_tools', new=AsyncMock(return_value='NO FINDINGS')) as rw:
+         patch.object(tools, 'run_with_tools', new=AsyncMock(return_value='NO FINDINGS')) as rw:
         asyncio.run(personas.run_personas(
             [('ada', 'You are a reviewer.', 1)], 'MSG', 'model', 'first_stage',
             False, loop='oracle', guidance='', tool_ctx=ctx))
@@ -1094,21 +1104,21 @@ def test_run_personas_threads_tool_ctx():
     assert any(tools.tool_instructions(ctx) in s for s in systems)
 
 
-def test_run_editor_threads_tool_ctx():
+def test_run_editor_threads_tool_ctx() -> None:
     seen = {}
 
     class M:
         n_results = 1
 
-        def __init__(self, system, **kw):
+        def __init__(self, system: Any, **kw: Any) -> None:
             seen['system'] = system
 
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return VALID_IMPL
 
     ctx = tools.ToolContext('impl-opt')
     with patch.object(llm, 'get_mapper', new=lambda system, **kw: M(system, **kw)), \
-         patch.object(llm.tools, 'run_with_tools', new=AsyncMock(return_value=VALID_IMPL)):
+         patch.object(tools, 'run_with_tools', new=AsyncMock(return_value=VALID_IMPL)):
         artifact, _ = asyncio.run(llm._run_editor(
             'impl', make_meta(), 'MSG', 'model', 'third_stage', tool_ctx=ctx))
     assert artifact == VALID_IMPL
@@ -1117,11 +1127,11 @@ def test_run_editor_threads_tool_ctx():
 
 # --- mapper conversation support ------------------------------------------------------
 
-def test_chatgpt_mapper_accepts_conversation():
+def test_chatgpt_mapper_accepts_conversation() -> None:
     import marsha.mappers.chatgpt as chatgpt
     seen = {}
 
-    async def fake_retry(query, model=None, max_tries=3, n_results=1, label=None):
+    async def fake_retry(query: Any, model: Any = None, max_tries: int = 3, n_results: int = 1, label: Any = None) -> Any:
         seen['query'] = query
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='out'))])
@@ -1139,11 +1149,11 @@ def test_chatgpt_mapper_accepts_conversation():
                         {'role': 'user', 'content': 'c'}]
 
 
-def test_chatgpt_mapper_string_request_unchanged():
+def test_chatgpt_mapper_string_request_unchanged() -> None:
     import marsha.mappers.chatgpt as chatgpt
     seen = {}
 
-    async def fake_retry(query, model=None, max_tries=3, n_results=1, label=None):
+    async def fake_retry(query: Any, model: Any = None, max_tries: int = 3, n_results: int = 1, label: Any = None) -> Any:
         seen['query'] = query
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='out'))])
@@ -1155,11 +1165,11 @@ def test_chatgpt_mapper_string_request_unchanged():
         {'role': 'user', 'content': 'hello'}]
 
 
-def test_claude_mapper_accepts_conversation():
+def test_claude_mapper_accepts_conversation() -> None:
     import marsha.mappers.claude as claude
     seen = {}
 
-    async def fake_retry(query, model=None, max_tries=3, label=None):
+    async def fake_retry(query: Any, model: Any = None, max_tries: int = 3, label: Any = None) -> Any:
         seen['query'] = query
         return SimpleNamespace(
             content=[SimpleNamespace(type='text', text='out')],
