@@ -4,6 +4,8 @@ import json
 import urllib.request
 from typing import TYPE_CHECKING, Any, TypedDict
 
+import openai
+
 from marsha.config import (
     DEFAULT_API_BASE,
     resolve_api_base,
@@ -12,7 +14,7 @@ from marsha.config import (
 )
 
 if TYPE_CHECKING:
-    import openai
+    import anthropic
 
 # Conservative chars->tokens estimate. We overestimate on purpose (real text is closer to
 # 4 chars/token) so the budget gate compacts early rather than risk overflowing.
@@ -152,7 +154,7 @@ async def _query_openai_context(client: openai.AsyncOpenAI, model: str) -> int |
 
 async def resolve_context_window(model: str | None = None, provider: str | None = None,
                                  api_base: str | None = None,
-                                 client: openai.AsyncOpenAI | None = None,
+                                 client: openai.AsyncOpenAI | anthropic.AsyncAnthropic | None = None,
                                  override: int | None = None) -> int:
     # Resolve the context window (in tokens) for the given backend/model, preferring a value
     # fetched from the service and falling back to documented defaults. Cached per
@@ -169,7 +171,7 @@ async def resolve_context_window(model: str | None = None, provider: str | None 
     if provider == 'openai':
         if api_base != DEFAULT_API_BASE:
             window = _query_llama_context(api_base, model)
-        if window is None and client is not None:
+        if window is None and isinstance(client, openai.AsyncOpenAI):
             window = await _query_openai_context(client, model)
     if window is None:
         window = known_context(model)

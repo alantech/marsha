@@ -1115,10 +1115,10 @@ async def _maybe_compact_tool_history(messages: list[dict[str, str]], mapper: _M
     system = getattr(mapper, 'system', '') or ''
     prompt_text = system + '\n' + '\n'.join(m['content'] for m in messages)
     try:
-        # get_client() is the provider's client (OpenAI or Anthropic); context-window probing only
-        # ever dereferences the OpenAI client, so its exact type is opaque here.
-        client: Any = get_client()
-        window = await resolve_context_window(model=mapper.model, client=client)
+        # get_client() returns the provider's client (OpenAI or Anthropic); context-window probing
+        # only dereferences the OpenAI client, which resolve_context_window narrows internally.
+        window = await resolve_context_window(
+            model=mapper.model, client=get_client())
     except Exception:
         return messages
     if fits(prompt_text, window):
@@ -1176,8 +1176,8 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
         # Resolve the model's context window once (cached) so the git whole-file guard can refuse
         # a read that would outgrow the model; on any failure the guard is simply skipped.
         try:
-            client: Any = get_client()
-            ctx.context_window = await resolve_context_window(model=mapper.model, client=client)
+            ctx.context_window = await resolve_context_window(
+                model=mapper.model, client=get_client())
         except Exception:
             ctx.context_window = None
     commands = build_commands(ctx)

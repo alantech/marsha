@@ -9,8 +9,6 @@ import traceback
 import sys
 from typing import Any, Callable, cast
 
-import openai
-
 from marsha import backends, tools
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
@@ -282,9 +280,8 @@ async def _budgeted_findings(meta: MarshaMeta, findings: list[Finding], build: C
     override = getattr(args, 'context_window', None)
     cap = getattr(args, 'context_cap', 0.5)
     try:
-        client = get_client()
         ctx = await resolve_context_window(
-            model=model, client=cast(openai.AsyncOpenAI | None, client), override=override)
+            model=model, client=get_client(), override=override)
     except Exception:
         return findings
 
