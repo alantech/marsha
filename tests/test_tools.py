@@ -504,6 +504,7 @@ def test_ssrf_blocks_local_and_private_ips() -> None:
     assert tools.is_blocked_host('10.1.2.3') is True
     assert tools.is_blocked_host('192.168.0.10') is True
     assert tools.is_blocked_host('169.254.169.254') is True  # cloud metadata
+    assert tools.is_blocked_host('100.64.0.1') is True  # shared address space (CGNAT)
     assert tools.is_blocked_host('0.0.0.0') is True
 
 

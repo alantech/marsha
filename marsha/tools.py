@@ -49,6 +49,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from typing import Any, Callable, Coroutine, IO, Protocol
 
 from marsha.context import (
@@ -308,9 +309,11 @@ def wrap_untrusted(name: str, content: str) -> str:
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     # The per-address half of the SSRF guard, shared by is_blocked_host (pre-check) and
-    # _resolve_public_address (connect-time check in the pinned connections).
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+    # _resolve_public_address (connect-time check in the pinned connections). An address is
+    # allowed only if it is globally reachable: a negated allowlist (private, loopback, ...)
+    # misses non-global ranges that Python classifies as neither, such as shared address space
+    # 100.64.0.0/10 (CGNAT / Tailscale nodes) — a fetch must not reach those either.
+    return not ip.is_global
 
 
 def is_blocked_host(hostname: str | None) -> bool:
@@ -1154,36 +1157,63 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     entries: list[str] = []
     dirs_visited = 0
     dirs_truncated = False
-    for dirpath, dirnames, filenames in os.walk(start):
+
+    def _safe_is_dir(entry: os.DirEntry[str]) -> bool:
+        # Best-effort, like os.walk with onerror=None: a per-entry stat error skips the entry.
+        try:
+            return entry.is_dir()
+        except OSError:
+            return False
+
+    # A manual walk rather than os.walk: os.walk materializes each directory's full entry list,
+    # so a single directory with an enormous number of entries would use unbounded memory before
+    # any cap could apply. Each directory is instead scanned lazily from os.scandir and only
+    # bounded selections are ever held — subdirectories within the traversal budget and files
+    # within the entry cap — so memory stays O(caps) (fully scanning a directory is unavoidable:
+    # its entries must be seen to be listed in sorted order).
+    stack: list[str] = [start]
+    while stack:
+        dirpath = stack.pop()
         dirs_visited += 1
         if dirs_visited > LIST_TREE_MAX_DIRS:
             dirs_truncated = True
             break
-        # Prune the skipped directories in place so os.walk does not descend into them (hidden
-        # directories are deliberately kept: the reviewer must be able to surface prior-issue
-        # docs in dotfiles). Visit at most as many subdirectories as the traversal budget allows,
-        # in sorted order, so a directory with an enormous number of entries is not walked or
-        # sorted past that budget — and flag the listing incomplete when any are dropped, so a
-        # reviewer never mistakes a partial tree for a complete one.
-        keep = [d for d in dirnames if d not in LIST_TREE_SKIP_DIRS]
-        remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
-        if len(keep) > remaining_dirs:
-            dirs_truncated = True
-            dirnames[:] = heapq.nsmallest(remaining_dirs, keep)
-        else:
-            dirnames[:] = sorted(keep)
         room = LIST_TREE_MAX_ENTRIES - len(entries)
         if room <= 0:
             break
-        # Take only the next `room` entries, in sorted order: heapq.nsmallest yields the same
-        # prefix a full sorted() would, in O(n log room) instead of sorting (and allocating)
-        # the whole directory — bounded work for capped output, with or without --ext (which
-        # filters to the matching names first).
-        if has_ext:
+        remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
+        kept_count = 0
+
+        def _subdir_names() -> Iterator[str]:
+            # Kept subdirectories: the skipped dirs pruned (hidden ones are deliberately kept —
+            # a reviewer must be able to surface prior-issue docs in dotfiles) and symlinks not
+            # descended into (os.walk's followlinks=False default).
+            nonlocal kept_count
+            for entry in os.scandir(dirpath):
+                name = entry.name
+                if name in LIST_TREE_SKIP_DIRS or not _safe_is_dir(entry) \
+                        or entry.is_symlink():
+                    continue
+                kept_count += 1
+                yield name
+        try:
+            subdirs = heapq.nsmallest(remaining_dirs, _subdir_names())
+        except OSError:
+            subdirs = []  # unreadable directory: skipped, as os.walk does
+        if kept_count > remaining_dirs:
+            # More kept subdirectories than the budget allows: they are dropped, and the listing
+            # must say so, or a reviewer may mistake a partial tree for a complete one.
+            dirs_truncated = True
+        # Push full paths, in reverse, so the first kept subdirectory is visited next
+        # (os.walk's order).
+        stack.extend(reversed([os.path.join(dirpath, d) for d in subdirs]))
+        try:
             names = heapq.nsmallest(
-                room, (fn for fn in filenames if _matches_ext(fn, exts)))
-        else:
-            names = heapq.nsmallest(room, filenames)
+                room, (entry.name for entry in os.scandir(dirpath)
+                       if not _safe_is_dir(entry)
+                       and (not has_ext or _matches_ext(entry.name, exts))))
+        except OSError:
+            names = []
         for fn in names:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
