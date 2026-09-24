@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 import anthropic
@@ -11,10 +13,10 @@ from marsha.config import resolve_api_base, resolve_api_key, resolve_provider, i
 # finite timeout instead.
 LOCAL_BACKEND_TIMEOUT = 4 * 60 * 60.0
 
-_client = None
+_client: openai.AsyncOpenAI | anthropic.AsyncAnthropic | None = None
 
 
-def create_client(api_base=None):
+def create_client(api_base: str | None = None) -> openai.AsyncOpenAI | anthropic.AsyncAnthropic:
     provider = resolve_provider()
     if provider == 'anthropic':
         api_key = resolve_api_key('anthropic')
@@ -26,24 +28,27 @@ def create_client(api_base=None):
     if api_key is None:
         raise Exception(
             'No OpenAI API key found. Set the OPENAI_SECRET_KEY or OPENAI_API_KEY environment variable, or add api_key to the config file')
-    kwargs = {}
     if is_local_backend():
-        kwargs['timeout'] = LOCAL_BACKEND_TIMEOUT
+        return openai.AsyncOpenAI(
+            base_url=resolve_api_base(api_base),
+            api_key=api_key,
+            organization=os.getenv('OPENAI_ORG'),
+            timeout=LOCAL_BACKEND_TIMEOUT,
+        )
     return openai.AsyncOpenAI(
         base_url=resolve_api_base(api_base),
         api_key=api_key,
         organization=os.getenv('OPENAI_ORG'),
-        **kwargs,
     )
 
 
-def get_client():
+def get_client() -> openai.AsyncOpenAI | anthropic.AsyncAnthropic:
     global _client
     if _client is None:
         _client = create_client()
     return _client
 
 
-def set_client(client):
+def set_client(client: openai.AsyncOpenAI | anthropic.AsyncAnthropic) -> None:
     global _client
     _client = client

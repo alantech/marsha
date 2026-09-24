@@ -24,16 +24,18 @@ import subprocess
 import sys
 import tomllib
 import urllib.parse
+from typing import Any
 
 import autopep8
 import pycodestyle
 import pyflakes.api
-from mistletoe import Document, ast_renderer
+from mistletoe import ast_renderer
+from mistletoe.block_token import Document
 
 from marsha.backends.base import LanguageBackend
-from marsha.meta import void_note
+from marsha.meta import MarshaMeta, void_note
 from marsha.tools import (
-    ToolCommand, CATEGORY_REGISTRY, CATEGORY_INSTALLED_ENV,
+    ToolCommand, ToolContext, CATEGORY_REGISTRY, CATEGORY_INSTALLED_ENV,
     http_get, parse_ddg_html, html_to_text, assert_public_url, truncate, run_in_python,
     SEARCH_RESULT_COUNT, SNIPPET_CHAR_LIMIT, RESULT_CHAR_LIMIT,
 )
@@ -113,12 +115,12 @@ _LINT_IGNORE = {
 _PEP508_NAME_RE = re.compile(r'(?i)^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$')
 
 
-def _normalize_name(name):
+def _normalize_name(name: str) -> str:
     # PEP 508 name normalization: runs of dashes, underscores, and dots are equivalent.
     return re.sub(r'[-_.]+', '-', name).lower()
 
 
-def _requirement_name(requirement):
+def _requirement_name(requirement: str) -> str:
     # The distribution name of a PEP 508 requirement (everything before any specifier or extras).
     match = re.match(r'[A-Za-z0-9._-]+', requirement)
     return _normalize_name(match.group(0)) if match else ''
@@ -131,18 +133,20 @@ def _requirement_name(requirement):
 # backend adds its two language-specific categories here: the package registry
 # (PyPI) and installed-environment introspection (the candidate venv).
 
-def venv_python_for(subdir):
+def venv_python_for(subdir: str | None) -> str:
     # The candidate venv's python (created by the test runner), platform-aware.
+    if not subdir:
+        return ''
     if os.name == 'nt':
         return os.path.join(subdir, '.venv', 'Scripts', 'python.exe')
     return os.path.join(subdir, '.venv', 'bin', 'python')
 
 
-def _venv_usable(venv_python):
+def _venv_usable(venv_python: str) -> bool:
     return bool(venv_python) and os.path.exists(venv_python)
 
 
-async def search_dependencies(args, ctx=None):
+async def search_dependencies(args: list[str], ctx: ToolContext | None = None) -> str:
     """`search-dependencies "query"` — best-effort registry search. PyPI has no
     public search API, so this searches the web for PyPI project pages and
     shapes the hits into `name — url` lines. Results can be coarse; refine with
@@ -179,7 +183,7 @@ async def search_dependencies(args, ctx=None):
     return truncate('\n'.join(lines))
 
 
-async def dependency_docs(args, ctx=None):
+async def dependency_docs(args: list[str], ctx: ToolContext | None = None) -> str:
     """`dependency-docs <package> [version]` — fetch a package's PyPI metadata
     (name, version, summary, home/docs URLs) plus a bounded extract of its docs
     page. The docs fetch keeps the SSRF guard."""
@@ -265,7 +269,7 @@ if doc: print(doc[:3000])
 '''
 
 
-async def list_dependencies(args, ctx=None):
+async def list_dependencies(args: list[str], ctx: ToolContext) -> str:
     """`list-dependencies` — list the packages installed in the candidate
     environment (name==version, one per line)."""
     out, err = await run_in_python(
@@ -279,7 +283,7 @@ async def list_dependencies(args, ctx=None):
     return truncate(text)
 
 
-async def show_dependency(args, ctx=None):
+async def show_dependency(args: list[str], ctx: ToolContext) -> str:
     """`show-dependency <package>` — show a package's name, version, and summary
     from the candidate environment."""
     if not args:
@@ -291,7 +295,7 @@ async def show_dependency(args, ctx=None):
     return truncate((out or err or '').strip())
 
 
-async def list_symbols(args, ctx=None):
+async def list_symbols(args: list[str], ctx: ToolContext) -> str:
     """`list-symbols <module>` — list the public attributes of an importable
     module in the candidate environment (the same import the generated code does)."""
     if not args:
@@ -303,7 +307,7 @@ async def list_symbols(args, ctx=None):
     return truncate((out or err or '').strip())
 
 
-async def show_symbol(args, ctx=None):
+async def show_symbol(args: list[str], ctx: ToolContext) -> str:
     """`show-symbol <module> <symbol>` — show a symbol's signature and docstring
     in the candidate environment."""
     if len(args) < 2:
@@ -315,52 +319,54 @@ async def show_symbol(args, ctx=None):
     return truncate((out or err or '').strip())
 
 
-class _StyleReport(pycodestyle.BaseReport):
-    """Collect pycodestyle findings as (line, col, code, message) tuples, honouring the ignore set."""
+class _StyleReport(pycodestyle.BaseReport):  # type: ignore[misc]
+    """Collect pycodestyle findings as (line, col, code, message) tuples, honouring the ignore set.
+    pycodestyle ships no type stubs, so BaseReport is `Any` and the subclassing is exempted."""
 
-    def __init__(self, options):
+    def __init__(self, options: Any) -> None:
         super().__init__(options)
-        self.errors = []
+        self.errors: list[tuple[int, int, str, str]] = []
 
-    def error(self, line_number, offset, text, check):
+    def error(self, line_number: int, offset: int, text: str, check: Any) -> Any:
         code = super().error(line_number, offset, text, check)
         if code:
             self.errors.append((line_number, offset + 1, code, text[5:]))
         return code
 
-    def get_file_results(self):
+    def get_file_results(self) -> int:
         return len(self.errors)
 
 
 class _FlakeReport:
     """Collect pyflakes findings (undefined names, syntax errors, ...) as preformatted strings."""
 
-    def __init__(self):
-        self.errors = []
+    def __init__(self) -> None:
+        self.errors: list[str] = []
 
-    def flake(self, message):
+    def flake(self, message: Any) -> None:
         self.errors.append(str(message))
 
-    def syntaxError(self, filename, msg, lineno, offset, text):
+    def syntaxError(self, filename: str, msg: str, lineno: int, offset: int | None,
+                    text: Any) -> None:
         if offset is not None:
             self.errors.append(f'{filename}:{lineno}:{max(offset, 1)}: {msg}')
         else:
             self.errors.append(f'{filename}:{lineno}: {msg}')
 
-    def unexpectedError(self, filename, msg):
+    def unexpectedError(self, filename: str, msg: str) -> None:
         self.errors.append(f'{filename}: {msg}')
 
 
 class PythonBackend(LanguageBackend):
-    id = 'python'
-    aliases = ('py',)
-    code_fence_lang = 'py'
+    id: str = 'python'
+    aliases: tuple[str, ...] = ('py',)
+    code_fence_lang: str = 'py'
 
-    def __init__(self, target_version=None):
-        self._toolchain = None
+    def __init__(self, target_version: str | None = None) -> None:
+        self._toolchain: str | None = None
         self.target_version = self.resolve_target_version(target_version)
 
-    def resolve_target_version(self, requested):
+    def resolve_target_version(self, requested: str | None) -> str:
         # The minimum Python version the generated project declares (its pyproject.toml
         # requires-python). Defaults to the interpreter running Marsha: the generated code
         # is only ever verified against that interpreter, so it is the only floor we can
@@ -374,7 +380,7 @@ class PythonBackend(LanguageBackend):
 
     # --- fake-terminal tools (Python: PyPI registry + installed-env) -----------
 
-    def tool_commands(self, ctx):
+    def tool_commands(self, ctx: ToolContext) -> dict[str, ToolCommand]:
         # The language-agnostic base (web-search, view-web-page, calc) plus
         # Python's package registry (PyPI) and installed-environment tools.
         commands = super().tool_commands(ctx)
@@ -412,23 +418,23 @@ class PythonBackend(LanguageBackend):
             lambda args, _c=ctx: show_symbol(args, _c))
         return commands
 
-    def installed_env_usable(self, ctx):
+    def installed_env_usable(self, ctx: ToolContext) -> bool:
         # The installed-env tools need the candidate venv (a function of the
         # candidate's working dir) to exist on disk.
         return bool(ctx.workdir) and _venv_usable(venv_python_for(ctx.workdir))
 
     # --- naming / contract ---------------------------------------------------
 
-    def source_name(self, fn):
+    def source_name(self, fn: str) -> str:
         return f'{fn}.py'
 
-    def test_name(self, fn):
+    def test_name(self, fn: str) -> str:
         return f'{fn}_test.py'
 
-    def manifest_name(self):
+    def manifest_name(self) -> str:
         return 'pyproject.toml'
 
-    def artifact_contract(self, fn):
+    def artifact_contract(self, fn: str) -> list[tuple[str, str]]:
         return [
             ('source', self.source_name(fn)),
             ('manifest', self.manifest_name()),
@@ -437,7 +443,7 @@ class PythonBackend(LanguageBackend):
 
     # --- generation / review prompts (full templates) -------------------------
 
-    def spec_check_prompt(self):
+    def spec_check_prompt(self) -> str:
         return '''You are a senior software engineer reviewing an assignment to write a Python 3 function.
 The assignment is written in markdown format.
 It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
@@ -458,7 +464,7 @@ Each warning and each error is a markdown-formatted string that cites the releva
 Do not wrap the JSON object in code fences.
 '''
 
-    def oracle_prompt(self, meta):
+    def oracle_prompt(self, meta: MarshaMeta) -> str:
         return f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.
 The test suite is the *oracle* used to judge generated implementations, so it must be trustworthy.
@@ -490,7 +496,7 @@ The desired response must look like the following:
 
 '''
 
-    def impl_prompt(self, meta):
+    def impl_prompt(self, meta: MarshaMeta) -> str:
         return f'''You are a senior software engineer assigned to write Python 3 functions.
 The assignment is written in markdown format.
 The description of each function should be included as a docstring.
@@ -536,7 +542,7 @@ py-modules = ["{meta.filename}"]
 
 '''
 
-    def diagnose_prompt(self):
+    def diagnose_prompt(self) -> str:
         return '''You are a senior software engineer debugging a Python 3 project.
 You are given the assignment (in markdown), the implementation, the unit test suite (the oracle), and the unit test results.
 The test suite was derived from the assignment and is authoritative for what the code should do, except where a test is itself wrong.
@@ -551,7 +557,7 @@ or
 Do not wrap the JSON object in code fences.
 '''
 
-    def fix_impl_prompt(self, meta):
+    def fix_impl_prompt(self, meta: MarshaMeta) -> str:
         return f'''You are a senior software engineer fixing a Python 3 implementation that is failing its unit tests.
 You are given the assignment, the implementation, the unit test suite (the oracle), and the test results.
 The unit test suite is authoritative and must NOT be modified.
@@ -595,7 +601,7 @@ py-modules = ["{meta.filename}"]
 
 '''
 
-    def correct_test_prompt(self, meta):
+    def correct_test_prompt(self, meta: MarshaMeta) -> str:
         return f'''You are a senior software engineer correcting a faulty unit test.
 You are given the assignment, the implementation, the unit test suite, and the test results.
 A diagnosis has determined that a TEST (not the implementation) is at fault: it asserts behavior the assignment does not actually require — for example it is over-strict, it contradicts the assignment, it tests an implementation detail, or it pins down an exact error-message wording or output format that the assignment leaves open.
@@ -618,7 +624,7 @@ The desired response must look like the following:
 
 '''
 
-    def lint_fix_prompt(self, filename):
+    def lint_fix_prompt(self, filename: str) -> str:
         return f'''You are a senior software engineer working with Python 3.
 You are using a Python linter to find obvious errors and then fixing them. The linter uses `pyflakes` and `pycodestyle` under the hood to provide the recommendations.
 All of the lint errors require fixing.
@@ -641,11 +647,11 @@ The desired response must look like the following:
 
     # --- layout / validation --------------------------------------------------
 
-    def _sections(self, md):
+    def _sections(self, md: str) -> list[tuple[str, str]]:
         # The (header, content) pairs of a sectioned markdown doc, in document order. Empty code
         # fences are skipped, mirroring write_files_from_markdown.
         ast = ast_renderer.get_ast(Document(md))
-        sections = []
+        sections: list[tuple[str, str]] = []
         filename = ''
         for section in ast['children']:
             if section['type'] == 'Heading':
@@ -657,15 +663,15 @@ The desired response must look like the following:
                 sections.append((filename, filedata))
         return sections
 
-    def compose(self, impl, oracle):
+    def compose(self, impl: str, oracle: str) -> dict[str, str]:
         # Implementation files first (in document order), then the oracle's files: the
         # source file, the optional manifest, and the test suite.
-        files = {}
+        files: dict[str, str] = {}
         for name, content in self._sections(impl) + self._sections(oracle):
             files[name] = content
         return files
 
-    def _validate_single(self, md, filename):
+    def _validate_single(self, md: str, filename: str) -> bool:
         # A single-file document: one header (the filename) followed by one code fence.
         ast = ast_renderer.get_ast(Document(md))
         if len(ast['children']) != 2:
@@ -678,7 +684,7 @@ The desired response must look like the following:
             return False
         return True
 
-    def _valid_manifest(self, text, marsha_filename):
+    def _valid_manifest(self, text: str | None, marsha_filename: str) -> bool:
         # A dependency manifest must follow the generated project's expected structure:
         # a PEP 621 [project] table that names (and versions) the project, plus the
         # setuptools build configuration that makes the flat single-module layout
@@ -690,8 +696,6 @@ The desired response must look like the following:
         try:
             data = tomllib.loads(text)
         except Exception:
-            return False
-        if not isinstance(data, dict):
             return False
         project = data.get('project')
         if not isinstance(project, dict):
@@ -720,7 +724,7 @@ The desired response must look like the following:
                 and setuptools.get('py-modules') == [marsha_filename])
 
     @staticmethod
-    def _manifest_deps(manifest):
+    def _manifest_deps(manifest: str) -> list[str] | None:
         # The third-party dependencies a pyproject.toml declares (its [project] dependencies
         # array; empty when the project declares none), or None when the file is not a
         # readable PEP 621 manifest.
@@ -734,7 +738,7 @@ The desired response must look like the following:
             return None
         return [dep for dep in deps if isinstance(dep, str)]
 
-    def _validate_impl(self, md, marsha_filename):
+    def _validate_impl(self, md: str, marsha_filename: str) -> bool:
         # An implementation-only document: the code file, optionally followed by pyproject.toml
         ast = ast_renderer.get_ast(Document(md))
         if len(ast['children']) != 2 and len(ast['children']) != 4:
@@ -757,7 +761,7 @@ The desired response must look like the following:
                 return False
         return True
 
-    def validate_markdown(self, doc, kind, name):
+    def validate_markdown(self, doc: str, kind: str, name: str) -> bool:
         if kind == 'impl':
             return self._validate_impl(doc, name)
         if kind == 'oracle':
@@ -768,17 +772,17 @@ The desired response must look like the following:
 
     # --- toolchain leaves -------------------------------------------------------
 
-    def format_files(self, files):
+    def format_files(self, files: list[str]) -> None:
         for file in files:
             before = read_file(file)
             after = autopep8.fix_code(before)
             write_file(file, after)
 
-    def lint_files(self, files):
+    def lint_files(self, files: list[str]) -> dict[str, list[str]]:
         """Run pycodestyle (style/syntax) and pyflakes (semantics) over the given files and return a
         mapping of filename -> list of '<file>:<line>:<col>: <code> <message>' strings. Replaces the
         former pylama call, whose plugin discovery imports the deprecated pkg_resources API."""
-        findings = {f: [] for f in files}
+        findings: dict[str, list[str]] = {f: [] for f in files}
         style_options = pycodestyle.StyleGuide(
             quiet=True, ignore=list(_LINT_IGNORE)).options
         for file in files:
@@ -800,7 +804,8 @@ The desired response must look like the following:
                 findings[file].append(entry)
         return findings
 
-    async def run_tests(self, code_file, test_file, manifest, debug=False):
+    async def run_tests(self, code_file: str, test_file: str, manifest: str | None,
+                        debug: bool = False) -> tuple[bool | None, str]:
         # Set up the venv (if needed), install the dependencies the generated pyproject.toml
         # declares, and run the test suite. Install failures are folded into the returned
         # results so the diagnose/fix loop can see (and repair) a broken manifest.
@@ -855,20 +860,20 @@ The desired response must look like the following:
         passed = ('FAILED' not in results) and ('Traceback' not in results)
         return (passed, results)
 
-    def make_executable(self, path):
+    def make_executable(self, path: str) -> None:
         # Append the static reflection `__main__` helper (no LLM involved).
         helper = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), 'helper.py')
         with open(path, 'a') as o, open(helper, 'r') as i:
             o.write(i.read())
 
-    def persona_guidance(self):
+    def persona_guidance(self) -> str:
         return ('This project targets Python 3 — use type hints to aid static analysis, '
                 'follow PEP8, code is formatted with autopep8, and third-party '
                 'dependencies are declared in the project `pyproject.toml` '
                 '([project] dependencies array, no pinned versions).')
 
-    def toolchain(self):
+    def toolchain(self) -> str:
         # Determine what name the user's `python` executable is (`python` or `python3`)
         if self._toolchain is None:
             name = 'python' if shutil.which(
@@ -878,7 +883,7 @@ The desired response must look like the following:
             self._toolchain = name
         return self._toolchain
 
-    def toolchain_ok(self):
+    def toolchain_ok(self) -> bool:
         try:
             self.toolchain()
             return True

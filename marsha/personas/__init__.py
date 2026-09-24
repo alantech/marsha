@@ -2,9 +2,11 @@ import asyncio
 import dataclasses
 import os
 import re
+from typing import Any
 
 from marsha import tools
 from marsha.config import is_local_backend
+from marsha.findings import Finding
 from marsha.log import log
 from marsha.mappers import get_mapper
 
@@ -49,14 +51,14 @@ Do not restate your own name. Do not add any prose outside a finding (the suppor
 '''
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-_registry_cache = None
+_registry_cache: dict[str, str] | None = None
 
 
-def personas_dir():
+def personas_dir() -> str:
     return _DIR
 
 
-def _is_path(entry):
+def _is_path(entry: str) -> bool:
     # A persona entry is a file path (not a built-in name) when it is absolute, home-relative
     # (~), dot-relative (./), or contains a path separator in POSIX or Windows style, so the
     # check is portable to Windows (backslashes and drive-letter paths) as well as POSIX.
@@ -64,7 +66,7 @@ def _is_path(entry):
             or entry.startswith('.') or '/' in entry or '\\' in entry)
 
 
-def load_persona(path):
+def load_persona(path: str) -> tuple[str, str]:
     # A persona file's first line must be `name: <name>`; the rest is the system-prompt body.
     with open(path, 'r') as f:
         lines = f.read().split('\n')
@@ -78,11 +80,11 @@ def load_persona(path):
     return (name, body)
 
 
-def build_registry():
+def build_registry() -> dict[str, str]:
     # Scan the shipped personas dir for reviewer files (skip `_`-prefixed editors and README).
     global _registry_cache
     if _registry_cache is None:
-        registry = {}
+        registry: dict[str, str] = {}
         for filename in sorted(os.listdir(_DIR)):
             if not filename.endswith('.md'):
                 continue
@@ -99,13 +101,13 @@ def build_registry():
     return _registry_cache
 
 
-def reset_registry():
+def reset_registry() -> None:
     # Primarily for tests that swap out the personas directory.
     global _registry_cache
     _registry_cache = None
 
 
-def resolve_persona(entry, registry):
+def resolve_persona(entry: str, registry: dict[str, str]) -> tuple[str, str, str]:
     # A file path loads that persona file directly; otherwise the entry is a built-in name.
     entry = entry.strip()
     if not entry:
@@ -125,13 +127,15 @@ def resolve_persona(entry, registry):
     return (name, body, path)
 
 
-def resolve_loop_reviewers(loop, flag_value, registry=None):
+def resolve_loop_reviewers(loop: str, flag_value: str | None,
+                           registry: dict[str, str] | None = None
+                           ) -> list[tuple[str, str, int]]:
     # Return the ordered list of (name, body, N) reviewers for a loop. N is the 1-based position.
     if registry is None:
         registry = build_registry()
     if flag_value:
-        specs = []
-        seen = set()
+        specs: list[tuple[str, str]] = []
+        seen: set[str] = set()
         for entry in flag_value.split(','):
             if not entry.strip():
                 continue
@@ -152,17 +156,17 @@ def resolve_loop_reviewers(loop, flag_value, registry=None):
     return [(name, body, i + 1) for i, (name, body) in enumerate(specs)]
 
 
-def load_editor(loop):
+def load_editor(loop: str) -> tuple[str, str]:
     # The loop's fixed editor/implementor prompt (not part of the reviewer registry).
     path = os.path.join(_DIR, EDITOR_FILE[loop])
     return load_persona(path)
 
 
-def parse_severities(value):
+def parse_severities(value: str | None) -> set[str]:
     # Parse a severity list (e.g. --severity / --optimize-severity) into the set of uppercase
     # tiers to act on.
     allowed = {'major', 'minor', 'nit', 'nitpick'}
-    out = set()
+    out: set[str] = set()
     for part in (value or '').split(','):
         p = part.strip().lower()
         if not p:
@@ -174,7 +178,7 @@ def parse_severities(value):
     return {s.upper() for s in out}
 
 
-def _split_location(rest):
+def _split_location(rest: str) -> tuple[str, str]:
     # Split "<location> - <description>" on the first separator; the location is optional.
     for sep in (' - ', ' -- '):
         if sep in rest:
@@ -186,7 +190,7 @@ def _split_location(rest):
     return '', rest
 
 
-def position_label(review_number, used):
+def position_label(review_number: int | None, used: set[str]) -> str:
     # The first position-based label (A<n>, B<n>, ...) not already used, so a fallback label can
     # never collide with a reused one. Beyond the 26 single letters (a degenerate 27th+ finding
     # from one reviewer) it extends to two letters (AA<n>, AB<n>, ...) so the label always stays
@@ -203,7 +207,8 @@ def position_label(review_number, used):
     raise ValueError(f'no available label for reviewer {review_number}')
 
 
-def parse_findings(text, name, review_number, prior_labels=None):
+def parse_findings(text: Any, name: str, review_number: int,
+                   prior_labels: set[str] | None = None) -> list[Finding]:
     # Parse one reviewer's findings. The canonical label is <letter><review_number>. On a
     # re-review a reviewer reuses the exact label of a prior finding it still stands by, so a
     # well-formed written label (one or more letters followed by THIS reviewer's number) is
@@ -212,15 +217,15 @@ def parse_findings(text, name, review_number, prior_labels=None):
     # thread's label. One-or-more letters keeps a reused two-letter label (AA<n>, ...) from being
     # misread as a foreign label and renumbered.
     prior = {lbl.upper() for lbl in (prior_labels or [])}
-    findings = []
-    used = set()
+    findings: list[Finding] = []
+    used: set[str] = set()
     own_label = re.compile(rf'[A-Z]+{review_number}')
     headline = re.compile(
         r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', re.IGNORECASE)
-    current = None
-    support = []
+    current: Finding | None = None
+    support: list[str] = []
 
-    def flush():
+    def flush() -> None:
         if current is not None:
             # Supporting paragraphs follow the headline; drop any leading indent per line but
             # keep internal blank lines (which separate paragraphs), then trim the ends.
@@ -260,7 +265,7 @@ def parse_findings(text, name, review_number, prior_labels=None):
     return findings
 
 
-def drop_unsupported(findings):
+def drop_unsupported(findings: list[Finding]) -> list[Finding]:
     # The contract (FINDINGS_CONTRACT) requires 1-2 supporting paragraphs per finding; a headline
     # with no support is a bare, unverified claim, so it is not reported. Applied where findings
     # are ready to report (not in parse_findings, which stays lenient so its labeling/positioning
@@ -274,11 +279,11 @@ _COMPACTED_LINE = re.compile(
     r'^\s*(?:-\s*)?\[([^\]]+)\]\s*(MAJOR|MINOR|NIT|NITPICK)\b\s*(.*)$', re.IGNORECASE)
 
 
-def parse_compacted_findings(text):
+def parse_compacted_findings(text: Any) -> list[Finding]:
     # Parse the output of the findings-compaction job. Each surviving line keeps its original
     # [Name-Label] (never renumbered), so references from other reviewers stay valid; the
     # sequence simply has gaps where findings were dropped.
-    findings = []
+    findings: list[Finding] = []
     for line in (text or '').split('\n'):
         m = _COMPACTED_LINE.match(line)
         if not m:
@@ -300,9 +305,9 @@ def parse_compacted_findings(text):
     return findings
 
 
-def dedup_findings(findings):
+def dedup_findings(findings: list[Finding]) -> list[Finding]:
     seen = set()
-    out = []
+    out: list[Finding] = []
     for f in findings:
         key = (f['name'], f['label'], f['severity'], f['desc'].strip().lower())
         if key in seen:
@@ -312,12 +317,12 @@ def dedup_findings(findings):
     return out
 
 
-def actionable_findings(findings, severities):
+def actionable_findings(findings: list[Finding], severities: set[str]) -> list[Finding]:
     # Keep only the enabled severity tiers, then de-duplicate across reviewers.
     return dedup_findings([f for f in findings if f['severity'] in severities])
 
 
-def _location_key(location):
+def _location_key(location: str | None) -> tuple[str, int | None]:
     # (path, line) for near-dedup: the integer after the final ':' if present, else None.
     # Two findings at the same path:line are almost always the same concern, so they can be
     # merged deterministically without a model.
@@ -330,14 +335,14 @@ def _location_key(location):
     return (location, None)
 
 
-def dedup_by_location(findings):
+def dedup_by_location(findings: list[Finding]) -> list[Finding]:
     # Merge findings that point at the same file:line — a common failure mode where several
     # reviewers flag the same spot with slightly different wording. For each location keep the
     # highest-severity finding, breaking ties on the more detailed (longer) description.
     # Findings with no location are kept as-is (there is no location to merge them on).
     order = {'NIT': 0, 'MINOR': 1, 'MAJOR': 2}
-    best = {}
-    unlocated = []
+    best: dict[tuple[str, int | None], Finding] = {}
+    unlocated: list[Finding] = []
     for f in findings:
         if not (f['location'] or '').strip():
             unlocated.append(f)
@@ -351,8 +356,8 @@ def dedup_by_location(findings):
     return list(best.values()) + unlocated
 
 
-def format_findings(findings):
-    lines = []
+def format_findings(findings: list[Finding]) -> str:
+    lines: list[str] = []
     for f in findings:
         location = f' {f["location"]}' if f['location'] else ''
         lines.append(
@@ -360,7 +365,8 @@ def format_findings(findings):
     return '\n'.join(lines)
 
 
-def prior_round_block(findings, preamble, label='implementor'):
+def prior_round_block(findings: list[Finding], preamble: str,
+                      label: str = 'implementor') -> str:
     # The prior-cycle context shown to reviewers in round >= 2, so each can recognize its own
     # [Name-Label] in the push-back and see which point was rejected. `label` names the role that
     # produced the push-back ("implementor" in the optimize loops, "conventions review" in review).
@@ -374,7 +380,21 @@ def prior_round_block(findings, preamble, label='implementor'):
     return block
 
 
-async def run_personas(reviewers, user_message, model, stats_stage, debug=False, loop=None, guidance='', tool_ctx=None, max_tool_rounds=None, prior_block_by_number=None, prior_labels_by_number=None, reasoning_effort=None, seed=None):
+async def run_personas(
+        reviewers: list[tuple[str, str, int]],
+        user_message: str,
+        model: str | None,
+        stats_stage: str | None,
+        debug: bool = False,
+        loop: str | None = None,
+        guidance: str = '',
+        tool_ctx: tools.ToolContext | None = None,
+        max_tool_rounds: int | None = None,
+        prior_block_by_number: dict[int, str] | None = None,
+        prior_labels_by_number: dict[int, set[str]] | None = None,
+        reasoning_effort: str | None = None,
+        seed: int | None = None,
+) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
@@ -389,7 +409,7 @@ async def run_personas(reviewers, user_message, model, stats_stage, debug=False,
     # based) finding from colliding with a prior thread's label. `reasoning_effort` and `seed`,
     # when set, are forwarded to each reviewer's mapper (the review path passes them to make a
     # single pass more reliable and sampling as reproducible as the provider allows).
-    async def one(spec):
+    async def one(spec: tuple[str, str, int]) -> list[Finding]:
         name, body, review_number = spec
         system = body
         if guidance:

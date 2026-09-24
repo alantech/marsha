@@ -5,6 +5,7 @@ so these verify the token budget gate, the label-preserving compaction parser, a
 deterministic severity trim without a server or LLM non-determinism.
 """
 
+from typing import Any, Generator, cast
 import asyncio
 import json
 import types
@@ -14,6 +15,7 @@ import pytest
 
 from marsha import context
 from marsha import llm
+from marsha.meta import MarshaMeta
 from marsha import personas
 from marsha.personas import parse_compacted_findings
 from marsha.mappers.chatgpt import uses_completion_tokens
@@ -21,7 +23,7 @@ from marsha.stats import price_for
 
 
 @pytest.fixture(autouse=True)
-def _reset_context_caches():
+def _reset_context_caches() -> Generator[None, None, None]:
     # The /models probe and the context-window probe cache per backend; clear them so a test's
     # mocked response can't leak into another test that reuses the same api_base.
     context.reset_cache()
@@ -29,18 +31,18 @@ def _reset_context_caches():
     context.reset_cache()
 
 
-def _finding(name, label, severity):
+def _finding(name: str, label: str, severity: str) -> Any:
     return {'name': name, 'label': label, 'severity': severity, 'location': '', 'desc': 'd'}
 
 
 # --- pure token / budget helpers -------------------------------------------
 
-def test_estimate_tokens():
+def test_estimate_tokens() -> None:
     assert context.estimate_tokens('') == 1
     assert context.estimate_tokens('x' * 3000) == 1000
 
 
-def test_budget_tokens_and_fits():
+def test_budget_tokens_and_fits() -> None:
     assert context.budget_tokens(250000, 0.5) == 125000
     # ~100k tokens <= 125k
     assert context.fits('x' * 300000, 250000, 0.5) is True
@@ -48,7 +50,7 @@ def test_budget_tokens_and_fits():
     assert context.fits('x' * 600000, 250000, 0.5) is False
 
 
-def test_known_context_fallback():
+def test_known_context_fallback() -> None:
     assert context.known_context('claude-opus-5') == 200000
     assert context.known_context('gpt-5-mini') == 400000
     # GPT-6 and GPT-5.6 both document a 1.05M window; the longer 'gpt-5.6' prefix must win over
@@ -59,7 +61,7 @@ def test_known_context_fallback():
         'mystery-model') == context.DEFAULT_CONTEXT_WINDOW
 
 
-def test_reasoning_models_require_completion_tokens():
+def test_reasoning_models_require_completion_tokens() -> None:
     # GPT-5, GPT-5.6 and GPT-6 are all reasoning models: they reject max_tokens and require
     # max_completion_tokens. gpt-5.6-*/gpt-6-* do not match the 'gpt-5' prefix, so each family
     # must be detected explicitly (a miss silently sends max_tokens and the API rejects it).
@@ -68,7 +70,7 @@ def test_reasoning_models_require_completion_tokens():
     assert uses_completion_tokens('claude-sonnet-5') is False
 
 
-def test_pricing_prefix_precedence():
+def test_pricing_prefix_precedence() -> None:
     # Pricing is matched by longest model-name prefix, so a gpt-5.6-* model must resolve to its
     # own entry, not the shorter 'gpt-5' one.
     luna_in, luna_out = price_for('gpt-6-luna')
@@ -79,8 +81,8 @@ def test_pricing_prefix_precedence():
     assert price_for('gpt-5') == (0.001220703125, 0.009765625)
 
 
-def test_resolve_override_wins():
-    async def go():
+def test_resolve_override_wins() -> None:
+    async def go() -> Any:
         return await context.resolve_context_window(override=12345)
     assert asyncio.run(go()) == 12345
 
@@ -89,39 +91,39 @@ def test_resolve_override_wins():
 
 class _FakeResp:
     # A minimal file-like context manager standing in for urllib's urlopen() return value.
-    def __init__(self, payload):
+    def __init__(self, payload: Any) -> None:
         self._raw = json.dumps(payload).encode()
 
-    def read(self):
+    def read(self) -> Any:
         return self._raw
 
-    def __enter__(self):
+    def __enter__(self) -> Any:
         return self
 
-    def __exit__(self, *a):
+    def __exit__(self, *a: Any) -> Any:
         return False
 
 
-def _mock_urlopen(payload):
-    return patch.object(context.urllib.request, 'urlopen', return_value=_FakeResp(payload))
+def _mock_urlopen(payload: Any) -> Any:
+    return patch('urllib.request.urlopen', return_value=_FakeResp(payload))
 
 
-def test_query_llama_context_meta():
+def test_query_llama_context_meta() -> None:
     with _mock_urlopen({"data": [{"id": "m", "meta": {"n_ctx": 250112}}]}):
         assert context._query_llama_context('http://x/v1') == 250112
 
 
-def test_query_llama_context_details_fallback():
+def test_query_llama_context_details_fallback() -> None:
     with _mock_urlopen({"models": [{"details": {"n_ctx": 8192}}]}):
         assert context._query_llama_context('http://x/v1') == 8192
 
 
-def test_query_llama_context_error_is_none():
-    with patch.object(context.urllib.request, 'urlopen', side_effect=Exception('boom')):
+def test_query_llama_context_error_is_none() -> None:
+    with patch('urllib.request.urlopen', side_effect=Exception('boom')):
         assert context._query_llama_context('http://x/v1') is None
 
 
-def test_query_llama_context_by_model():
+def test_query_llama_context_by_model() -> None:
     # On a multi-model backend the context of the requested model wins over the first entry.
     payload = {"data": [
         {"id": "small", "meta": {"n_ctx": 4096}},
@@ -137,7 +139,7 @@ def test_query_llama_context_by_model():
 
 # --- local-backend model discovery (descriptors with context) --------------
 
-def test_discover_models_descriptors():
+def test_discover_models_descriptors() -> None:
     with _mock_urlopen({"data": [
         {"id": "a"},
         {"id": "b", "meta": {"n_ctx": 1000}},
@@ -152,17 +154,17 @@ def test_discover_models_descriptors():
         ]
 
 
-def test_discover_models_name_fallback_and_error():
+def test_discover_models_name_fallback_and_error() -> None:
     with _mock_urlopen({"models": [{"name": "only"}]}):
         assert context.discover_models(
             'http://y/v1') == [{'id': 'only', 'context': None}]
-    with patch.object(context.urllib.request, 'urlopen', side_effect=Exception('boom')):
+    with patch('urllib.request.urlopen', side_effect=Exception('boom')):
         assert context.discover_models('http://z/v1') is None
 
 
 # --- label-preserving compaction parser ------------------------------------
 
-def test_parse_compacted_preserves_labels_and_gaps():
+def test_parse_compacted_preserves_labels_and_gaps() -> None:
     text = ("- [Sage-A3] MAJOR x.py:10 - the spec requires X\n"
             "- [Vera-B1] MINOR - a minor note with no location")
     fs = parse_compacted_findings(text)
@@ -173,13 +175,13 @@ def test_parse_compacted_preserves_labels_and_gaps():
     assert fs[1]['location'] == ''
 
 
-def test_parse_compacted_skips_non_finding_lines():
+def test_parse_compacted_skips_non_finding_lines() -> None:
     fs = parse_compacted_findings(
         "NO FINDINGS\nhere is prose\n- [Ada-A1] NIT z.py:2 - tiny")
     assert [(f['name'], f['label']) for f in fs] == [('Ada', 'A1')]
 
 
-def test_parse_compacted_accepts_missing_leading_dash():
+def test_parse_compacted_accepts_missing_leading_dash() -> None:
     # The model sometimes omits the list bullet; a well-formed finding must still parse rather
     # than be silently dropped (that dropped a real MAJOR in a real review run).
     fs = parse_compacted_findings(
@@ -189,7 +191,7 @@ def test_parse_compacted_accepts_missing_leading_dash():
 
 # --- deterministic severity trim -------------------------------------------
 
-def test_trim_drops_lowest_severity_first():
+def test_trim_drops_lowest_severity_first() -> None:
     findings = [_finding('a', 'A1', 'MAJOR'), _finding('b', 'A2', 'MINOR'),
                 _finding('c', 'A3', 'NIT')]
     out = llm._trim_findings_to_budget(findings, lambda cur: len(cur) <= 1)
@@ -199,81 +201,83 @@ def test_trim_drops_lowest_severity_first():
 
 # --- budget gate + compaction integration (mocked) -------------------------
 
-def test_budgeted_findings_unchanged_when_fits():
+def test_budgeted_findings_unchanged_when_fits() -> None:
     args = types.SimpleNamespace(context_window=1000000, context_cap=0.5)
     findings = [_finding('Ada', 'A1', 'MAJOR')]
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'get_client'), \
                 patch.object(llm, 'resolve_context_window', new=AsyncMock(return_value=1000000)):
             return await llm._budgeted_findings(
-                None, findings, lambda fs: 'x' * 10, 'model', args)
+                cast(MarshaMeta, None), findings, lambda fs: 'x' * 10, 'model', args)
     assert asyncio.run(go()) is findings
 
 
-def test_budgeted_findings_compacts_when_over():
+def test_budgeted_findings_compacts_when_over() -> None:
     args = types.SimpleNamespace(context_window=1000, context_cap=0.5)
     findings = [_finding('Ada', 'A1', 'MAJOR'),
                 _finding('Vera', 'A2', 'MINOR')]
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'get_client'), \
                 patch.object(llm, 'resolve_context_window', new=AsyncMock(return_value=1000)), \
                 patch.object(llm, 'compact_findings', new=AsyncMock(return_value=[findings[0]])):
             return await llm._budgeted_findings(
-                None, findings, lambda fs: 'x' * (1000 * len(fs)), 'model', args)
+                cast(MarshaMeta, None), findings, lambda fs: 'x' * (1000 * len(fs)), 'model', args)
     assert asyncio.run(go()) == [findings[0]]
 
 
-def test_compact_findings_returns_strictly_smaller_with_original_labels():
+def test_compact_findings_returns_strictly_smaller_with_original_labels() -> None:
     findings = [_finding('Ada', 'A1', 'MAJOR'),
                 _finding('Sage', 'A2', 'MAJOR')]
     compacted = "- [Ada-A1] MAJOR x.py:1 - missing cycle msg"
 
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return compacted
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'format_marsha_for_llm', return_value='SPEC'), \
                 patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
-            return await llm.compact_findings(types.SimpleNamespace(), findings, 'model')
+            return await llm.compact_findings(
+                cast(MarshaMeta, types.SimpleNamespace()), findings, 'model')
     out = asyncio.run(go())
     assert [(f['name'], f['label']) for f in out] == [('Ada', 'A1')]
 
 
-def test_compact_findings_falls_back_when_not_smaller():
+def test_compact_findings_falls_back_when_not_smaller() -> None:
     findings = [_finding('Ada', 'A1', 'MAJOR'),
                 _finding('Sage', 'A2', 'MAJOR')]
 
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return "NO FINDINGS"  # parses to nothing -> not strictly smaller
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'format_marsha_for_llm', return_value='SPEC'), \
                 patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
-            return await llm.compact_findings(types.SimpleNamespace(), findings, 'model')
+            return await llm.compact_findings(
+                cast(MarshaMeta, types.SimpleNamespace()), findings, 'model')
     assert asyncio.run(go()) is findings
 
 
-def test_consolidate_allow_empty_drops_everything():
+def test_consolidate_allow_empty_drops_everything() -> None:
     # allow_empty=True (the review path) lets the pass reduce the list to zero when every
     # finding is a non-defect, so a clean change posts nothing.
     findings = [_finding('Ada', 'A1', 'MAJOR'), _finding('Sage', 'A2', 'MINOR')]
 
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return "NO FINDINGS"
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
             return await llm.consolidate_findings(
                 'ctx', findings, 'model', allow_empty=True)
     assert asyncio.run(go()) == []
 
 
-def test_consolidate_allow_empty_survives_flaky_empty():
+def test_consolidate_allow_empty_survives_flaky_empty() -> None:
     # A single flaky empty response must not zero a review: if another attempt shrank to a
     # non-empty list, keep that rather than dropping everything.
     findings = [_finding('Ada', 'A1', 'MAJOR'),
@@ -286,10 +290,10 @@ def test_consolidate_allow_empty_survives_flaky_empty():
     ])
 
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return next(replies)
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
             return await llm.consolidate_findings(
                 'ctx', findings, 'model', allow_empty=True, retries=3)
@@ -297,15 +301,15 @@ def test_consolidate_allow_empty_survives_flaky_empty():
     assert [(f['name'], f['label']) for f in out] == [('Ada', 'A1')]
 
 
-def test_consolidate_default_never_returns_empty():
+def test_consolidate_default_never_returns_empty() -> None:
     # Without allow_empty (budget compaction), an empty result is rejected so no work is lost.
     findings = [_finding('Ada', 'A1', 'MAJOR')]
 
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             return "NO FINDINGS"
 
-    async def go():
+    async def go() -> Any:
         with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
             return await llm.consolidate_findings('ctx', findings, 'model')
     assert asyncio.run(go()) is findings
@@ -313,13 +317,13 @@ def test_consolidate_default_never_returns_empty():
 
 # --- local-backend reviewer serialization ----------------------------------
 
-def _reviewers():
+def _reviewers() -> Any:
     return [('Ada', 'body', 1), ('Bram', 'body', 2), ('Vera', 'body', 3)]
 
 
-def _in_flight_mapper(counter):
+def _in_flight_mapper(counter: Any) -> Any:
     class FakeMapper:
-        async def run(self, req):
+        async def run(self, req: Any) -> Any:
             counter['in'] += 1
             counter['max'] = max(counter['max'], counter['in'])
             await asyncio.sleep(0.01)
@@ -328,11 +332,11 @@ def _in_flight_mapper(counter):
     return FakeMapper()
 
 
-def test_run_personas_serial_on_local_backend():
+def test_run_personas_serial_on_local_backend() -> None:
     counter = {'in': 0, 'max': 0}
     reviewers = _reviewers()
 
-    async def go():
+    async def go() -> Any:
         with patch.object(personas, 'get_mapper', new=lambda *a, **k: _in_flight_mapper(counter)), \
                 patch.object(personas, 'is_local_backend', return_value=True):
             await personas.run_personas(reviewers, 'msg', 'model', 'first_stage')
@@ -340,11 +344,11 @@ def test_run_personas_serial_on_local_backend():
     assert counter['max'] == 1  # never more than one reviewer in flight
 
 
-def test_run_personas_parallel_on_remote_backend():
+def test_run_personas_parallel_on_remote_backend() -> None:
     counter = {'in': 0, 'max': 0}
     reviewers = _reviewers()
 
-    async def go():
+    async def go() -> Any:
         with patch.object(personas, 'get_mapper', new=lambda *a, **k: _in_flight_mapper(counter)), \
                 patch.object(personas, 'is_local_backend', return_value=False):
             await personas.run_personas(reviewers, 'msg', 'model', 'first_stage')
@@ -354,18 +358,18 @@ def test_run_personas_parallel_on_remote_backend():
 
 # --- --trace-full transcript dump ------------------------------------------
 
-def _run_mapper_once(level, body):
+def _run_mapper_once(level: Any, body: Any) -> Any:
     from marsha.log import set_level, TRACE_OFF
     from marsha.mappers.base import BaseMapper
 
     class _M(BaseMapper):
-        async def transform(self, i):
+        async def transform(self, i: Any) -> Any:
             return 'RESPONSE-BODY-123'
 
     m = _M()
     m.label = 'mycall'
 
-    async def go():
+    async def go() -> Any:
         set_level(level)
         try:
             await m.run('PROMPT-BODY-456')
@@ -374,7 +378,7 @@ def _run_mapper_once(level, body):
     asyncio.run(go())
 
 
-def test_trace_full_dumps_request_and_response(capsys):
+def test_trace_full_dumps_request_and_response(capsys: Any) -> None:
     from marsha.log import TRACE_FULL
     _run_mapper_once(TRACE_FULL, None)
     err = capsys.readouterr().err
@@ -384,7 +388,7 @@ def test_trace_full_dumps_request_and_response(capsys):
     assert 'RESPONSE-BODY-123' in err
 
 
-def test_trace_summary_does_not_dump_transcript(capsys):
+def test_trace_summary_does_not_dump_transcript(capsys: Any) -> None:
     from marsha.log import TRACE_SUMMARY
     _run_mapper_once(TRACE_SUMMARY, None)
     err = capsys.readouterr().err

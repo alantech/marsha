@@ -2,17 +2,19 @@
 preamble-splitting parser. No LLM or network is involved.
 """
 
+from typing import Any
 import asyncio
 import os
 from unittest.mock import patch
 
 from marsha import personas as p
+from marsha.findings import Finding
 from marsha.parse import split_preamble
 
 
 # --- Registry & resolution --------------------------------------------------
 
-def test_registry_has_expected_personas():
+def test_registry_has_expected_personas() -> None:
     reg = p.build_registry()
     assert len(reg) == 24
     for name in ['ada', 'vera', 'sage', 'sasha', 'kit', 'dot', 'otto', 'sol', 'regan', 'fay', 'hollis']:
@@ -22,7 +24,7 @@ def test_registry_has_expected_personas():
         assert name not in reg
 
 
-def test_resolve_persona_by_name_is_case_insensitive():
+def test_resolve_persona_by_name_is_case_insensitive() -> None:
     reg = p.build_registry()
     name, body, path = p.resolve_persona('ada', reg)
     assert name == 'Ada'
@@ -31,7 +33,7 @@ def test_resolve_persona_by_name_is_case_insensitive():
     assert p.resolve_persona('ELI', reg)[0] == 'Eli'
 
 
-def test_resolve_persona_by_path(tmp_path):
+def test_resolve_persona_by_path(tmp_path: Any) -> None:
     f = tmp_path / 'sharona.md'
     f.write_text('name: Sharona\nYou are Sharona.\nGoal: x\n')
     reg = p.build_registry()
@@ -40,7 +42,7 @@ def test_resolve_persona_by_path(tmp_path):
     assert path == str(f)
 
 
-def test_resolve_persona_unknown_raises():
+def test_resolve_persona_unknown_raises() -> None:
     reg = p.build_registry()
     try:
         p.resolve_persona('nobody', reg)
@@ -49,7 +51,7 @@ def test_resolve_persona_unknown_raises():
         pass
 
 
-def test_is_path_detects_posix_and_windows_paths():
+def test_is_path_detects_posix_and_windows_paths() -> None:
     # Both POSIX and Windows path styles are recognized as paths; built-in names are not.
     paths = ['/abs/p.md', './rel/p.md', '~/home/p.md', 'rel/p.md',
              'C:\\abs\\p.md', '.\\rel\\p.md', 'rel\\p.md']
@@ -59,7 +61,7 @@ def test_is_path_detects_posix_and_windows_paths():
         assert not p._is_path(name), name
 
 
-def test_resolve_loop_reviewers_default():
+def test_resolve_loop_reviewers_default() -> None:
     reg = p.build_registry()
     specs = p.resolve_loop_reviewers('oracle', None, reg)
     assert len(specs) == 7
@@ -67,13 +69,13 @@ def test_resolve_loop_reviewers_default():
     assert [n for n, _, _ in specs][0] == 'Ada'
 
 
-def test_resolve_loop_reviewers_flag_order_and_n():
+def test_resolve_loop_reviewers_flag_order_and_n() -> None:
     reg = p.build_registry()
     specs = p.resolve_loop_reviewers('impl', 'sage,sasha', reg)
     assert [(n, N) for n, _, N in specs] == [('Sage', 1), ('Sasha', 2)]
 
 
-def test_resolve_loop_reviewers_duplicate_raises():
+def test_resolve_loop_reviewers_duplicate_raises() -> None:
     reg = p.build_registry()
     try:
         p.resolve_loop_reviewers('oracle', 'ada,ada', reg)
@@ -84,7 +86,7 @@ def test_resolve_loop_reviewers_duplicate_raises():
 
 # --- Finding parsing --------------------------------------------------------
 
-def test_parse_findings_labels_and_fields():
+def test_parse_findings_labels_and_fields() -> None:
     text = ('A1 [MAJOR] foo.py:10 - missing case\n'
             'B1 [MINOR] foo.py:20 - naming\n'
             'C1 [NIT] foo.py:30 - style')
@@ -96,13 +98,13 @@ def test_parse_findings_labels_and_fields():
     assert fs[0]['name'] == 'Ada'
 
 
-def test_parse_findings_label_is_position_based():
+def test_parse_findings_label_is_position_based() -> None:
     # A reviewer's own label token is not trusted; the harness labels by position.
     fs = p.parse_findings('Z9 [MAJOR] a - one\nB7 [MINOR] b - two', 'Ada', 1)
     assert [f['label'] for f in fs] == ['A1', 'B1']
 
 
-def test_parse_findings_reuses_wellformed_label():
+def test_parse_findings_reuses_wellformed_label() -> None:
     # On a re-review a reviewer reuses the exact label of a finding it still stands by; a
     # well-formed label (one letter + this reviewer's number) is honored, leaving a gap where a
     # conceded finding (B2) was dropped. A foreign label (number mismatch) is not honored.
@@ -113,7 +115,7 @@ def test_parse_findings_reuses_wellformed_label():
     assert [f['label'] for f in fs] == ['A2']
 
 
-def test_parse_findings_honors_multiletter_label():
+def test_parse_findings_honors_multiletter_label() -> None:
     # A reused two-letter label (AA<n>) is this reviewer's own, so it is honored rather than
     # renumbered; a label with a foreign number is still rejected.
     fs = p.parse_findings('AA12 [MAJOR] a - kept', 'Hollis', 12)
@@ -122,41 +124,41 @@ def test_parse_findings_honors_multiletter_label():
     assert [f['label'] for f in fs] == ['A12']
 
 
-def test_parse_findings_reraise_honors_prior_label():
+def test_parse_findings_reraise_honors_prior_label() -> None:
     # A well-formed label that is one of the reviewer's prior labels is honored (a re-raise), so
     # it maps back onto the prior thread.
     fs = p.parse_findings('A1 [MAJOR] x.py:1 - re-raised', 'Sage', 1,
-                          prior_labels=['A1', 'B1'])
+                           prior_labels={'A1', 'B1'})
     assert [f['label'] for f in fs] == ['A1']
 
 
-def test_parse_findings_new_finding_skips_prior_labels():
+def test_parse_findings_new_finding_skips_prior_labels() -> None:
     # A position-based (unlabeled) new finding skips the reviewer's prior labels so it cannot
     # collide with an old thread's label; the first fresh letter is the next one after them.
     text = '[MINOR] x.py:1 - new one\n[MINOR] x.py:2 - new two'
-    fs = p.parse_findings(text, 'Sage', 1, prior_labels=['A1', 'B1'])
+    fs = p.parse_findings(text, 'Sage', 1, prior_labels={'A1', 'B1'})
     assert [f['label'] for f in fs] == ['C1', 'D1']
 
 
-def test_parse_findings_case_and_nitpick():
+def test_parse_findings_case_and_nitpick() -> None:
     fs = p.parse_findings('a1 [major] x - one\nb1 [nitpick] y - two', 'Ada', 2)
     assert [f['severity'] for f in fs] == ['MAJOR', 'NIT']
     assert [f['label'] for f in fs] == ['A2', 'B2']
 
 
-def test_parse_findings_skips_prose():
+def test_parse_findings_skips_prose() -> None:
     fs = p.parse_findings(
         'some prose\n[MAJOR] x - one\nA1 [MINOR] y - two\n', 'Ada', 1)
     assert len(fs) == 2
     assert [f['label'] for f in fs] == ['A1', 'B1']
 
 
-def test_parse_findings_no_findings():
+def test_parse_findings_no_findings() -> None:
     assert p.parse_findings('NO FINDINGS', 'Ada', 1) == []
     assert p.parse_findings('all good here', 'Ada', 1) == []
 
 
-def test_parse_findings_captures_support():
+def test_parse_findings_captures_support() -> None:
     # A finding's one-line headline is followed by 1-2 supporting paragraphs, which are kept
     # with the finding (internal blank lines separate paragraphs); a bare headline has no support.
     text = ('A1 [MAJOR] foo.py:10 - missing sort\n'
@@ -173,24 +175,25 @@ def test_parse_findings_captures_support():
     assert fs[1]['support'] == ''
 
 
-def test_drop_unsupported_findings():
+def test_drop_unsupported_findings() -> None:
     # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
     # unverified claim and is dropped before it is reported (the parser itself stays lenient so
     # its labeling logic can be tested with minimal fixtures).
-    bare = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
-            'desc': 'd', 'support': ''}
-    backed = dict(bare, label='B1', support='The spec requires it.')
+    bare: Finding = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
+                     'desc': 'd', 'support': ''}
+    backed: Finding = {'name': 'Ada', 'label': 'B1', 'severity': 'MAJOR', 'location': 'x.py:1',
+                       'desc': 'd', 'support': 'The spec requires it.'}
     assert p.drop_unsupported([]) == []
     assert p.drop_unsupported([bare, backed]) == [backed]
 
 
 # --- Finding model ----------------------------------------------------------
 
-def _f(name, label, severity, desc):
+def _f(name: str, label: str, severity: str, desc: str) -> Finding:
     return {'name': name, 'label': label, 'severity': severity, 'location': '', 'desc': desc}
 
 
-def test_dedup_findings():
+def test_dedup_findings() -> None:
     a = _f('Ada', 'A1', 'MAJOR', 'same')
     b = _f('Vera', 'A1', 'MAJOR', 'same')
     c = _f('Ada', 'A1', 'MAJOR', 'different')
@@ -199,17 +202,17 @@ def test_dedup_findings():
     assert len(out) == 3
 
 
-def test_dedup_by_location_merges_same_line():
+def test_dedup_by_location_merges_same_line() -> None:
     # Several reviewers flag the same file:line with different wording -> one finding,
     # keeping the highest severity (then the most detailed description).
-    f1 = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR',
-          'location': 'src/foo.py:10', 'desc': 'short'}
-    f2 = {'name': 'Eli', 'label': 'A1', 'severity': 'MAJOR',
-          'location': 'src/foo.py:10', 'desc': 'a much more detailed explanation'}
-    f3 = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT',
-          'location': 'src/foo.py:10', 'desc': 'tiny'}
-    f4 = {'name': 'Kit', 'label': 'A1', 'severity': 'MINOR',
-          'location': 'src/bar.py:5', 'desc': 'different file'}
+    f1: Finding = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR',
+                   'location': 'src/foo.py:10', 'desc': 'short'}
+    f2: Finding = {'name': 'Eli', 'label': 'A1', 'severity': 'MAJOR',
+                   'location': 'src/foo.py:10', 'desc': 'a much more detailed explanation'}
+    f3: Finding = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT',
+                   'location': 'src/foo.py:10', 'desc': 'tiny'}
+    f4: Finding = {'name': 'Kit', 'label': 'A1', 'severity': 'MINOR',
+                   'location': 'src/bar.py:5', 'desc': 'different file'}
     out = p.dedup_by_location([f1, f2, f3, f4])
     assert len(out) == 2  # one for foo.py:10, one for bar.py:5
     kept = {(f['location'], f['desc']) for f in out}
@@ -217,18 +220,18 @@ def test_dedup_by_location_merges_same_line():
     assert ('src/bar.py:5', 'different file') in kept
 
 
-def test_dedup_by_location_keeps_unlocated_separate():
+def test_dedup_by_location_keeps_unlocated_separate() -> None:
     # Findings with no location have nothing to merge on, so each is kept rather than collapsed
     # into a single unlocated finding.
-    a = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR', 'location': '', 'desc': 'one'}
-    b = {'name': 'Eli', 'label': 'B1', 'severity': 'MAJOR', 'location': '', 'desc': 'two'}
-    c = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT', 'location': 'x.py:1', 'desc': 'loc'}
+    a: Finding = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR', 'location': '', 'desc': 'one'}
+    b: Finding = {'name': 'Eli', 'label': 'B1', 'severity': 'MAJOR', 'location': '', 'desc': 'two'}
+    c: Finding = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT', 'location': 'x.py:1', 'desc': 'loc'}
     out = p.dedup_by_location([a, b, c])
     assert len(out) == 3
     assert {f['desc'] for f in out} == {'one', 'two', 'loc'}
 
 
-def test_position_label_extends_past_z():
+def test_position_label_extends_past_z() -> None:
     # After the 26 single letters are used, the fallback extends to two letters (AA<n>...) rather
     # than spilling onto non-alphabetic characters.
     used = {f'{chr(ord("A") + n)}5' for n in range(26)}
@@ -237,7 +240,7 @@ def test_position_label_extends_past_z():
     assert p.position_label(5, used) == 'AB5'
 
 
-def test_actionable_findings_filters_severity():
+def test_actionable_findings_filters_severity() -> None:
     fs = [_f('A', 'A1', 'MAJOR', 'm'), _f(
         'B', 'B1', 'MINOR', 'n'), _f('C', 'C1', 'NIT', 'x')]
     assert [f['severity']
@@ -245,7 +248,7 @@ def test_actionable_findings_filters_severity():
     assert len(p.actionable_findings(fs, {'MAJOR', 'MINOR'})) == 2
 
 
-def test_parse_severities():
+def test_parse_severities() -> None:
     assert p.parse_severities('major,minor,nit') == {'MAJOR', 'MINOR', 'NIT'}
     assert p.parse_severities('nitpick') == {'NIT'}
     try:
@@ -255,13 +258,13 @@ def test_parse_severities():
         pass
 
 
-def test_format_findings():
-    fs = [{'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR',
-           'location': 'x.py:3', 'desc': 'd'}]
+def test_format_findings() -> None:
+    fs: list[Finding] = [{'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR',
+                          'location': 'x.py:3', 'desc': 'd'}]
     assert p.format_findings(fs) == '- [Ada-A1] MAJOR x.py:3 - d'
 
 
-def test_prior_round_block_contains_label_and_preamble():
+def test_prior_round_block_contains_label_and_preamble() -> None:
     fs = [_f('Ada', 'A1', 'MAJOR', 'd')]
     block = p.prior_round_block(fs, 'I reject [Ada-A1] because ...')
     assert '[Ada-A1]' in block
@@ -271,17 +274,17 @@ def test_prior_round_block_contains_label_and_preamble():
 
 # --- run_personas resilience ------------------------------------------------
 
-def test_run_personas_ignores_failing_persona():
+def test_run_personas_ignores_failing_persona() -> None:
     class FakeMapper:
-        def __init__(self, system):
+        def __init__(self, system: Any) -> None:
             self.system = system
 
-        async def run(self, user_message):
+        async def run(self, user_message: Any) -> Any:
             if 'review #1' in self.system:
                 raise Exception('boom')
             return 'A2 [MAJOR] x - ok\nI confirmed the defect with git show HEAD:x.'
 
-    async def scenario():
+    async def scenario() -> Any:
         reviewers = [('Ada', 'body', 1), ('Vera', 'body', 2)]
         with patch.object(p, 'get_mapper', new=lambda *a, **k: FakeMapper(a[0])):
             return await p.run_personas(reviewers, 'ctx', model='m', stats_stage='first_stage')
@@ -292,7 +295,7 @@ def test_run_personas_ignores_failing_persona():
 
 # --- Preamble splitting -----------------------------------------------------
 
-def test_split_preamble():
+def test_split_preamble() -> None:
     doc = 'Preamble here.\n\n# foo.py\n\n```py\nprint(1)\n```\n'
     preamble, artifact = split_preamble(doc, 'foo.py')
     assert preamble == 'Preamble here.'
@@ -300,7 +303,7 @@ def test_split_preamble():
     assert 'print(1)' in artifact
 
 
-def test_split_preamble_missing_header_raises():
+def test_split_preamble_missing_header_raises() -> None:
     try:
         split_preamble('no header here', 'foo.py')
         assert False, 'expected an exception'
@@ -310,16 +313,16 @@ def test_split_preamble_missing_header_raises():
 
 # --- Determinism knobs (review path) ----------------------------------------
 
-def test_run_personas_forwards_reasoning_and_seed():
+def test_run_personas_forwards_reasoning_and_seed() -> None:
     # The review path passes a higher reasoning effort and a fixed seed; run_personas must forward
     # both to each reviewer's mapper (they are what make a pass more reliable/reproducible).
     captured = {}
 
     class FakeMapper:
-        def __init__(self, system, **k):
+        def __init__(self, system: Any, **k: Any) -> None:
             captured.update(k)
 
-        async def run(self, user):
+        async def run(self, user: Any) -> Any:
             return 'NO FINDINGS'
 
     with patch.object(p, 'get_mapper', new=lambda *a, **k: FakeMapper(*a, **k)):
@@ -332,14 +335,14 @@ def test_run_personas_forwards_reasoning_and_seed():
     assert captured['seed'] == 9
 
 
-def test_chatgpt_mapper_includes_seed_and_effort():
+def test_chatgpt_mapper_includes_seed_and_effort() -> None:
     # ChatGPTMapper forwards seed and reasoning_effort into the request (seed for reproducibility
     # on providers that honor it; gpt-5-mini ignores it harmlessly).
     import types
     from marsha.mappers import chatgpt as chatgpt_mod
     queries = []
 
-    async def fake_retry(query, model=None, max_tries=3, n_results=1, label=None):
+    async def fake_retry(query: Any, model: Any = None, max_tries: int = 3, n_results: int = 1, label: Any = None) -> Any:
         queries.append(query)
         return types.SimpleNamespace(
             choices=[types.SimpleNamespace(

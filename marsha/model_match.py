@@ -7,6 +7,11 @@ unknown price is neutral. Roles are profiled in ROLE_PROFILES, so adding a role 
 config change, not a code change.
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TypedDict
+
 from marsha.config import (
     resolve_model,
     resolve_strong_model,
@@ -15,8 +20,26 @@ from marsha.config import (
     model_is_pinned,
     strong_model_is_pinned,
 )
-from marsha.context import DEFAULT_CONTEXT_WINDOW, known_context
+from marsha.context import DEFAULT_CONTEXT_WINDOW, known_context, ModelDescriptor
 from marsha.stats import price_for, price_known
+
+
+# A ranker profile for one role (see ROLE_PROFILES).
+class _Profile(TypedDict, total=False):
+    strategy: str
+    target_context: int | None
+    price_weight: float
+
+
+# One role auto-matching resolves: a display label, the config role name, and the config
+# accessors for that role.
+class _Role(TypedDict):
+    label: str
+    role: str
+    resolver: Callable[[], str]
+    setter: Callable[[str], None]
+    pinned: Callable[[], bool]
+
 
 # Per-role target profiles for the ranker:
 #   strategy: 'smallest-fitting' -> the smallest context that is still >= the target
@@ -29,7 +52,7 @@ from marsha.stats import price_for, price_known
 #             replaces, not merely one that technically works.
 #   price_weight: 0 disables the price tie-break; any positive value enables it. Context is
 #             the primary signal; price is a tiebreaker at best.
-ROLE_PROFILES = {
+ROLE_PROFILES: dict[str, _Profile] = {
     'model': {
         'strategy': 'smallest-fitting',
         'target_context': None,
@@ -44,7 +67,7 @@ ROLE_PROFILES = {
 
 # The roles auto-matching resolves, in display order. Adding a role is an entry here
 # (with a profile in ROLE_PROFILES), not new code.
-_ROLES = (
+_ROLES: list[_Role] = [
     {
         'label': 'model',
         'role': 'model',
@@ -59,10 +82,10 @@ _ROLES = (
         'setter': set_cli_strong_model,
         'pinned': strong_model_is_pinned,
     },
-)
+]
 
 
-def _price_key(model_id, price_weight):
+def _price_key(model_id: str | None, price_weight: float) -> tuple[()] | tuple[int, float]:
     # Price tie-break key: known prices sort cheapest first; an unknown price sorts after
     # any known price (it is neutral, never a winner) and ties among unknowns keep list
     # order. Returns an empty key when the profile disables the price signal.
@@ -74,7 +97,7 @@ def _price_key(model_id, price_weight):
     return (1, 0.0)
 
 
-def _target_context(profile, current):
+def _target_context(profile: _Profile, current: str | None) -> int:
     # The context floor for a 'smallest-fitting' role: the profile's explicit value, or the
     # context window the role would otherwise get from its configured model, so a backend is
     # asked for a model at least as capable as the default it replaces.
@@ -84,7 +107,8 @@ def _target_context(profile, current):
     return known_context(current) if current else DEFAULT_CONTEXT_WINDOW
 
 
-def rank_models(models, role, current=None, profile=None):
+def rank_models(models: list[ModelDescriptor], role: str, current: str | None = None,
+                profile: _Profile | None = None) -> str | None:
     """Pick the closest match for `role` from a list of discovered model descriptors
     ({'id': <name>, 'context': <tokens or None>}). `current` is the model the role would
     otherwise use; its documented context window sets the default target. Returns the
@@ -94,7 +118,7 @@ def rank_models(models, role, current=None, profile=None):
     profile = profile or ROLE_PROFILES.get(role)
     if not models or profile is None:
         return None
-    weight = profile.get('price_weight', 0)
+    weight = profile.get('price_weight', 0.0)
     if profile.get('strategy') == 'smallest-fitting':
         target = _target_context(profile, current)
         fitting = [
@@ -109,7 +133,7 @@ def rank_models(models, role, current=None, profile=None):
             fitting = list(models)
             descending = True
 
-        def key(m, i):
+        def key(m: ModelDescriptor, i: int) -> tuple[tuple[int, int], tuple[()] | tuple[int, float], int]:
             ctx = m.get('context')
             if ctx is None:
                 # An unknown context cannot be verified, so it sorts last.
@@ -125,15 +149,15 @@ def rank_models(models, role, current=None, profile=None):
         # 'largest': the largest context (most capable) wins, ties broken by price, and an
         # unknown context sorts last (with no signal at all, list order decides).
 
-        def key(m, i):
+        def key_largest(m: ModelDescriptor, i: int) -> tuple[tuple[int, int], tuple[()] | tuple[int, float], int]:
             ctx = m.get('context')
             ctx_part = (0, -ctx) if ctx is not None else (1, 0)
             return (ctx_part, _price_key(m.get('id'), weight), i)
 
-        return min(enumerate(models), key=lambda p: key(p[1], p[0]))[1]['id']
+        return min(enumerate(models), key=lambda p: key_largest(p[1], p[0]))[1]['id']
 
 
-def apply_available_models(models):
+def apply_available_models(models: list[ModelDescriptor] | None) -> list[str]:
     """Given the models actually served by an (OpenAI-compatible, e.g. local) backend — a
     list of {'id', 'context'} descriptors, or None when discovery failed — remap the
     standard and strong models to the closest available match when the configured model
@@ -145,7 +169,7 @@ def apply_available_models(models):
     if not models:
         return []
     available = [m['id'] for m in models]
-    notes = []
+    notes: list[str] = []
     for role in _ROLES:
         current = role['resolver']()
         if role['pinned']():

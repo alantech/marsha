@@ -1,3 +1,5 @@
+from typing import Any
+
 
 if __name__ == '__main__':
     import argparse
@@ -29,7 +31,7 @@ if __name__ == '__main__':
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class MarshaServer(BaseHTTPRequestHandler):
-            def do_GET(self):
+            def do_GET(self) -> None:
                 func_name = self.path.split('/')[1]
                 if func_name not in func_names:
                     self.send_response(404)
@@ -52,7 +54,7 @@ if __name__ == '__main__':
                 self.end_headers()
                 self.wfile.write(bytes(json.dumps(out), 'utf-8'))
 
-            def do_POST(self):
+            def do_POST(self) -> None:
                 func_name = self.path.split('/')[1]
                 if func_name not in func_names:
                     self.send_response(404)
@@ -64,7 +66,7 @@ if __name__ == '__main__':
                 func = lookup[func_name]
                 content_len = int(self.headers.get('Content-Length', 0))
                 post_body = self.rfile.read(content_len)
-                post_payload = None
+                post_payload: Any = None
                 is_json = self.headers.get_content_type() == 'application/json'
                 if is_json:
                     try:
@@ -78,7 +80,7 @@ if __name__ == '__main__':
                         return
                 else:
                     post_payload = post_body.decode('utf-8')
-                out = None
+                out: Any = None
                 try:
                     if type(post_payload) is list:
                         out = func(*post_payload)
@@ -115,8 +117,8 @@ if __name__ == '__main__':
         server.server_close()
         print("Server stopped.")
     else:
-        out = None
-        parsed_param = None
+        out: Any = None
+        parsed_param: Any = None
         as_json = False
         if args.stdin:
             import sys

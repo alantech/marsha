@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import sys
 import tempfile
 import time
 import traceback
+from collections.abc import Iterable
+from typing import Any, cast
 
 from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
@@ -140,7 +144,7 @@ review_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
 
 
-def _normalize_argv(argv):
+def _normalize_argv(argv: list[str]) -> tuple[list[str], bool]:
     # The deprecated bare form `marsha <source> [flags]` maps onto
     # `marsha compile <source> [flags]`. `compile`/`help` are real
     # subcommands; a top-level -h/--help shows the subcommand overview.
@@ -149,7 +153,7 @@ def _normalize_argv(argv):
     return ['compile'] + argv, True
 
 
-def print_help(topic):
+def print_help(topic: str | None) -> None:
     overview = (
         'Marsha AI Compiler\n'
         '\n'
@@ -183,7 +187,7 @@ def print_help(topic):
         print(overview)
 
 
-def run(argv=None):
+def run(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     argv, is_legacy = _normalize_argv(argv)
@@ -206,7 +210,7 @@ def run(argv=None):
     return 0
 
 
-def _setup_runtime(args, require_toolchain=True):
+def _setup_runtime(args: Any, require_toolchain: bool = True) -> None:
     # --trace routes a live, flushed progress trace to stderr so a run can
     # be watched in real time, even when stdout is piped to a file. --trace-full
     # adds full request/response transcripts on top of the summary.
@@ -246,7 +250,7 @@ def _setup_runtime(args, require_toolchain=True):
         print(f'Using LLM model: {resolve_model()}')
 
 
-async def main(args):
+async def main(args: Any) -> None:
     t1 = time.time()
     input_file = args.source
     # Name without extension
@@ -277,8 +281,8 @@ async def main(args):
             attempts = attempts + 1
             break
         # Writing generated code to temporary files in preparation for next stages
-        file_groups = list()
-        tmp_directories = []
+        file_groups: list[list[str]] = []
+        tmp_directories: list[tempfile.TemporaryDirectory[str]] = []
         for idx, (impl, oracle) in enumerate(cands):
             print('Writing generated code to temporary files...')
             tmpdir = tempfile.TemporaryDirectory(
@@ -289,9 +293,9 @@ async def main(args):
                     backend.compose(impl, oracle), subdir=tmpdir.name)]
         if debug:
             for filename in [filename for file_group in file_groups for filename in file_group]:
-                print(f'# {filename}\n{read_file(filename)}\n')
+                print(f'# {filename}\n{cast(str, read_file(filename))}\n')
         # Create tasks to run in parallel using asyncio
-        tasks = []
+        tasks: list[asyncio.Task[None]] = []
         for file_group in file_groups:
             tasks.append(asyncio.create_task(
                 review_and_fix(args, meta, file_group, debug), name=file_group[0]))
@@ -341,7 +345,7 @@ async def main(args):
         f'{meta.filename} done! Total time elapsed: {prettify_time_delta(t2 - t1)}. Total cost: {round(stats.total_cost, 2)}.')
 
 
-async def run_parallel_tasks(tasks: list) -> str:
+async def run_parallel_tasks(tasks: Iterable[asyncio.Task[None]]) -> str:
     print('Running tasks in parallel...')
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     done_task = done.pop()
@@ -355,12 +359,13 @@ async def run_parallel_tasks(tasks: list) -> str:
         return await run_parallel_tasks(pending)
     else:
         print('All tasks failed. Raising exception...')
-        if done_task is not None and done_task.exception() is not None:
-            raise done_task.exception()
+        exc = done_task.exception()
+        if exc is not None:
+            raise cast(Exception, exc)
         raise Exception('All tasks failed.')
 
 
-def cleanup_tmp_directories(tmp_directories: list):
+def cleanup_tmp_directories(tmp_directories: list[tempfile.TemporaryDirectory[str]]) -> None:
     for tmp_directory in tmp_directories:
         try:
             tmp_directory.cleanup()

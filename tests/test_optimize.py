@@ -11,6 +11,7 @@ suite (an offline, dependency-free oracle) to prove that a regressing
 import asyncio
 import tempfile
 import types
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from marsha import llm
@@ -18,7 +19,7 @@ from marsha.meta import MarshaMeta
 from marsha.utils import read_file, write_file
 
 
-def make_meta(filename='example'):
+def make_meta(filename: str = 'example') -> MarshaMeta:
     # A minimal, fully-populated meta. The LLM is mocked, so only .filename and the
     # attributes the message builders touch are exercised.
     meta = MarshaMeta(f'{filename}.mrsh')
@@ -29,25 +30,26 @@ def make_meta(filename='example'):
     return meta
 
 
-def make_args(level=1, **kw):
+def make_args(level: int = 1, **kw: Any) -> Any:
     base = dict(optimize=level, test_personas=None, impl_personas=None,
                 fix_personas=None, optimize_severity='major,minor,nit', no_tools=True)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
 
-def finding(name='Ada', label='A1', severity='MAJOR', desc='d', location='x.py:1'):
+def finding(name: str = 'Ada', label: str = 'A1', severity: str = 'MAJOR',
+            desc: str = 'd', location: str = 'x.py:1') -> dict[str, str]:
     return {'name': name, 'label': label, 'severity': severity,
             'location': location, 'desc': desc}
 
 
-def impl_md(filename, code):
+def impl_md(filename: str, code: str) -> str:
     return f'# {filename}.py\n\n```py\n{code}\n```\n'
 
 
 # --- Oracle phase: optimize_test_suite -------------------------------------
 
-def test_oracle_noop_at_level_zero():
+def test_oracle_noop_at_level_zero() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock()) as mock:
         out = asyncio.run(llm.optimize_test_suite(
             make_meta(), 'ORACLE', make_args(0), False))
@@ -55,7 +57,7 @@ def test_oracle_noop_at_level_zero():
     mock.assert_not_called()
 
 
-def test_oracle_converges_with_no_findings():
+def test_oracle_converges_with_no_findings() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[])), \
             patch.object(llm, '_run_editor', new=AsyncMock()) as editor:
         out = asyncio.run(llm.optimize_test_suite(
@@ -64,7 +66,7 @@ def test_oracle_converges_with_no_findings():
     editor.assert_not_called()
 
 
-def test_oracle_applies_editor_update():
+def test_oracle_applies_editor_update() -> None:
     new_oracle = '# example_test.py\n\n```py\nv2\n```\n'
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor',
@@ -75,7 +77,7 @@ def test_oracle_applies_editor_update():
     assert editor.call_count == 1
 
 
-def test_oracle_stops_on_editor_failure():
+def test_oracle_stops_on_editor_failure() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor', new=AsyncMock(return_value=(None, ''))):
         out = asyncio.run(llm.optimize_test_suite(
@@ -83,7 +85,7 @@ def test_oracle_stops_on_editor_failure():
     assert out == 'ORACLE'
 
 
-def test_oracle_converges_when_editor_returns_unchanged():
+def test_oracle_converges_when_editor_returns_unchanged() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor',
                          new=AsyncMock(return_value=('ORACLE', 'preamble'))):
@@ -105,14 +107,14 @@ ORACLE = (
 )
 
 
-def _impl_env(good_code=GOOD):
+def _impl_env(good_code: str = GOOD) -> tuple[str, list[str]]:
     d = tempfile.mkdtemp(prefix='marsha_opt_')
     write_file(f'{d}/example.py', good_code)
     write_file(f'{d}/example_test.py', ORACLE)
     return d, [f'{d}/example.py', f'{d}/example_test.py']
 
 
-def test_impl_guardrail_keeps_passing_improvement():
+def test_impl_guardrail_keeps_passing_improvement() -> None:
     d, files = _impl_env()
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor',
@@ -122,7 +124,7 @@ def test_impl_guardrail_keeps_passing_improvement():
     assert read_file(files[0]).strip() == BETTER.strip()
 
 
-def test_impl_guardrail_reverts_regression():
+def test_impl_guardrail_reverts_regression() -> None:
     d, files = _impl_env()
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor',
@@ -133,7 +135,7 @@ def test_impl_guardrail_reverts_regression():
     assert read_file(files[0]) == GOOD
 
 
-def test_impl_noop_at_level_zero():
+def test_impl_noop_at_level_zero() -> None:
     d, files = _impl_env()
     with patch.object(llm, 'run_personas', new=AsyncMock()) as mock:
         asyncio.run(llm.optimize_implementation(
@@ -142,7 +144,7 @@ def test_impl_noop_at_level_zero():
     assert read_file(files[0]) == GOOD
 
 
-def test_impl_converges_with_no_findings():
+def test_impl_converges_with_no_findings() -> None:
     d, files = _impl_env()
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[])), \
             patch.object(llm, '_run_editor', new=AsyncMock()) as editor:
@@ -152,11 +154,11 @@ def test_impl_converges_with_no_findings():
     assert read_file(files[0]) == GOOD
 
 
-def test_impl_generation_normalizes_single_result_for_n1():
+def test_impl_generation_normalizes_single_result_for_n1() -> None:
     # run() returns a bare string for a single result; gpt_implementation must treat it as one doc.
-    async def scenario():
+    async def scenario() -> list[str]:
         class FakeMapper:
-            async def run(self, req):
+            async def run(self, req: Any) -> str:
                 return '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
         with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
             return await llm.gpt_implementation(make_meta(), 'ORACLE', n_results=1, debug=False)
@@ -167,7 +169,7 @@ def test_impl_generation_normalizes_single_result_for_n1():
 
 # --- Correction phase: validate_test_correction ----------------------------
 
-def test_correction_converges_with_no_findings():
+def test_correction_converges_with_no_findings() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[])), \
             patch.object(llm, '_run_editor', new=AsyncMock()) as editor:
         out = asyncio.run(llm.validate_test_correction(
@@ -176,7 +178,7 @@ def test_correction_converges_with_no_findings():
     editor.assert_not_called()
 
 
-def test_correction_applies_editor_revision():
+def test_correction_applies_editor_revision() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor',
                          new=AsyncMock(return_value=('REVISED', 'p'))):
@@ -185,7 +187,7 @@ def test_correction_applies_editor_revision():
     assert out == 'REVISED'
 
 
-def test_correction_keeps_on_editor_failure():
+def test_correction_keeps_on_editor_failure() -> None:
     with patch.object(llm, 'run_personas', new=AsyncMock(return_value=[finding()])), \
             patch.object(llm, '_run_editor', new=AsyncMock(return_value=(None, ''))):
         out = asyncio.run(llm.validate_test_correction(
