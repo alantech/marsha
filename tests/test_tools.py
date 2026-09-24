@@ -164,7 +164,7 @@ def test_execute_handler_exception_is_error_text() -> None:
 # The command names, by category, for the (only) wired target: python. The
 # language-agnostic set is shared by every target; the registry + installed-env
 # sets are python-specific and layered on by the backend.
-AGNOSTIC = {'web-search', 'view-web-page', 'calc'}
+AGNOSTIC = {'web-search', 'view-web-page', 'calc', 'list-tree', 'summarize', 'find-in-file'}
 PY_REGISTRY = {'search-dependencies', 'dependency-docs'}
 ENV = {'list-dependencies', 'show-dependency', 'list-symbols', 'show-symbol'}
 
@@ -213,6 +213,8 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_INSTALLED_ENV} == ENV
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_GIT} == {'git'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
+        == {'list-tree', 'summarize', 'find-in-file'}
 
 
 def test_tool_instructions_lists_phase_tools() -> None:
@@ -1077,6 +1079,122 @@ def test_impl_stage_without_tools_keeps_single_call_fanout() -> None:
     assert seen[0].kwargs.get('n_results') == 3
     assert 'web-search' not in seen[0].system
     assert isinstance(seen[0].requests[0], str)
+
+
+# --- read/exploration tools: sandbox, list-tree, summarize, find-in-file ----------
+
+
+class _SummMapper:
+    # A stand-in for the helper-model mapper the read tools build; records what it was asked.
+    def __init__(self, system: Any, **kw: Any) -> None:
+        self.system = system
+        self.kw = kw
+        self.req: Any = None
+
+    async def run(self, req: Any) -> Any:
+        self.req = req
+        return 'SUMMARY TEXT'
+
+
+def test_resolve_in_workdir_sandbox(tmp_path: Any) -> None:
+    root = str(tmp_path)
+    (tmp_path / 'sub').mkdir()
+    (tmp_path / 'sub' / 'a.md').write_text('x')
+    assert tools._resolve_in_workdir(root, '') == os.path.realpath(root)
+    assert tools._resolve_in_workdir(root, '.') == os.path.realpath(root)
+    assert tools._resolve_in_workdir(root, 'sub/a.md') == \
+        os.path.realpath(str(tmp_path / 'sub' / 'a.md'))
+    for bad in ('../outside', 'sub/../../outside', '~/secret', '/etc/passwd'):
+        assert tools._resolve_in_workdir(root, bad) is None, bad
+
+
+def test_list_tree_lists_and_filters(tmp_path: Any) -> None:
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs' / 'a.md').write_text('x')
+    (tmp_path / 'docs' / 'b.txt').write_text('x')
+    (tmp_path / 'main.py').write_text('x')
+    (tmp_path / '.hidden').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree(['docs'], ctx))
+    assert 'a.md' in out and 'b.txt' in out and 'main.py' not in out
+    out2 = asyncio.run(tools.list_tree(['docs', '--ext', 'md'], ctx))
+    assert 'a.md' in out2 and 'b.txt' not in out2
+    out3 = asyncio.run(tools.list_tree([], ctx))
+    assert 'main.py' in out3 and '.hidden' not in out3
+
+
+def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    assert asyncio.run(tools.list_tree(['../..'], ctx)).startswith('error:')
+    assert 'no working directory' in asyncio.run(
+        tools.list_tree([], tools.ToolContext('review')))
+
+
+def test_summarize_file_uses_helper_model(tmp_path: Any) -> None:
+    (tmp_path / 'notes.md').write_text('# Notes\nthe body\n')
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.summarize(
+            ['notes.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert out.startswith('Summary of notes.md')
+    assert 'SUMMARY TEXT' in out
+    assert '# Notes' in seen['m'].req
+    assert seen['m'].kw.get('label') == 'read:summarize'
+
+
+def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
+    (tmp_path / 'd').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    esc = asyncio.run(tools.summarize(['../secret.md'], ctx))
+    assert esc.startswith('error:') and 'escapes the working tree' in esc
+    assert 'not a file' in asyncio.run(tools.summarize(['d'], ctx))
+
+
+def test_find_in_file_uses_helper_model(tmp_path: Any) -> None:
+    (tmp_path / 'docs.md').write_text('line one\nthe crash cause\nline three\n')
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(
+            ['crash cause', 'docs.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert out.startswith('Relevant parts of docs.md for: crash cause')
+    assert 'SUMMARY TEXT' in out
+    assert 'the crash cause' in seen['m'].req
+    assert seen['m'].kw.get('label') == 'read:find-in-file'
+
+
+def test_find_in_file_reports_no_relevant_content(tmp_path: Any) -> None:
+    (tmp_path / 'docs.md').write_text('x\n')
+
+    class NoRel:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            return 'NO RELEVANT CONTENT'
+
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: NoRel(system, **kw)):
+        out = asyncio.run(tools.find_in_file(
+            ['zebra', 'docs.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert 'No content in docs.md is relevant to: zebra' in out
+
+
+def test_read_tools_available_in_every_phase() -> None:
+    b = backends.current()
+    for phase in ('gen', 'oracle-opt', 'impl-opt', 'correction'):
+        cmds = tools.build_commands(tools.ToolContext(phase, backend=b))
+        assert {'list-tree', 'summarize', 'find-in-file'} <= set(cmds), phase
+    review = set(tools.build_commands(tools.ToolContext('review')))
+    assert {'git', 'notes', 'list-tree', 'summarize', 'find-in-file'} <= review
 
 
 # --- persona / editor tool threading -------------------------------------------------

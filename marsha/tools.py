@@ -76,6 +76,20 @@ PAGE_CHAR_LIMIT = 12_000
 # enough that a handful of full files stays well within the compaction budget.
 GIT_RESULT_CHAR_LIMIT = 48_000
 
+# Bounds for the LLM-backed read tools (list-tree / summarize / find-in-file). The input handed
+# to a helper model is capped so one large document cannot outgrow its context window; the output
+# is capped with a modest max_tokens so these auxiliary calls stay cheap.
+READ_INPUT_CHAR_LIMIT = 200_000
+SUMMARY_MAX_TOKENS = 1_024
+SEARCH_MAX_TOKENS = 2_048
+# Directories a `list-tree` walk skips (VCS metadata and dependency/build trees), so the listing
+# stays focused on the project's own files and bounded.
+LIST_TREE_SKIP_DIRS = {
+    '.git', '.hg', '.svn', 'venv', '.venv', 'node_modules', '__pycache__',
+    '.pytest_cache', '.mypy_cache', 'dist', 'build',
+}
+LIST_TREE_MAX_ENTRIES = 2_000
+
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
 # recursion into an error.
@@ -106,14 +120,20 @@ CATEGORY_INSTALLED_ENV = 'installed-env'
 # the repository) and a per-reviewer notes scratchpad (survives compaction).
 CATEGORY_GIT = 'git'
 CATEGORY_NOTES = 'notes'
+# Read/exploration tools shared by every phase and persona: list the working tree, and read a
+# file (or a web page) through a helper model (summarize / find-in-file). Unlike the git tool
+# they can read files that are NOT committed (e.g. a git-ignored CLAUDE.local.md), so every file
+# they read is sandboxed to the local working tree.
+CATEGORY_READ = 'read'
 
-_BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB, CATEGORY_COMPUTATION}
+_BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB,
+                    CATEGORY_COMPUTATION, CATEGORY_READ}
 PHASE_CATEGORIES = {
     'gen': _BASE_CATEGORIES,
     'oracle-opt': _BASE_CATEGORIES,
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
-    'review': {CATEGORY_GIT, CATEGORY_NOTES},
+    'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
@@ -941,6 +961,202 @@ async def notes(args: list[str], ctx: ToolContext | None = None) -> str:
     return f'error: unknown notes command `{cmd}` (use `notes add <text>` or `notes show`)'
 
 
+# --- read/exploration tools: list the tree, and read a file via a helper model ---
+
+
+def _resolve_in_workdir(workdir: str, requested: str) -> str | None:
+    # Resolve `requested` (a path relative to the local working tree) to an absolute path and
+    # verify it stays inside the workdir, or return None. These read tools can read files that are
+    # NOT committed (e.g. a git-ignored CLAUDE.local.md), so the sandbox is the local working
+    # tree, not the committed tree — but any path that escapes it is rejected, never resolved:
+    # a home-relative (~) or absolute path, a `..` that climbs out, or a symlink that points out.
+    root = os.path.realpath(workdir)
+    if requested.startswith('~') or os.path.isabs(requested):
+        return None
+    candidate = os.path.realpath(os.path.join(root, requested))
+    if candidate != root and not candidate.startswith(root + os.sep):
+        return None
+    return candidate
+
+
+def _parse_exts(value: str) -> set[str]:
+    # A comma-separated extension filter (md,txt or .md,.txt) into a set of dotted, lowercase
+    # extensions (`.md`, `.txt`) for comparison against os.path.splitext.
+    out: set[str] = set()
+    for part in value.split(','):
+        p = part.strip().lower()
+        if p:
+            out.add(p if p.startswith('.') else '.' + p)
+    return out
+
+
+def _matches_ext(filename: str, exts: set[str]) -> bool:
+    return os.path.splitext(filename.lower())[1] in exts
+
+
+async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
+    """`list-tree [path] [--ext a,b,c]` — list the files in the working tree under a path
+    (default: the root), optionally filtered to file types by extension. Read-only and sandboxed
+    to the local working tree, so it can surface files the git tool cannot (untracked or
+    git-ignored ones, e.g. a CLAUDE.local.md)."""
+    path = '.'
+    exts: set[str] = set()
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--ext':
+            if i + 1 >= len(args):
+                return 'error: --ext needs a value, e.g. $ list-tree docs --ext md,txt'
+            exts |= _parse_exts(args[i + 1])
+            i += 2
+        elif a.startswith('--ext='):
+            exts |= _parse_exts(a.split('=', 1)[1])
+            i += 1
+        else:
+            path = a
+            i += 1
+    has_ext = bool(exts)
+    workdir = ctx.workdir if ctx is not None else None
+    if not workdir or not os.path.isdir(workdir):
+        return 'error: list-tree has no working directory (not run in a repository).'
+    start = _resolve_in_workdir(workdir, path)
+    if start is None:
+        return f'error: path `{path}` escapes the working tree and is not allowed.'
+    if not os.path.isdir(start):
+        return f'error: `{path}` is not a directory in the working tree.'
+    root = os.path.realpath(workdir)
+    entries: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(start):
+        # Prune skipped and hidden directories in place so os.walk does not descend into them.
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in LIST_TREE_SKIP_DIRS and not d.startswith('.'))
+        for fn in sorted(filenames):
+            if fn.startswith('.') or (has_ext and not _matches_ext(fn, exts)):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), root)
+            entries.append(rel)
+            if len(entries) >= LIST_TREE_MAX_ENTRIES:
+                break
+        if len(entries) >= LIST_TREE_MAX_ENTRIES:
+            break
+    if not entries:
+        scope = ' (no match for the extension filter)' if has_ext else ''
+        return f'(no files under {path!r} to list{scope})'
+    rel_start = os.path.relpath(start, root) or '.'
+    note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]' \
+        if len(entries) >= LIST_TREE_MAX_ENTRIES else ''
+    return f'{len(entries)} file(s) under {rel_start}:\n' + '\n'.join(entries) + note
+
+
+_SUMMARIZE_PROMPT = '''You summarize a document into 1-3 short paragraphs. Capture what it is, the concrete points or facts it states, and anything that reads as a warning, lesson, or known problem. Be faithful to the source: do not add, infer, or editorialize beyond what it says. Output only the summary, with no preamble.
+'''
+
+
+_FIND_IN_FILE_PROMPT = '''You pull out the parts of a document that are relevant to a query. The document is numbered one integer per line. Return only the verbatim lines that address the query, grouped into excerpts; before each excerpt write its line range as `lines <lo>-<hi>` (a single line is `lines <n>`). Preserve the text exactly as written, without the line-number prefixes, and without paraphrasing. If nothing in the document addresses the query, respond with exactly: NO RELEVANT CONTENT. Add no commentary beyond the excerpts and their line ranges.
+'''
+
+
+async def _summarize_source(source: str, text: str) -> str:
+    # The shared helper-model call for summarize / find-in-file: a bounded one-shot (a small
+    # max_tokens and low reasoning effort), so an auxiliary read stays cheap. Returns the raw
+    # model output, or '' when the call could not be run (the caller decides how to report it).
+    try:
+        mapper = get_mapper(_SUMMARIZE_PROMPT, n_results=1, max_tokens=SUMMARY_MAX_TOKENS,
+                            reasoning_effort='low', label='read:summarize')
+        return (await mapper.run(text)) or ''
+    except Exception:
+        return ''
+
+
+async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
+    """`summarize <file-or-url>` — summarize a file in the working tree (or a web page) into
+    1-3 paragraphs using a helper model, so you can scan a large document without reading it
+    whole. Files are sandboxed to the local working tree; URLs are SSRF-guarded."""
+    if len(args) != 1:
+        return ('error: summarize takes one argument, a file path in the working tree or a URL, '
+                'e.g. $ summarize docs/NOTES.md')
+    target = args[0].strip()
+    if re.match(r'^https?://\S+$', target):
+        try:
+            assert_public_url(target)
+        except Exception as e:
+            return f'error: {e}'
+        try:
+            _status, ctype, body = await http_get(target)
+        except Exception as e:
+            return f'error: failed to fetch {target}: {e}'
+        doc = body.decode('utf-8', 'replace')
+        head = doc.lstrip()[:512].lower()
+        if 'html' in ctype.lower() or head.startswith('<!doctype html') or '<html' in head:
+            text = html_to_text(doc)
+        else:
+            text = re.sub(r'[ \t]+', ' ', doc).strip()
+        truncated = len(body) >= MAX_HTTP_BYTES
+    else:
+        workdir = ctx.workdir if ctx is not None else None
+        if not workdir or not os.path.isdir(workdir):
+            return 'error: summarize has no working directory (not run in a repository).'
+        resolved = _resolve_in_workdir(workdir, target)
+        if resolved is None:
+            return f'error: path `{target}` escapes the working tree and is not allowed.'
+        if not os.path.isfile(resolved):
+            return f'error: `{target}` is not a file in the working tree.'
+        try:
+            truncated = os.path.getsize(resolved) > READ_INPUT_CHAR_LIMIT
+            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+                text = f.read(READ_INPUT_CHAR_LIMIT)
+        except Exception as e:
+            return f'error: could not read {target}: {e}'
+    text = text.strip()
+    if not text:
+        return f'error: {target} returned no readable text.'
+    summary = (await _summarize_source(
+        target, f'# Source: {target}\n\n{text}')).strip()
+    if not summary:
+        return 'error: summarize could not be run (the helper model returned nothing).'
+    note = '\n[the source was truncated before summarizing]' if truncated else ''
+    return f'Summary of {target} (1-3 paragraphs):{note}\n\n{summary}'
+
+
+async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
+    """`find-in-file "<what you need>" <file>` — use a helper model to pull the parts of a file
+    in the working tree that are relevant to a query, with their line ranges, instead of reading
+    the whole file. The file is sandboxed to the local working tree."""
+    if len(args) < 2:
+        return ('error: find-in-file needs a query and a file path, e.g. '
+                '$ find-in-file "known failure modes" docs/NOTES.md')
+    path = args[-1].strip()
+    query = ' '.join(args[:-1]).strip()
+    if not query:
+        return 'error: find-in-file needs a non-empty query before the file path.'
+    workdir = ctx.workdir if ctx is not None else None
+    if not workdir or not os.path.isdir(workdir):
+        return 'error: find-in-file has no working directory (not run in a repository).'
+    resolved = _resolve_in_workdir(workdir, path)
+    if resolved is None:
+        return f'error: path `{path}` escapes the working tree and is not allowed.'
+    if not os.path.isfile(resolved):
+        return f'error: `{path}` is not a file in the working tree.'
+    try:
+        with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read(READ_INPUT_CHAR_LIMIT)
+    except Exception as e:
+        return f'error: could not read {path}: {e}'
+    numbered = '\n'.join(f'{n}: {ln}' for n,
+                         ln in enumerate(text.split('\n'), 1))
+    try:
+        mapper = get_mapper(_FIND_IN_FILE_PROMPT, n_results=1, max_tokens=SEARCH_MAX_TOKENS,
+                            reasoning_effort='low', label='read:find-in-file')
+        result = (await mapper.run(
+            f'# Query\n{query}\n\n# File: {path}\n\n{numbered}')) or ''
+    except Exception:
+        return 'error: find-in-file could not be run (the helper model failed).'
+    result = result.strip()
+    if not result or result.upper() == 'NO RELEVANT CONTENT':
+        return f'No content in {path} is relevant to: {query}'
+    return f'Relevant parts of {path} for: {query}\n\n{result}'
+
+
 # --- the command set: agnostic base, layered per target -------------------------
 
 
@@ -983,6 +1199,24 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                              'a per-reviewer scratchpad: `notes add` records a note (survives '
                              'compaction), `notes show` lists the notes so far',
                              lambda args, _c=ctx: notes(args, _c)),
+        'list-tree': ToolCommand('list-tree', CATEGORY_READ,
+                                 '$ list-tree [path] [--ext md,txt]',
+                                 'list the files in the working tree under a path (default: the '
+                                 'root), optionally filtered by extension; read-only and sandboxed '
+                                 'to the working tree (surfaces untracked / git-ignored files too)',
+                                 lambda args, _c=ctx: list_tree(args, _c)),
+        'summarize': ToolCommand('summarize', CATEGORY_READ,
+                                 '$ summarize <file-or-url>',
+                                 'summarize a file in the working tree (or a web page) into 1-3 '
+                                 'paragraphs with a helper model, to scan a large document without '
+                                 'reading it whole',
+                                 lambda args, _c=ctx: summarize(args, _c)),
+        'find-in-file': ToolCommand('find-in-file', CATEGORY_READ,
+                                    '$ find-in-file "<what you need>" <file>',
+                                    'use a helper model to pull the parts of a file in the working '
+                                    'tree relevant to a query, with their line ranges, instead of '
+                                    'reading the whole file',
+                                    lambda args, _c=ctx: find_in_file(args, _c)),
     }
 
 
