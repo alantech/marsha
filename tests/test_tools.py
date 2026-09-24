@@ -1273,6 +1273,26 @@ def test_list_tree_bounds_result_chars(tmp_path: Any) -> None:
     assert 'result limit' in out
 
 
+def test_list_tree_distinguishes_complete_cap_listing(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # Hitting the entry cap without a dropped entry is not proof of truncation:
+    # exactly N matching files are listed in full; a dropped file or an unvisited
+    # directory says the listing stopped.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_ENTRIES', 3)
+    for i in range(3):
+        (tmp_path / f'f{i}.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'truncated' not in out and 'limited to 3' not in out
+    (tmp_path / 'f3.txt').write_text('x')  # a fourth file: one was dropped
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'truncated at 3 entries' in out
+    (tmp_path / 'f3.txt').unlink()
+    (tmp_path / 'empty').mkdir()  # an unvisited directory: more may exist
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'may have more' in out
+
+
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     assert asyncio.run(tools.list_tree(['../..'], ctx)).startswith('error:')
@@ -1303,6 +1323,28 @@ def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
     esc = asyncio.run(tools.summarize(['../secret.md'], ctx))
     assert esc.startswith('error:') and 'escapes the working tree' in esc
     assert 'not a file' in asyncio.run(tools.summarize(['d'], ctx))
+
+
+def test_summarize_rejects_swapped_symlink(tmp_path: Any, monkeypatch: Any) -> None:
+    # The check-then-open is a race: between the containment check and the open, the
+    # file can be swapped for an outside-pointing symlink. The open must re-verify
+    # containment on the descriptor and refuse such a swap.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'doc.md').write_text('x')
+    secret = tmp_path / 'secret.md'
+    secret.write_text('secret')
+    orig_resolve = tools._resolve_in_workdir
+
+    def swapping(workdir: Any, requested: Any) -> Any:
+        resolved = orig_resolve(workdir, requested)
+        os.replace(tree / 'doc.md', tree / 'gone.md')
+        os.symlink(secret, tree / 'doc.md')
+        return resolved
+    monkeypatch.setattr(tools, '_resolve_in_workdir', swapping)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.summarize(['doc.md'], ctx))
+    assert out.startswith('error:') and 'working tree' in out
 
 
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
@@ -1348,6 +1390,38 @@ def test_summarize_refuses_oversized_header(monkeypatch: Any) -> None:
     out = asyncio.run(tools.summarize(
         ['https://public.example.com/' + 'a' * 40], None))
     assert out.startswith('error:') and 'too large' in out
+
+
+def test_summarize_exact_size_body_not_falsely_truncated(monkeypatch: Any) -> None:
+    # http_get reads one byte past the cap, so a body of exactly MAX_HTTP_BYTES is a
+    # complete response (no false truncation warning); one byte more is clipped.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 2_000_000)
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+
+    async def exact(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', b'a' * tools.MAX_HTTP_BYTES
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=exact), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(
+            tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' not in out
+
+    async def clipped(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', b'a' * (tools.MAX_HTTP_BYTES + 1)
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=clipped), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(
+            tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' in out
 
 
 def test_summarize_reports_helper_failure(tmp_path: Any) -> None:

@@ -460,8 +460,10 @@ def _build_pinned_opener() -> urllib.request.OpenerDirector:
 
 async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """GET a URL off the event loop and return (status, content_type, body).
-    The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
-    memory before the text limits are applied.
+    The body is capped at MAX_HTTP_BYTES + 1: the extra byte lets the caller
+    tell whether a body of exactly MAX_HTTP_BYTES was clipped (a complete
+    response of exactly that size must not be reported as truncated), while a
+    runaway page still cannot exhaust memory before the text limits apply.
 
     SSRF guard (three layers): the initial URL is asserted here; every
     redirect hop is asserted by _SafeRedirectHandler before the opener
@@ -480,7 +482,10 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
         with _build_pinned_opener().open(req, timeout=timeout) as resp:
             # Belt and braces on top of the per-hop checks in _SafeRedirectHandler.
             assert_public_url(resp.geturl())
-            return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
+            # Read one byte past the cap: a body of exactly MAX_HTTP_BYTES is
+            # either complete or clipped, and only the extra byte tells which.
+            data = resp.read(MAX_HTTP_BYTES + 1)
+            return resp.status, resp.headers.get('Content-Type', ''), data
     return await asyncio.to_thread(get)
 
 
@@ -1109,6 +1114,24 @@ def _resolve_in_workdir(workdir: str, requested: str) -> str | None:
     return candidate
 
 
+def _open_workdir_file(workdir: str, resolved: str) -> Any:
+    # Open a file checked to be inside the tree, and re-verify the opened file:
+    # the check-then-open is a race: the file, or an ancestor directory, can be
+    # swapped for an outside-pointing symlink in between, so containment is
+    # checked on the descriptor after the open, when it is too late to swap.
+    root = os.path.realpath(workdir)
+    fd = os.open(resolved, os.O_RDONLY)
+    try:
+        target = os.readlink(f'/proc/self/fd/{fd}')
+    except OSError:
+        os.close(fd)
+        raise
+    if target != root and not target.startswith(root + os.sep):
+        os.close(fd)
+        raise OSError('swapped outside the working tree after the check')
+    return os.fdopen(fd, 'r', encoding='utf-8', errors='replace')
+
+
 def _parse_exts(value: str) -> set[str]:
     # A comma-separated extension filter (md,txt or .md,.txt) into a set of dotted, lowercase
     # extensions (`.md`, `.txt`) for comparison against os.path.splitext.
@@ -1124,18 +1147,13 @@ def _matches_ext(filename: str, exts: set[str]) -> bool:
     return os.path.splitext(filename.lower())[1] in exts
 
 
-def _list_tree_note(entry_capped: bool, char_capped: bool,
-                    dirs_truncated: bool) -> str:
-    # Listing note by reason (first match wins): entry cap, char cap, or traversal limit.
-    if entry_capped:
-        return f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
+def _list_tree_note(trunc_note: str, char_capped: bool) -> str:
+    # The char cap is applied last (it trims the finished listing), so it wins over the
+    # traversal note computed during the walk.
     if char_capped:
         return ('\n[listing truncated at the '
                 f'{RESULT_CHAR_LIMIT}-char result limit]')
-    if dirs_truncated:
-        return (f'\n[listing incomplete: traversal limited to {LIST_TREE_MAX_DIRS} '
-                f'directories and {LIST_TREE_MAX_NAMES_PER_DIR} entries per directory]')
-    return ''
+    return trunc_note
 
 
 async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
@@ -1175,6 +1193,8 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     listing_len = 0  # sum of len(entry) + 1 per entry (the joining newlines)
     dirs_visited = 0
     dirs_truncated = False
+    entry_capped = False  # a matching entry was dropped: definitely truncated
+    entry_incomplete = False  # cap hit with unvisited structure: more may exist
 
     # A manual walk with a bounded pass per directory: the number of directories visited is
     # bounded (LIST_TREE_MAX_DIRS) and each directory is scanned for at most
@@ -1190,6 +1210,9 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             break
         room = LIST_TREE_MAX_ENTRIES - len(entries)
         if room <= 0:
+            # The cap was hit before this directory was scanned: it (and any pending
+            # directory) may hold more matching files, but no entry was dropped.
+            entry_incomplete = True
             break
         remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
         # One bounded pass over the directory's entries: kept subdirectories (the skipped dirs
@@ -1236,11 +1259,18 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             dirs_truncated = True
         # Push full paths in reverse so the first is popped next (os.walk's order).
         stack.extend(reversed([os.path.join(dirpath, d) for d in to_visit]))
+        if len(file_names) > room:
+            # A matching file that did not fit: the listing is definitely truncated.
+            entry_capped = True
         for fn in sorted(file_names)[:room]:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
             listing_len += len(rel) + 1
         if len(entries) >= LIST_TREE_MAX_ENTRIES:
+            if stack:
+                # Queued subdirectories were never visited: they may hold more matching
+                # files, but no entry was dropped.
+                entry_incomplete = True
             break
     # Bound the result by characters as well as by entry count: many long paths can push the
     # listing far past the shared tool-result budget, and one oversized result would bloat the
@@ -1248,17 +1278,25 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     # listing plus its note fits RESULT_CHAR_LIMIT (a single path always fits: a path is at
     # most PATH_MAX long, well under the budget).
     rel_start = os.path.relpath(start, root) or '.'
+    if entry_capped:
+        trunc_note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
+    elif entry_incomplete:
+        trunc_note = (f'\n[listing limited to {LIST_TREE_MAX_ENTRIES} entries; '
+                      'the tree may have more]')
+    elif dirs_truncated:
+        trunc_note = (f'\n[listing incomplete: traversal limited to {LIST_TREE_MAX_DIRS} '
+                      f'directories and {LIST_TREE_MAX_NAMES_PER_DIR} entries per directory]')
+    else:
+        trunc_note = ''
     chars_truncated = False
     while len(entries) > 1:
         header = f'{len(entries)} file(s) under {rel_start}:\n'
-        note = _list_tree_note(len(entries) >= LIST_TREE_MAX_ENTRIES,
-                               chars_truncated, dirs_truncated)
+        note = _list_tree_note(trunc_note, chars_truncated)
         if len(header) + listing_len - 1 + len(note) <= RESULT_CHAR_LIMIT:
             break
         listing_len -= len(entries.pop()) + 1
         chars_truncated = True
-    note = _list_tree_note(len(entries) >= LIST_TREE_MAX_ENTRIES,
-                           chars_truncated, dirs_truncated)
+    note = _list_tree_note(trunc_note, chars_truncated)
     if not entries:
         scope = ' (no match for the extension filter)' if has_ext else ''
         return f'(no files under {path!r} to list{scope}){note}'
@@ -1297,6 +1335,11 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     header = f'# Source: {target}\n\n'
     if len(header) >= READ_INPUT_CHAR_LIMIT:
         return 'error: the source URL or path is too large for the input cap.'
+    # The target is echoed into user-visible messages: echo only a bounded prefix, or a
+    # ~200k-char target would make the tool result far exceed the shared result budget.
+    shown = target
+    if len(target) > 200:
+        shown = target[:197] + '…[target truncated]'
     if re.match(r'^https?://\S+$', target):
         try:
             assert_public_url(target)
@@ -1305,14 +1348,16 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         try:
             _status, ctype, body = await http_get(target)
         except Exception as e:
-            return f'error: failed to fetch {target}: {e}'
+            return f'error: failed to fetch {shown}: {e}'
         doc = body.decode('utf-8', 'replace')
         head = doc.lstrip()[:512].lower()
         if 'html' in ctype.lower() or head.startswith('<!doctype html') or '<html' in head:
             text = html_to_text(doc)
         else:
             text = re.sub(r'[ \t]+', ' ', doc).strip()
-        truncated = len(body) >= MAX_HTTP_BYTES
+        # One extra byte was read past the cap, so exactly MAX_HTTP_BYTES means a
+        # complete response, not a clipped one.
+        truncated = len(body) > MAX_HTTP_BYTES
         # Clip to the helper input cap like the file path does: a fetched page can be up to
         # MAX_HTTP_BYTES, far beyond READ_INPUT_CHAR_LIMIT, and must not reach the helper model
         # unclipped.
@@ -1331,17 +1376,18 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         try:
             # Read one character past the cap so truncation is judged by the characters actually
             # read, not the byte size (a multibyte file can exceed the byte cap while its
-            # character count still fits, and must then be reported as fully read).
-            with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+            # character count still fits, and must then be reported as fully read). The open
+            # re-verifies containment on the descriptor (the check-then-open race).
+            with _open_workdir_file(workdir, resolved) as f:
                 text = f.read(READ_INPUT_CHAR_LIMIT + 1)
             truncated = len(text) > READ_INPUT_CHAR_LIMIT
             if truncated:
                 text = text[:READ_INPUT_CHAR_LIMIT]
         except Exception as e:
-            return f'error: could not read {target}: {e}'
+            return f'error: could not read {shown}: {e}'
     text = text.strip()
     if not text:
-        return f'error: {target} returned no readable text.'
+        return f'error: {shown} returned no readable text.'
     # Clip the text until the full request (header + text) fits the cap, not just the text.
     if len(header) + len(text) > READ_INPUT_CHAR_LIMIT:
         text = text[:READ_INPUT_CHAR_LIMIT - len(header)]
@@ -1353,7 +1399,7 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     if not summary:
         return 'error: summarize could not be run (the helper model returned nothing).'
     note = '\n[the source was truncated before summarizing]' if truncated else ''
-    return f'Summary of {target} (1-3 paragraphs):{note}\n\n{summary}'
+    return f'Summary of {shown} (1-3 paragraphs):{note}\n\n{summary}'
 
 
 async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
@@ -1384,8 +1430,9 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     try:
         # Read one character past the cap so truncation is judged by the characters actually
         # read, not the byte size (a multibyte file can exceed the byte cap while its character
-        # count still fits, and must then be reported as fully read).
-        with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+        # count still fits, and must then be reported as fully read). The open
+        # re-verifies containment on the descriptor (the check-then-open race).
+        with _open_workdir_file(workdir, resolved) as f:
             text = f.read(READ_INPUT_CHAR_LIMIT + 1)
         truncated = len(text) > READ_INPUT_CHAR_LIMIT
         if truncated:
