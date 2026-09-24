@@ -1261,10 +1261,11 @@ def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
 
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
                                                    monkeypatch: Any) -> None:
-    # Same byte-vs-character rule as find-in-file: 11 two-byte characters are 22 bytes (> the
-    # 20-char cap in bytes) but only 11 characters (<= the cap), so the whole file is read.
-    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 20)
-    (tmp_path / 'uni.md').write_text('é' * 11)
+    # Same byte-vs-character rule as find-in-file: 21 two-byte characters are 42 bytes (more
+    # than the 40-char cap, in bytes) but only 21 characters (within the cap), so the whole
+    # file is read.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
+    (tmp_path / 'uni.md').write_text('é' * 21)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out = asyncio.run(tools.summarize(['uni.md'], ctx))
@@ -1290,8 +1291,17 @@ def test_summarize_url_clips_text_to_input_cap(monkeypatch: Any) -> None:
          patch.object(tools, 'get_mapper', new=make):
         out = asyncio.run(tools.summarize(['https://public.example.com/doc'], None))
     assert 'truncated' in out
-    text = seen['m'].req.rsplit('\n\n', 1)[1]
-    assert len(text) <= 50
+    # The full request (header + text), not just the text, must stay within the cap.
+    assert len(seen['m'].req) <= 50
+
+
+def test_summarize_refuses_oversized_header(monkeypatch: Any) -> None:
+    # The header carries the target, so a URL that alone cannot fit the cap is refused before
+    # any fetch is attempted.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 30)
+    out = asyncio.run(tools.summarize(
+        ['https://public.example.com/' + 'a' * 40], None))
+    assert out.startswith('error:') and 'too large' in out
 
 
 def test_summarize_reports_helper_failure(tmp_path: Any) -> None:
@@ -1347,8 +1357,9 @@ def test_find_in_file_reports_no_relevant_content(tmp_path: Any) -> None:
 def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> None:
     # A file longer than the read cap is only partially searched, so "no relevant content" must
     # not be presented as definitive (the relevant passage may lie past the cap).
-    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 8)
-    (tmp_path / 'big.md').write_text('a line of text longer than the cap\n')
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
+    (tmp_path / 'big.md').write_text(
+        'a line of text that is longer than the read cap for sure\n')
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
 
     class NoRel:
@@ -1363,15 +1374,15 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     assert 'was not searched' in out
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
-    assert 'only the first 8 chars of big.md were searched' in out2
+    assert 'only the first 40 chars of big.md were searched' in out2
 
 
 def test_find_in_file_multibyte_not_falsely_truncated(tmp_path: Any,
                                                       monkeypatch: Any) -> None:
     # Truncation must be judged by the characters actually read, not the byte size: a multibyte
     # file whose bytes exceed the cap but whose characters do not is searched in full.
-    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 20)
-    (tmp_path / 'uni.md').write_text('é' * 11)  # 11 characters, 22 UTF-8 bytes
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
+    (tmp_path / 'uni.md').write_text('é' * 21)  # 21 chars, 42 UTF-8 bytes
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out = asyncio.run(tools.find_in_file(['q', 'uni.md'], ctx))
@@ -1409,11 +1420,32 @@ def test_find_in_file_bounds_numbered_prompt(tmp_path: Any, monkeypatch: Any) ->
         return m
     with patch.object(tools, 'get_mapper', new=make):
         out = asyncio.run(tools.find_in_file(['q', 'dense.md'], ctx))
-    numbered = seen['m'].req.rsplit('\n\n', 1)[1]
-    assert len(numbered) <= 60
-    # 11 one-char lines fit the numbered cap (11 chars + 10 newlines = 21 source chars), so the
-    # note must say 21, not the 60-char cap.
-    assert 'only the first 21 chars of dense.md were searched' in out
+    # The full request (header + numbered document), not just the document, must stay within
+    # the cap.
+    assert len(seen['m'].req) <= 60
+    # 6 one-char lines fit the remaining budget (header 29 + numbered 29 = 58 <= 60), so the
+    # note must say 11, not the 60-char cap.
+    assert 'only the first 11 chars of dense.md were searched' in out
+
+
+def test_find_in_file_bounds_query_in_request(tmp_path: Any,
+                                              monkeypatch: Any) -> None:
+    # The header carries the (unbounded) query and path, so a query that alone cannot fit the
+    # cap is refused outright, and a long query trims the document to what still fits.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'd.md').write_text('x\n' * 10)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q' * 30, 'd.md'], ctx))
+    assert len(seen['m'].req) <= 60
+    out = asyncio.run(tools.find_in_file(['q' * 60, 'd.md'], ctx))
+    assert out.startswith('error:') and 'too large' in out
 
 
 def test_http_get_blocks_private_initial_url() -> None:

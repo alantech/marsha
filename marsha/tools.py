@@ -1264,6 +1264,11 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         return ('error: summarize takes one argument, a file path in the working tree or a URL, '
                 'e.g. $ summarize docs/NOTES.md')
     target = args[0].strip()
+    # Bound the WHOLE helper request, not just the text: the header carries the target (an
+    # unbounded URL or path), so refuse it before any fetch or read when it cannot fit.
+    header = f'# Source: {target}\n\n'
+    if len(header) >= READ_INPUT_CHAR_LIMIT:
+        return 'error: the source URL or path is too large for the input cap.'
     if re.match(r'^https?://\S+$', target):
         try:
             assert_public_url(target)
@@ -1309,9 +1314,13 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     text = text.strip()
     if not text:
         return f'error: {target} returned no readable text.'
+    # Clip the text until the full request (header + text) fits the cap, not just the text.
+    if len(header) + len(text) > READ_INPUT_CHAR_LIMIT:
+        text = text[:READ_INPUT_CHAR_LIMIT - len(header)]
+        truncated = True
     try:
         summary = (await _summarize_source(
-            target, f'# Source: {target}\n\n{text}')).strip()
+            target, header + text)).strip()
     except Exception as e:
         return f'error: summarize could not be run (the helper model failed: {e}).'
     if not summary:
@@ -1331,6 +1340,11 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     query = ' '.join(args[:-1]).strip()
     if not query:
         return 'error: find-in-file needs a non-empty query before the file path.'
+    # Bound the WHOLE helper request, not just the document: the header carries the query and
+    # path (unbounded user text), so refuse it before any read when it cannot fit.
+    header = f'# Query\n{query}\n\n# File: {path}\n\n'
+    if len(header) >= READ_INPUT_CHAR_LIMIT:
+        return 'error: the query and path are too large for the input cap.'
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: find-in-file has no working directory (not run in a repository).'
@@ -1354,22 +1368,36 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     # prefixes can grow a newline-dense file well past READ_INPUT_CHAR_LIMIT: trim the tail so
     # the numbered prompt itself stays within the cap (truncated is set, so the result says so).
     numbered_lines: list[str] = []
+    src_lines: list[str] = []
     numbered_len = 0  # len of '\n'.join(numbered_lines) so far
-    covered_chars = 0  # source characters in the lines included so far
     for n, ln in enumerate(text.split('\n'), 1):
         prefixed = f'{n}: {ln}'
         if numbered_lines and numbered_len + 1 + len(prefixed) > READ_INPUT_CHAR_LIMIT:
             truncated = True
             break
         numbered_len += len(prefixed) + (1 if numbered_lines else 0)
-        covered_chars += len(ln) + (1 if numbered_lines else 0)
         numbered_lines.append(prefixed)
+        src_lines.append(ln)
+    # Trim the numbered document until the full request fits the cap (at least one line is
+    # always kept: a single line cannot be split, and its overage is bounded by one line plus
+    # the header).
+    while len(numbered_lines) > 1:
+        if len(header) + numbered_len <= READ_INPUT_CHAR_LIMIT:
+            break
+        dropped = numbered_lines.pop()
+        src_lines.pop()
+        if numbered_lines:
+            numbered_len -= len(dropped) + 1
+        else:
+            numbered_len = 0
+        truncated = True
     numbered = '\n'.join(numbered_lines)
+    # The source characters actually searched: the included lines plus the newlines between them.
+    covered_chars = sum(len(s) for s in src_lines) + max(len(src_lines) - 1, 0)
     try:
         mapper = get_mapper(_FIND_IN_FILE_PROMPT, n_results=1, max_tokens=SEARCH_MAX_TOKENS,
                             reasoning_effort='low', label='read:find-in-file')
-        result = (await mapper.run(
-            f'# Query\n{query}\n\n# File: {path}\n\n{numbered}')) or ''
+        result = (await mapper.run(header + numbered)) or ''
     except Exception as e:
         return f'error: find-in-file could not be run (the helper model failed: {e}).'
     result = result.strip()
