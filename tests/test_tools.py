@@ -1148,7 +1148,34 @@ def test_list_tree_bounds_traversal(tmp_path: Any, monkeypatch: Any) -> None:
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     out = asyncio.run(tools.list_tree([], ctx))
     assert 'no files under' in out
-    assert 'directory traversal was limited to 5 directories' in out
+    assert 'traversal limited to 5 directories' in out
+
+
+def test_list_tree_flags_children_at_dir_cap(tmp_path: Any, monkeypatch: Any) -> None:
+    # The last directory the cap allows may itself have children: dropping them (a zero
+    # remaining budget) must be reported, not silently swallowed.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 2)
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'a' / 'child').mkdir()
+    (tmp_path / 'b').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 2 directories' in out
+
+
+def test_list_tree_bounds_per_directory_scan(tmp_path: Any, monkeypatch: Any) -> None:
+    # A single directory with more entries than the per-directory budget is scanned only
+    # partially (bounded time) and the listing says it is incomplete.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_NAMES_PER_DIR', 5)
+    big = tmp_path / 'big'
+    big.mkdir()
+    for i in range(20):
+        (big / f'f{i:02d}.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'traversal limited to' in out
+    assert out.count('big/') == 5  # only the first 5 of the 20 entries were listed
 
 
 def test_list_tree_flags_pruned_subdirs(tmp_path: Any, monkeypatch: Any) -> None:
@@ -1161,7 +1188,7 @@ def test_list_tree_flags_pruned_subdirs(tmp_path: Any, monkeypatch: Any) -> None
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     out = asyncio.run(tools.list_tree([], ctx))
     assert 'no files under' in out
-    assert 'directory traversal was limited to 2 directories' in out
+    assert 'traversal limited to 2 directories' in out
 
 
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import heapq
 import http.client
 import html
 import importlib.util
@@ -49,7 +48,6 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
 from typing import Any, Callable, Coroutine, IO, Protocol
 
 from marsha.context import (
@@ -98,6 +96,11 @@ LIST_TREE_MAX_ENTRIES = 2_000
 # the work: a tree of many empty directories, or an extension filter that matches nothing, would
 # otherwise be traversed in full before the cap could ever trigger.
 LIST_TREE_MAX_DIRS = 10_000
+# Entries a single directory may be scanned for before the walk moves on. Listing a directory's
+# contents in sorted order means seeing them all, so this is the time/memory bound for one
+# directory: a directory with more entries than this is listed partially, and the listing says
+# so (without it, one enormous directory would cost unbounded time and memory).
+LIST_TREE_MAX_NAMES_PER_DIR = 10_000
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
@@ -1158,19 +1161,11 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     dirs_visited = 0
     dirs_truncated = False
 
-    def _safe_is_dir(entry: os.DirEntry[str]) -> bool:
-        # Best-effort, like os.walk with onerror=None: a per-entry stat error skips the entry.
-        try:
-            return entry.is_dir()
-        except OSError:
-            return False
-
-    # A manual walk rather than os.walk: os.walk materializes each directory's full entry list,
-    # so a single directory with an enormous number of entries would use unbounded memory before
-    # any cap could apply. Each directory is instead scanned lazily from os.scandir and only
-    # bounded selections are ever held — subdirectories within the traversal budget and files
-    # within the entry cap — so memory stays O(caps) (fully scanning a directory is unavoidable:
-    # its entries must be seen to be listed in sorted order).
+    # A manual walk with a bounded pass per directory: the number of directories visited is
+    # bounded (LIST_TREE_MAX_DIRS) and each directory is scanned for at most
+    # LIST_TREE_MAX_NAMES_PER_DIR entries, so no tree — not even one with a single enormous
+    # directory — can cost unbounded time or memory. A directory with more entries than the
+    # per-directory budget is listed partially, and the listing says so.
     stack: list[str] = [start]
     while stack:
         dirpath = stack.pop()
@@ -1182,39 +1177,39 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         if room <= 0:
             break
         remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
-        kept_count = 0
-
-        def _subdir_names() -> Iterator[str]:
-            # Kept subdirectories: the skipped dirs pruned (hidden ones are deliberately kept —
-            # a reviewer must be able to surface prior-issue docs in dotfiles) and symlinks not
-            # descended into (os.walk's followlinks=False default).
-            nonlocal kept_count
-            for entry in os.scandir(dirpath):
-                name = entry.name
-                if name in LIST_TREE_SKIP_DIRS or not _safe_is_dir(entry) \
-                        or entry.is_symlink():
+        # One bounded pass over the directory's entries: kept subdirectories (the skipped dirs
+        # pruned; hidden ones are deliberately kept — a reviewer must be able to surface
+        # prior-issue docs in dotfiles; symlinks are not descended into, os.walk's
+        # followlinks=False default) and files (matching the extension filter when set).
+        sub_names: list[str] = []
+        file_names: list[str] = []
+        try:
+            for count, entry in enumerate(os.scandir(dirpath), 1):
+                if count > LIST_TREE_MAX_NAMES_PER_DIR:
+                    dirs_truncated = True  # more entries than the per-directory budget
+                    break
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    # per-entry stat error: skipped, as os.walk (onerror=None) does
                     continue
-                kept_count += 1
-                yield name
-        try:
-            subdirs = heapq.nsmallest(remaining_dirs, _subdir_names())
+                name = entry.name
+                if is_dir:
+                    if not entry.is_symlink() and name not in LIST_TREE_SKIP_DIRS:
+                        sub_names.append(name)
+                elif not has_ext or _matches_ext(name, exts):
+                    file_names.append(name)
         except OSError:
-            subdirs = []  # unreadable directory: skipped, as os.walk does
-        if kept_count > remaining_dirs:
-            # More kept subdirectories than the budget allows: they are dropped, and the listing
-            # must say so, or a reviewer may mistake a partial tree for a complete one.
+            pass  # unreadable directory: skipped, as os.walk does
+        if len(sub_names) > remaining_dirs:
+            # More kept subdirectories than the budget allows: the extras are dropped, and the
+            # listing must say so, or a reviewer may mistake a partial tree for a complete one.
             dirs_truncated = True
-        # Push full paths, in reverse, so the first kept subdirectory is visited next
-        # (os.walk's order).
-        stack.extend(reversed([os.path.join(dirpath, d) for d in subdirs]))
-        try:
-            names = heapq.nsmallest(
-                room, (entry.name for entry in os.scandir(dirpath)
-                       if not _safe_is_dir(entry)
-                       and (not has_ext or _matches_ext(entry.name, exts))))
-        except OSError:
-            names = []
-        for fn in names:
+        # Visit the first kept subdirectories (sorted) next: push full paths in reverse so the
+        # first is popped next (os.walk's order).
+        stack.extend(reversed(
+            [os.path.join(dirpath, d) for d in sorted(sub_names)[:remaining_dirs]]))
+        for fn in sorted(file_names)[:room]:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
         if len(entries) >= LIST_TREE_MAX_ENTRIES:
@@ -1222,8 +1217,8 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     if len(entries) >= LIST_TREE_MAX_ENTRIES:
         note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
     elif dirs_truncated:
-        note = (f'\n[listing incomplete: directory traversal was limited to '
-                f'{LIST_TREE_MAX_DIRS} directories]')
+        note = (f'\n[listing incomplete: traversal limited to {LIST_TREE_MAX_DIRS} '
+                f'directories and {LIST_TREE_MAX_NAMES_PER_DIR} entries per directory]')
     else:
         note = ''
     if not entries:
