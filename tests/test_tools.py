@@ -1517,6 +1517,18 @@ def test_find_in_file_clips_single_oversized_line(tmp_path: Any,
     assert out.startswith('error:') and 'too large' in out
 
 
+def test_find_in_file_bounds_echoed_query(tmp_path: Any) -> None:
+    # The query is echoed into the result; a query near the read cap must not
+    # make the tool result far exceed the shared result budget.
+    (tmp_path / 'd.md').write_text('x\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper',
+                      new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q' * 100_000, 'd.md'], ctx))
+    assert len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'query truncated' in out
+
+
 def test_http_get_blocks_private_initial_url() -> None:
     # http_get asserts the initial URL itself, so a private/local target is refused before any
     # request is made (no network needed to prove it).

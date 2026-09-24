@@ -1438,6 +1438,10 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     except Exception as e:
         return f'error: find-in-file could not be run (the helper model failed: {e}).'
     result = result.strip()
+    # The query is echoed into the result, and it may approach READ_INPUT_CHAR_LIMIT: echo only
+    # a bounded prefix, or a 200k-char query would make the tool result far exceed the shared
+    # result budget and bloat the reviewer's context.
+    shown = query if len(query) <= 200 else query[:197] + '…[query truncated]'
     if not result or result.upper() == 'NO RELEVANT CONTENT':
         if truncated:
             # A truncated file was only partially searched, so "no relevant content" is NOT
@@ -1445,11 +1449,11 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
             # covered_chars (not the cap) is what was actually searched: for a newline-dense
             # file the numbered prompt can hit the cap before that many source characters.
             return (f'No relevant content in the first {covered_chars} chars of {path} '
-                    f'for: {query} — the rest of the file was not searched.')
-        return f'No content in {path} is relevant to: {query}'
+                    f'for: {shown} — the rest of the file was not searched.')
+        return f'No content in {path} is relevant to: {shown}'
     note = (f'\n[only the first {covered_chars} chars of {path} were searched]'
             if truncated else '')
-    return f'Relevant parts of {path} for: {query}{note}\n\n{result}'
+    return f'Relevant parts of {path} for: {shown}{note}\n\n{result}'
 
 
 # --- the command set: agnostic base, layered per target -------------------------
