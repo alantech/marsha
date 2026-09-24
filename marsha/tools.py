@@ -1175,14 +1175,14 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         room = LIST_TREE_MAX_ENTRIES - len(entries)
         if room <= 0:
             break
+        # Take only the next `room` entries, in sorted order: heapq.nsmallest yields the same
+        # prefix a full sorted() would, in O(n log room) instead of sorting (and allocating)
+        # the whole directory — bounded work for capped output, with or without --ext (which
+        # filters to the matching names first).
         if has_ext:
-            # Only extension matches can be listed; sort just those (not every name in a
-            # possibly huge directory) and take the next `room` of them.
-            names = sorted(fn for fn in filenames if _matches_ext(fn, exts))[
-                :room]
+            names = heapq.nsmallest(
+                room, (fn for fn in filenames if _matches_ext(fn, exts)))
         else:
-            # The same sorted prefix a full sorted() would yield, in O(n log room) instead of
-            # sorting the whole directory.
             names = heapq.nsmallest(room, filenames)
         for fn in names:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
