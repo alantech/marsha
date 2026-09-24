@@ -1134,6 +1134,22 @@ def test_list_tree_lists_and_filters(tmp_path: Any) -> None:
     assert '.mypy_cache' not in out3
 
 
+def test_list_tree_bounds_traversal(tmp_path: Any, monkeypatch: Any) -> None:
+    # The entry cap bounds output, not work: a tree of many empty directories must stop after
+    # the directory budget even when no files are found (an extension filter that matches
+    # nothing would otherwise walk the whole tree before the cap could trigger).
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 5)
+    for i in range(20):
+        d = tmp_path / f'd{i:02d}'
+        d.mkdir()
+        (d / 'a').mkdir()
+        (d / 'b').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal stopped after visiting 5 directories' in out
+
+
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     assert asyncio.run(tools.list_tree(['../..'], ctx)).startswith('error:')
@@ -1164,6 +1180,23 @@ def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
     esc = asyncio.run(tools.summarize(['../secret.md'], ctx))
     assert esc.startswith('error:') and 'escapes the working tree' in esc
     assert 'not a file' in asyncio.run(tools.summarize(['d'], ctx))
+
+
+def test_summarize_reports_helper_failure(tmp_path: Any) -> None:
+    # A failed helper-model call is reported with its cause, not as a misleading "nothing".
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+
+    class Boom:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            raise Exception('rate limited')
+
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: Boom(system, **kw)):
+        out = asyncio.run(tools.summarize(['notes.md'], ctx))
+    assert out.startswith('error:') and 'rate limited' in out
 
 
 def test_find_in_file_uses_helper_model(tmp_path: Any) -> None:
@@ -1221,6 +1254,41 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     assert 'only the first part was searched' in out2
 
 
+def test_find_in_file_reports_helper_failure(tmp_path: Any) -> None:
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+
+    class Boom:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            raise Exception('rate limited')
+
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: Boom(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'notes.md'], ctx))
+    assert out.startswith('error:') and 'rate limited' in out
+
+
+def test_find_in_file_bounds_numbered_prompt(tmp_path: Any, monkeypatch: Any) -> None:
+    # Numbering prefixes every line, so a newline-dense file that fits the read cap can still
+    # push the numbered prompt past it: the numbered text itself is trimmed back to the cap.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'dense.md').write_text('\n'.join(['x'] * 40) + '\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q', 'dense.md'], ctx))
+    numbered = seen['m'].req.rsplit('\n\n', 1)[1]
+    assert len(numbered) <= 60
+    assert 'only the first part was searched' in out
+
+
 def test_http_get_blocks_private_initial_url() -> None:
     # http_get asserts the initial URL itself, so a private/local target is refused before any
     # request is made (no network needed to prove it).
@@ -1266,6 +1334,47 @@ def test_safe_redirect_handler_allows_public_target() -> None:
         new = handler.redirect_request(req, fp, 302, 'Found', headers,
                                        'https://other.example.com/page')
     assert new is not None and new.full_url == 'https://other.example.com/page'
+
+
+def test_resolve_public_address_prefers_public_ip(monkeypatch: Any) -> None:
+    # A host resolving to both private and public addresses pins the public one.
+    infos = [(2, 1, 6, '', ('10.0.0.5', 80)), (2, 1, 6, '', ('93.184.216.34', 80))]
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: infos)
+    assert tools._resolve_public_address('mixed.example.com', 80) == '93.184.216.34'
+
+
+def test_resolve_public_address_blocks_private_only(monkeypatch: Any) -> None:
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('192.168.1.5', 80))])
+    with pytest.raises(Exception):
+        tools._resolve_public_address('private.example.com', 80)
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
+    with pytest.raises(Exception):
+        tools._resolve_public_address('gone.example.com', 80)
+
+
+def test_pinned_connection_uses_validated_address(monkeypatch: Any) -> None:
+    # The pinned connection must connect to the address it validated itself (no re-resolution
+    # between check and connect, which DNS rebinding exploits); a private-only resolution must
+    # not connect at all.
+    connected: list[Any] = []
+    fake_sock = SimpleNamespace(setsockopt=lambda *_a, **_k: None)
+
+    def fake_create_connection(address: Any, timeout: Any = None,
+                               source_address: Any = None) -> Any:
+        connected.append(address)
+        return fake_sock
+    monkeypatch.setattr('socket.create_connection', fake_create_connection)
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('93.184.216.34', 80))])
+    tools._PinnedHTTPConnection('public.example.com').connect()
+    assert connected == [('93.184.216.34', 80)]
+
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('127.0.0.1', 80))])
+    with pytest.raises(Exception):
+        tools._PinnedHTTPConnection('rebinding.example.com').connect()
+    assert connected == [('93.184.216.34', 80)]  # the private address was never contacted
 
 
 def test_read_tools_available_in_every_phase() -> None:

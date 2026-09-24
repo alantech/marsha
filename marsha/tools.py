@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import heapq
 import http.client
 import html
 import importlib.util
@@ -92,6 +93,10 @@ LIST_TREE_SKIP_DIRS = {
     '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.cache', 'dist', 'build',
 }
 LIST_TREE_MAX_ENTRIES = 2_000
+# Directories a `list-tree` walk may visit before stopping. The entry cap bounds the OUTPUT, not
+# the work: a tree of many empty directories, or an extension filter that matches nothing, would
+# otherwise be traversed in full before the cap could ever trigger.
+LIST_TREE_MAX_DIRS = 10_000
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
@@ -301,6 +306,13 @@ def wrap_untrusted(name: str, content: str) -> str:
     return f'[tool:{name}]\n{content}\n[/tool:{name}]'
 
 
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # The per-address half of the SSRF guard, shared by is_blocked_host (pre-check) and
+    # _resolve_public_address (connect-time check in the pinned connections).
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
 def is_blocked_host(hostname: str | None) -> bool:
     # SSRF guard: reject localhost and private/loopback/link-local/reserved
     # addresses so a tool cannot be pointed at the host's own network.
@@ -310,22 +322,37 @@ def is_blocked_host(hostname: str | None) -> bool:
     if host == 'localhost':
         return True
     try:
-        ip = ipaddress.ip_address(host)
-        return (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+        return _is_blocked_ip(ipaddress.ip_address(host))
     except ValueError:
         pass
     try:
         infos = socket.getaddrinfo(host, None)
         for _family, _type, _proto, _canon, sockaddr in infos:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if (ip.is_private or ip.is_loopback or ip.is_link_local
-                    or ip.is_reserved or ip.is_multicast
-                    or ip.is_unspecified):
+            if _is_blocked_ip(ipaddress.ip_address(sockaddr[0])):
                 return True
     except Exception:
         return True  # unresolvable host: block rather than guess
     return False
+
+
+def _resolve_public_address(host: str, port: int) -> str:
+    # Resolve `host` and return the first PUBLIC address it maps to; the caller connects to
+    # exactly this returned address. Validation and connection therefore use one resolution
+    # result: a DNS-rebinding host (public at pre-check time, private at connect time) cannot
+    # swap in a private address between the two. Raises (SSRF guard) when the host does not
+    # resolve or has no public address.
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    if not infos:
+        raise Exception(f'blocked: {host} did not resolve (SSRF guard)')
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if not _is_blocked_ip(ip):
+            return str(ip)
+    raise Exception(
+        f'blocked: {host} resolved only to non-public addresses (SSRF guard)')
 
 
 def assert_public_url(url: str) -> None:
@@ -360,15 +387,69 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """An HTTPConnection that connects to an address it validated itself.
+
+    assert_public_url checks the hostname's DNS results *before* the request, but the connection
+    re-resolves the hostname when it connects: a DNS-rebinding host could answer with a public IP
+    at check time and a private IP at connect time, slipping past the guard. Instead, the
+    connection resolves, validates, and connects to one freshly resolved public address, all
+    inside the `_create_connection` seam that both HTTP and HTTPS connections use (http.client
+    stores it as an instance attribute precisely so it can be replaced), so the checked address
+    is exactly the address that is connected to. TLS is unaffected: HTTPS wraps the socket with
+    the original hostname for SNI and certificate verification after connecting.
+    """
+
+    def __init__(self, host: str, port: int | None = None, timeout: Any = ...,
+                 source_address: tuple[str, int] | None = None,
+                 blocksize: int = 8192) -> None:
+        super().__init__(host, port, timeout, source_address, blocksize)
+        self._create_connection = self._pinned_create_connection
+
+    def _pinned_create_connection(self, address: tuple[str, int], timeout: Any = ...,
+                                  source_address: tuple[str, int] | None = None
+                                  ) -> socket.socket:
+        host, port = address
+        ip = _resolve_public_address(host, port)
+        return socket.create_connection((ip, port), timeout, source_address)
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection, http.client.HTTPSConnection):
+    """The https twin of _PinnedHTTPConnection (same address pinning; the TLS wrap in
+    HTTPSConnection.connect still uses the original hostname)."""
+
+    def __init__(self, host: str, port: int | None = None, timeout: Any = ...,
+                 source_address: tuple[str, int] | None = None,
+                 blocksize: int = 8192) -> None:
+        http.client.HTTPSConnection.__init__(
+            self, host, port, timeout=timeout, source_address=source_address,
+            blocksize=blocksize)
+        self._create_connection = self._pinned_create_connection
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    # Route http fetches through the address-pinned connection.
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    # Route https fetches through the address-pinned connection.
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(_PinnedHTTPSConnection, req)
+
+
 async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """GET a URL off the event loop and return (status, content_type, body).
     The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
     memory before the text limits are applied.
 
-    SSRF guard: the initial URL is asserted here, and every redirect hop is
-    asserted by _SafeRedirectHandler before the opener contacts it, so a
-    public URL cannot bounce the fetch onto a private or local host. The
-    final URL is asserted once more before the body is returned."""
+    SSRF guard (three layers): the initial URL is asserted here; every
+    redirect hop is asserted by _SafeRedirectHandler before the opener
+    contacts it; and the pinned connections resolve, validate, and connect
+    to a single address at connect time, so DNS rebinding between the
+    checks and the connection cannot reach a private host. The final URL
+    is asserted once more before the body is returned."""
     def get() -> tuple[int, str, bytes]:
         assert_public_url(url)
         req = urllib.request.Request(
@@ -377,7 +458,8 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
                 'Accept': 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.8',
             })
-        opener = urllib.request.build_opener(_SafeRedirectHandler())
+        opener = urllib.request.build_opener(
+            _SafeRedirectHandler(), _PinnedHTTPHandler(), _PinnedHTTPSHandler())
         with opener.open(req, timeout=timeout) as resp:
             # Belt and braces on top of the per-hop checks in _SafeRedirectHandler.
             assert_public_url(resp.geturl())
@@ -1058,27 +1140,49 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         return f'error: `{path}` is not a directory in the working tree.'
     root = os.path.realpath(workdir)
     entries: list[str] = []
+    dirs_visited = 0
+    dirs_truncated = False
     for dirpath, dirnames, filenames in os.walk(start):
-        # Prune the skipped directories in place so os.walk does not descend into them. Hidden
-        # directories are deliberately NOT pruned here: the reviewer must be able to surface
-        # prior-issue documentation kept in dotfiles, so only LIST_TREE_SKIP_DIRS is skipped.
-        dirnames[:] = sorted(
-            d for d in dirnames if d not in LIST_TREE_SKIP_DIRS)
-        for fn in sorted(filenames):
-            if has_ext and not _matches_ext(fn, exts):
-                continue
+        dirs_visited += 1
+        if dirs_visited > LIST_TREE_MAX_DIRS:
+            dirs_truncated = True
+            break
+        # Prune the skipped directories in place so os.walk does not descend into them (hidden
+        # directories are deliberately kept: the reviewer must be able to surface prior-issue
+        # docs in dotfiles). Visit at most as many subdirectories as the traversal budget allows,
+        # in sorted order, so a directory with an enormous number of entries is not walked or
+        # sorted past that budget.
+        keep = (d for d in dirnames if d not in LIST_TREE_SKIP_DIRS)
+        remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
+        dirnames[:] = (sorted(keep) if len(dirnames) <= remaining_dirs
+                       else heapq.nsmallest(remaining_dirs, keep))
+        room = LIST_TREE_MAX_ENTRIES - len(entries)
+        if room <= 0:
+            break
+        if has_ext:
+            # Only extension matches can be listed; sort just those (not every name in a
+            # possibly huge directory) and take the next `room` of them.
+            names = sorted(fn for fn in filenames if _matches_ext(fn, exts))[
+                :room]
+        else:
+            # The same sorted prefix a full sorted() would yield, in O(n log room) instead of
+            # sorting the whole directory.
+            names = heapq.nsmallest(room, filenames)
+        for fn in names:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
-            if len(entries) >= LIST_TREE_MAX_ENTRIES:
-                break
         if len(entries) >= LIST_TREE_MAX_ENTRIES:
             break
+    if len(entries) >= LIST_TREE_MAX_ENTRIES:
+        note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
+    elif dirs_truncated:
+        note = f'\n[traversal stopped after visiting {LIST_TREE_MAX_DIRS} directories]'
+    else:
+        note = ''
     if not entries:
         scope = ' (no match for the extension filter)' if has_ext else ''
-        return f'(no files under {path!r} to list{scope})'
+        return f'(no files under {path!r} to list{scope}){note}'
     rel_start = os.path.relpath(start, root) or '.'
-    note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]' \
-        if len(entries) >= LIST_TREE_MAX_ENTRIES else ''
     return f'{len(entries)} file(s) under {rel_start}:\n' + '\n'.join(entries) + note
 
 
@@ -1093,13 +1197,11 @@ _FIND_IN_FILE_PROMPT = '''You pull out the parts of a document that are relevant
 async def _summarize_source(source: str, text: str) -> str:
     # The shared helper-model call for summarize / find-in-file: a bounded one-shot (a small
     # max_tokens and low reasoning effort), so an auxiliary read stays cheap. Returns the raw
-    # model output, or '' when the call could not be run (the caller decides how to report it).
-    try:
-        mapper = get_mapper(_SUMMARIZE_PROMPT, n_results=1, max_tokens=SUMMARY_MAX_TOKENS,
-                            reasoning_effort='low', label='read:summarize')
-        return (await mapper.run(text)) or ''
-    except Exception:
-        return ''
+    # model output ('' when the model answered nothing). A failed call RAISES so the caller can
+    # report the actual cause instead of a misleading "returned nothing".
+    mapper = get_mapper(_SUMMARIZE_PROMPT, n_results=1, max_tokens=SUMMARY_MAX_TOKENS,
+                        reasoning_effort='low', label='read:summarize')
+    return (await mapper.run(text)) or ''
 
 
 async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
@@ -1144,8 +1246,11 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     text = text.strip()
     if not text:
         return f'error: {target} returned no readable text.'
-    summary = (await _summarize_source(
-        target, f'# Source: {target}\n\n{text}')).strip()
+    try:
+        summary = (await _summarize_source(
+            target, f'# Source: {target}\n\n{text}')).strip()
+    except Exception as e:
+        return f'error: summarize could not be run (the helper model failed: {e}).'
     if not summary:
         return 'error: summarize could not be run (the helper model returned nothing).'
     note = '\n[the source was truncated before summarizing]' if truncated else ''
@@ -1177,15 +1282,26 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
             text = f.read(READ_INPUT_CHAR_LIMIT)
     except Exception as e:
         return f'error: could not read {path}: {e}'
-    numbered = '\n'.join(f'{n}: {ln}' for n,
-                         ln in enumerate(text.split('\n'), 1))
+    # The numbered form (not the raw read) is what is sent to the helper model, and its per-line
+    # prefixes can grow a newline-dense file well past READ_INPUT_CHAR_LIMIT: trim the tail so
+    # the numbered prompt itself stays within the cap (truncated is set, so the result says so).
+    numbered_lines: list[str] = []
+    numbered_len = 0  # len of '\n'.join(numbered_lines) so far
+    for n, ln in enumerate(text.split('\n'), 1):
+        prefixed = f'{n}: {ln}'
+        if numbered_lines and numbered_len + 1 + len(prefixed) > READ_INPUT_CHAR_LIMIT:
+            truncated = True
+            break
+        numbered_len += len(prefixed) + (1 if numbered_lines else 0)
+        numbered_lines.append(prefixed)
+    numbered = '\n'.join(numbered_lines)
     try:
         mapper = get_mapper(_FIND_IN_FILE_PROMPT, n_results=1, max_tokens=SEARCH_MAX_TOKENS,
                             reasoning_effort='low', label='read:find-in-file')
         result = (await mapper.run(
             f'# Query\n{query}\n\n# File: {path}\n\n{numbered}')) or ''
-    except Exception:
-        return 'error: find-in-file could not be run (the helper model failed).'
+    except Exception as e:
+        return f'error: find-in-file could not be run (the helper model failed: {e}).'
     result = result.strip()
     if not result or result.upper() == 'NO RELEVANT CONTENT':
         if truncated:
