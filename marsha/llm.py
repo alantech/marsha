@@ -14,6 +14,7 @@ import openai
 from marsha import backends, tools
 from marsha.config import resolve_model, resolve_provider, resolve_strong_model
 from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.findings import Finding
 from marsha.meta import MarshaMeta, void_note
 from marsha.log import log
 from marsha.parse import write_files_from_markdown, format_marsha_for_llm, split_preamble
@@ -206,7 +207,7 @@ Output no prose, no numbering, no code fences, and no finding that was not in th
 '''
 
 
-def _trim_findings_to_budget(findings: list[dict[str, Any]], fits_check: Callable[[list[dict[str, Any]]], bool]) -> list[dict[str, Any]]:
+def _trim_findings_to_budget(findings: list[Finding], fits_check: Callable[[list[Finding]], bool]) -> list[Finding]:
     # Deterministic last-resort reduction: drop findings from lowest to highest severity until
     # fits_check passes (or nothing is left). Guarantees the editor never receives an over-budget
     # prompt unless even the highest-severity findings alone exceed it.
@@ -218,11 +219,11 @@ def _trim_findings_to_budget(findings: list[dict[str, Any]], fits_check: Callabl
     return current
 
 
-async def consolidate_findings(context_block: str, findings: list[dict[str, Any]],
+async def consolidate_findings(context_block: str, findings: list[Finding],
                                model: str | None, debug: bool = False,
                                retries: int = 3, allow_empty: bool = False,
                                reasoning_effort: str | None = None,
-                               seed: int | None = None) -> list[dict[str, Any]]:
+                               seed: int | None = None) -> list[Finding]:
     # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
     # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
     # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
@@ -241,7 +242,7 @@ async def consolidate_findings(context_block: str, findings: list[dict[str, Any]
 {format_findings(findings)}'''
     best = findings
     floor = 0 if allow_empty else 1
-    shrinks: list[list[dict[str, Any]]] = []
+    shrinks: list[list[Finding]] = []
     for attempt in range(retries):
         try:
             text = await gpt.run(user)
@@ -267,13 +268,13 @@ async def consolidate_findings(context_block: str, findings: list[dict[str, Any]
     return best
 
 
-async def compact_findings(meta: MarshaMeta, findings: list[dict[str, Any]], model: str | None, debug: bool = False, retries: int = 2, prior_context: str = '') -> list[dict[str, Any]]:
+async def compact_findings(meta: MarshaMeta, findings: list[Finding], model: str | None, debug: bool = False, retries: int = 2, prior_context: str = '') -> list[Finding]:
     # Shrink the findings list to fit the editor's context budget (see consolidate_findings).
     return await consolidate_findings(
         f'{format_marsha_for_llm(meta)}\n{prior_context}', findings, model, debug, retries)
 
 
-async def _budgeted_findings(meta: MarshaMeta, findings: list[dict[str, Any]], build: Callable[[list[dict[str, Any]]], str], model: str | None, args: Any, debug: bool = False) -> list[dict[str, Any]]:
+async def _budgeted_findings(meta: MarshaMeta, findings: list[Finding], build: Callable[[list[Finding]], str], model: str | None, args: Any, debug: bool = False) -> list[Finding]:
     # Ensure the editor prompt build(findings) fits the context budget. If not, compact the
     # findings (LLM), then deterministically trim by severity, so the editor never receives an
     # over-budget prompt. If the budget cannot be determined (e.g. no client in a test harness),
@@ -287,7 +288,7 @@ async def _budgeted_findings(meta: MarshaMeta, findings: list[dict[str, Any]], b
     except Exception:
         return findings
 
-    def fits_check(current: list[dict[str, Any]]) -> bool:
+    def fits_check(current: list[Finding]) -> bool:
         return fits(build(current), ctx, cap)
     if fits_check(findings):
         log(f'editor prompt ~{estimate_tokens(build(findings))} tokens, within budget '
@@ -311,7 +312,7 @@ def _oracle_review_message(meta: MarshaMeta, oracle_md: str) -> str:
 {oracle_md}'''
 
 
-def _oracle_editor_message(meta: MarshaMeta, oracle_md: str, findings: list[dict[str, Any]]) -> str:
+def _oracle_editor_message(meta: MarshaMeta, oracle_md: str, findings: list[Finding]) -> str:
     return f'''{format_marsha_for_llm(meta)}
 
 # The current test suite (oracle)
@@ -335,7 +336,7 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings: list[dict[str, Any]] = []
+    prior_findings: list[Finding] = []
     prior_preamble: str = ''
     for i in range(level):
         log(f'oracle loop iteration {i + 1}/{level}: running reviewers')
@@ -455,7 +456,7 @@ def _impl_review_message(meta: MarshaMeta, oracle: str, code: str) -> str:
 {b.code_block(code)}'''
 
 
-def _impl_editor_message(meta: MarshaMeta, oracle: str, code: str, findings: list[dict[str, Any]]) -> str:
+def _impl_editor_message(meta: MarshaMeta, oracle: str, code: str, findings: list[Finding]) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -497,7 +498,7 @@ async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str],
     reviewers = resolve_loop_reviewers('impl', args.impl_personas, registry)
     model = resolve_strong_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings: list[dict[str, Any]] = []
+    prior_findings: list[Finding] = []
     prior_preamble: str = ''
     for i in range(level):
         log(f'impl loop iteration {i + 1}/{level}: running reviewers')
@@ -738,7 +739,7 @@ def _correction_review_message(meta: MarshaMeta, code: str, orig_test: str, corr
 A test is at fault: {reason}'''
 
 
-def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str, findings: list[dict[str, Any]]) -> str:
+def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str, findings: list[Finding]) -> str:
     return _correction_review_message(
         meta, code, orig_test, corrected_code, reason) + f'''
 
@@ -764,7 +765,7 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
         'correction', args.fix_personas, registry)
     model = resolve_strong_model()
     severities = parse_severities(args.optimize_severity)
-    prior_findings: list[dict[str, Any]] = []
+    prior_findings: list[Finding] = []
     prior_preamble: str = ''
     for i in range(level):
         log(f'correction loop iteration {i + 1}/{level}: running reviewers')

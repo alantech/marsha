@@ -6,6 +6,7 @@ from typing import Any
 
 from marsha import tools
 from marsha.config import is_local_backend
+from marsha.findings import Finding
 from marsha.log import log
 from marsha.mappers import get_mapper
 
@@ -207,7 +208,7 @@ def position_label(review_number: int | None, used: set[str]) -> str:
 
 
 def parse_findings(text: Any, name: str, review_number: int,
-                   prior_labels: set[str] | None = None) -> list[dict[str, Any]]:
+                   prior_labels: set[str] | None = None) -> list[Finding]:
     # Parse one reviewer's findings. The canonical label is <letter><review_number>. On a
     # re-review a reviewer reuses the exact label of a prior finding it still stands by, so a
     # well-formed written label (one or more letters followed by THIS reviewer's number) is
@@ -216,12 +217,12 @@ def parse_findings(text: Any, name: str, review_number: int,
     # thread's label. One-or-more letters keeps a reused two-letter label (AA<n>, ...) from being
     # misread as a foreign label and renumbered.
     prior = {lbl.upper() for lbl in (prior_labels or [])}
-    findings: list[dict[str, Any]] = []
+    findings: list[Finding] = []
     used: set[str] = set()
     own_label = re.compile(rf'[A-Z]+{review_number}')
     headline = re.compile(
         r'^\s*([A-Za-z]+\d+)?\s*\[(MAJOR|MINOR|NIT|NITPICK)\]\s*(.*)$', re.IGNORECASE)
-    current: dict[str, Any] | None = None
+    current: Finding | None = None
     support: list[str] = []
 
     def flush() -> None:
@@ -264,7 +265,7 @@ def parse_findings(text: Any, name: str, review_number: int,
     return findings
 
 
-def drop_unsupported(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def drop_unsupported(findings: list[Finding]) -> list[Finding]:
     # The contract (FINDINGS_CONTRACT) requires 1-2 supporting paragraphs per finding; a headline
     # with no support is a bare, unverified claim, so it is not reported. Applied where findings
     # are ready to report (not in parse_findings, which stays lenient so its labeling/positioning
@@ -278,11 +279,11 @@ _COMPACTED_LINE = re.compile(
     r'^\s*(?:-\s*)?\[([^\]]+)\]\s*(MAJOR|MINOR|NIT|NITPICK)\b\s*(.*)$', re.IGNORECASE)
 
 
-def parse_compacted_findings(text: Any) -> list[dict[str, Any]]:
+def parse_compacted_findings(text: Any) -> list[Finding]:
     # Parse the output of the findings-compaction job. Each surviving line keeps its original
     # [Name-Label] (never renumbered), so references from other reviewers stay valid; the
     # sequence simply has gaps where findings were dropped.
-    findings: list[dict[str, Any]] = []
+    findings: list[Finding] = []
     for line in (text or '').split('\n'):
         m = _COMPACTED_LINE.match(line)
         if not m:
@@ -304,9 +305,9 @@ def parse_compacted_findings(text: Any) -> list[dict[str, Any]]:
     return findings
 
 
-def dedup_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedup_findings(findings: list[Finding]) -> list[Finding]:
     seen = set()
-    out: list[dict[str, Any]] = []
+    out: list[Finding] = []
     for f in findings:
         key = (f['name'], f['label'], f['severity'], f['desc'].strip().lower())
         if key in seen:
@@ -316,7 +317,7 @@ def dedup_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def actionable_findings(findings: list[dict[str, Any]], severities: set[str]) -> list[dict[str, Any]]:
+def actionable_findings(findings: list[Finding], severities: set[str]) -> list[Finding]:
     # Keep only the enabled severity tiers, then de-duplicate across reviewers.
     return dedup_findings([f for f in findings if f['severity'] in severities])
 
@@ -334,14 +335,14 @@ def _location_key(location: str | None) -> tuple[str, int | None]:
     return (location, None)
 
 
-def dedup_by_location(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedup_by_location(findings: list[Finding]) -> list[Finding]:
     # Merge findings that point at the same file:line — a common failure mode where several
     # reviewers flag the same spot with slightly different wording. For each location keep the
     # highest-severity finding, breaking ties on the more detailed (longer) description.
     # Findings with no location are kept as-is (there is no location to merge them on).
     order = {'NIT': 0, 'MINOR': 1, 'MAJOR': 2}
-    best: dict[tuple[str, int | None], dict[str, Any]] = {}
-    unlocated: list[dict[str, Any]] = []
+    best: dict[tuple[str, int | None], Finding] = {}
+    unlocated: list[Finding] = []
     for f in findings:
         if not (f['location'] or '').strip():
             unlocated.append(f)
@@ -355,7 +356,7 @@ def dedup_by_location(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(best.values()) + unlocated
 
 
-def format_findings(findings: list[dict[str, Any]]) -> str:
+def format_findings(findings: list[Finding]) -> str:
     lines: list[str] = []
     for f in findings:
         location = f' {f["location"]}' if f['location'] else ''
@@ -364,7 +365,7 @@ def format_findings(findings: list[dict[str, Any]]) -> str:
     return '\n'.join(lines)
 
 
-def prior_round_block(findings: list[dict[str, Any]], preamble: str,
+def prior_round_block(findings: list[Finding], preamble: str,
                       label: str = 'implementor') -> str:
     # The prior-cycle context shown to reviewers in round >= 2, so each can recognize its own
     # [Name-Label] in the push-back and see which point was rejected. `label` names the role that
@@ -393,7 +394,7 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
-) -> list[dict[str, Any]]:
+) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
     # they run concurrently. `guidance` is the target-language backend's persona_guidance(): the
@@ -408,7 +409,7 @@ async def run_personas(
     # based) finding from colliding with a prior thread's label. `reasoning_effort` and `seed`,
     # when set, are forwarded to each reviewer's mapper (the review path passes them to make a
     # single pass more reliable and sampling as reproducible as the provider allows).
-    async def one(spec: tuple[str, str, int]) -> list[dict[str, Any]]:
+    async def one(spec: tuple[str, str, int]) -> list[Finding]:
         name, body, review_number = spec
         system = body
         if guidance:

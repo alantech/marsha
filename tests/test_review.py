@@ -22,6 +22,7 @@ import pytest
 from marsha import personas
 from marsha import review
 from marsha import tools
+from marsha.findings import Finding
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +154,7 @@ def test_build_review_message_stat_and_context() -> None:
 
 def test_render_findings() -> None:
     assert 'No findings' in review.render_findings([], 'main')
-    f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+    f: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
           'location': 'foo.py:10', 'desc': 'off by one'}]
     out = review.render_findings(f, 'main')
     assert '[MAJOR] foo.py:10 - off by one' in out
@@ -162,7 +163,7 @@ def test_render_findings() -> None:
 
 def test_render_findings_includes_support() -> None:
     # A finding's supporting paragraphs are rendered under its headline.
-    f = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+    f: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
           'location': 'foo.py:10', 'desc': 'off by one',
           'support': 'the evidence, why it matters, and the impact'}]
     out = review.render_findings(f, 'main')
@@ -177,7 +178,7 @@ def test_render_findings_includes_support() -> None:
 
 def test_order_findings_by_severity_then_location() -> None:
     # The final set leads with the most severe, then is ordered by location within a severity.
-    fs = [
+    fs: list[Finding] = [
         {'name': 'E', 'label': 'E1', 'severity': 'NIT', 'location': 'b.py:2', 'desc': 'n'},
         {'name': 'B', 'label': 'B1', 'severity': 'MAJOR', 'location': 'z.py:9', 'desc': 'm'},
         {'name': 'C', 'label': 'C1', 'severity': 'MINOR', 'location': 'a.py:1', 'desc': 'i'},
@@ -349,7 +350,7 @@ def test_compaction_noop_when_fits() -> None:
 # --- the evidence gate (deterministic anti-hallucination filter) ---------------
 
 
-def _gate_finding(desc: str, location: str, evidence: list[tuple[str, str]], support: str = '') -> Any:
+def _gate_finding(desc: str, location: str, evidence: list[tuple[str, str]], support: str = '') -> Finding:
     return {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
             'location': location, 'desc': desc, 'support': support,
             'evidence': evidence}
@@ -784,7 +785,7 @@ def test_conventions_gate_rebuts_and_noobjections(repo: Any) -> None:
         async def run(self, *a: Any, **k: Any) -> Any:
             return 'NO OBJECTIONS'
 
-    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+    finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'add type hints'}]
     ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
 
@@ -826,7 +827,7 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
         async def run(self, *a: Any, **k: Any) -> Any:
             return 'NO OBJECTIONS'
 
-    finding = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+    finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'compute_total is never called'}]
     ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
 
@@ -846,7 +847,7 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
 # --- the multi-round review loop ---------------------------------------------
 
 
-def _finding() -> Any:
+def _finding() -> list[Finding]:
     # Carries git evidence (a.txt was read) so it passes the strict evidence gate.
     return [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
              'location': 'a.txt:2', 'desc': 'bad thing',
@@ -960,7 +961,7 @@ def test_per_persona_critique_revises_refuted_reviewer(repo: Any) -> None:
     # A reviewer's finding is refuted by the critic; _per_persona_critique gives that reviewer one
     # revision pass and keeps the corrected findings, merging the code it read in round 0 so a
     # re-stated finding is still grounded by the evidence gate.
-    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+    findings: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
                  'desc': 'phantomThing is undefined', 'support': '',
                  'evidence': [('$ git show HEAD:a.txt', 'one\nTWO\nthree')]}]
 
@@ -987,7 +988,7 @@ def test_per_persona_critique_revises_refuted_reviewer(repo: Any) -> None:
 
 def test_per_persona_critique_keeps_unrefuted_reviewer(repo: Any) -> None:
     # Nothing refuted -> the reviewer's findings pass through unchanged and no revision runs.
-    findings = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
+    findings: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.txt:2',
                  'desc': 'a real finding', 'support': '', 'evidence': []}]
 
     async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, **k: Any) -> Any:
@@ -1488,15 +1489,17 @@ def test_repo_name_does_not_cache_failure() -> None:
 def test_same_concern_matches_by_file_and_identifier() -> None:
     # Same file + a shared identifier (or enough word overlap) is the same concern, even on a
     # different line; a different file, or an unrelated description, is not.
-    a = {'location': 'marsha/review.py:1',
-         'desc': 'build_review_message embeds example-driven test instructions'}
+    a: Finding = {'name': 'S', 'label': 'A1', 'severity': 'MAJOR',
+                  'location': 'marsha/review.py:1',
+                  'desc': 'build_review_message embeds example-driven test instructions'}
     prior = {'path': 'marsha/review.py',
              'desc': 'build_review_message embeds detailed example-driven instructions'}
     assert review._same_concern(a, prior)
     assert not review._same_concern(
         a, {'path': 'other/file.py', 'desc': prior['desc']})
     assert not review._same_concern(
-        {'location': 'marsha/review.py:5', 'desc': 'the retry backoff is too aggressive'},
+        {'name': 'S', 'label': 'B1', 'severity': 'MAJOR',
+         'location': 'marsha/review.py:5', 'desc': 'the retry backoff is too aggressive'},
         prior)
 
 
@@ -1505,14 +1508,14 @@ def test_filter_duplicate_findings_drops_reraises() -> None:
                       'desc': 'build_review_message embeds example-driven instructions'}}
     body = [{'path': 'pyproject.toml',
              'desc': 'quickjs-ng is listed but the module is quickjs'}]
-    findings = [
-        {'label': 'C9', 'location': 'marsha/review.py:1',
+    findings: list[Finding] = [
+        {'name': 'S', 'label': 'C9', 'severity': 'MAJOR', 'location': 'marsha/review.py:1',
          'desc': 'build_review_message embeds example-driven instructions'},
-        {'label': 'D9', 'location': 'marsha/review.py:277',
+        {'name': 'S', 'label': 'D9', 'severity': 'MAJOR', 'location': 'marsha/review.py:277',
          'desc': 'build_review_message embeds detailed example-driven instructions in tests'},
-        {'label': 'A1', 'location': 'pyproject.toml:11',
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'pyproject.toml:11',
          'desc': 'quickjs-ng is listed as a dependency but code imports quickjs'},
-        {'label': 'B2', 'location': 'marsha/tools.py:50',
+        {'name': 'S', 'label': 'B2', 'severity': 'MAJOR', 'location': 'marsha/tools.py:50',
          'desc': 'the socket timeout default is too long'},
     ]
     kept, dropped = review._filter_duplicate_findings(findings, threads, body)
@@ -1554,10 +1557,11 @@ def test_filter_duplicate_drops_reraise_of_settled_thread() -> None:
     # A re-raise that reuses the exact label of a thread the user already settled is dropped; an
     # unrelated new finding is kept.
     threads = {'B9': {'path': 'marsha/review.py', 'line': 169, 'desc': 'renumbering'}}
-    findings = [
-        {'label': 'B9', 'location': 'marsha/review.py:169',
+    findings: list[Finding] = [
+        {'name': 'S', 'label': 'B9', 'severity': 'MAJOR', 'location': 'marsha/review.py:169',
          'desc': 'renumbering a custom panel'},
-        {'label': 'A1', 'location': 'marsha/tools.py:5', 'desc': 'something new'},
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'marsha/tools.py:5',
+         'desc': 'something new'},
     ]
     kept, dropped = review._filter_duplicate_findings(
         findings, threads, [], settled_labels={'B9'})
@@ -1573,7 +1577,7 @@ def test_post_review_maps_inline_and_body() -> None:
             ' line1\n'
             '+new\n'
             ' line2\n')
-    findings = [
+    findings: list[Finding] = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 'inline one'},
         {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
@@ -1628,7 +1632,7 @@ def test_post_review_replies_on_existing_thread() -> None:
             '@@ -1,2 +1,3 @@\n line1\n+new\n line2\n'
             'diff --git a/baz.py b/baz.py\n--- a/baz.py\n+++ b/baz.py\n'
             '@@ -1,2 +1,4 @@\n line1\n+x\n+y\n line2\n')
-    findings = [
+    findings: list[Finding] = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 're-raised point'},
         {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
@@ -1674,7 +1678,7 @@ def test_post_review_replies_on_existing_thread() -> None:
 def test_post_review_resolves_conceded_thread() -> None:
     # A prior thread whose label the reviewer no longer raises (and whose reviewer ran this pass)
     # is closed by resolving its thread; threads for reviewers not re-run are left alone.
-    findings = [
+    findings: list[Finding] = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 'still stands'},
     ]
@@ -1767,10 +1771,10 @@ def test_resolve_thread_posts_mutation() -> None:
 def test_finding_matches_thread_same_line() -> None:
     # Same file + same line is a conclusive match; a different file is not, regardless of text.
     assert review._finding_matches_thread(
-        {'location': 'foo.py:10', 'desc': 'x'},
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'foo.py:10', 'desc': 'x'},
         {'path': 'foo.py', 'line': 10, 'desc': 'y'}) is True
     assert review._finding_matches_thread(
-        {'location': 'bar.py:10', 'desc': 'x'},
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'bar.py:10', 'desc': 'x'},
         {'path': 'foo.py', 'line': 10, 'desc': 'y'}) is False
 
 
@@ -1792,7 +1796,8 @@ def test_verify_finding_labels_reassigns_collision() -> None:
         'A1': {'path': 'foo.py', 'line': 10, 'desc': 'missing type hint'},
         'B1': {'path': 'bar.py', 'line': 5, 'desc': 'off-by-one'},
     }
-    findings = [{'label': 'A1', 'location': 'baz.py:9', 'desc': 'wrong variable name'}]
+    findings: list[Finding] = [{'name': 'S', 'label': 'A1', 'severity': 'MAJOR',
+                                'location': 'baz.py:9', 'desc': 'wrong variable name'}]
     n = review._verify_finding_labels(findings, threads)
     assert n == 1
     assert findings[0]['label'] == 'C1'
@@ -1802,7 +1807,8 @@ def test_verify_finding_labels_keeps_genuine_reraise() -> None:
     # A finding that reuses a prior label and matches it (same file + line) is a genuine re-raise;
     # the label is kept so it replies on that thread.
     threads = {'A1': {'path': 'foo.py', 'line': 10, 'desc': 'missing type hint'}}
-    findings = [{'label': 'A1', 'location': 'foo.py:10', 'desc': 'missing type hint again'}]
+    findings: list[Finding] = [{'name': 'S', 'label': 'A1', 'severity': 'MAJOR',
+                                'location': 'foo.py:10', 'desc': 'missing type hint again'}]
     n = review._verify_finding_labels(findings, threads)
     assert n == 0
     assert findings[0]['label'] == 'A1'
@@ -1813,7 +1819,8 @@ def test_verify_finding_labels_reraise_line_shifted() -> None:
     # between runs), so the label is kept rather than reassigned.
     threads = {'A1': {'path': 'foo.py', 'line': 10,
                       'desc': 'the run helper does not catch oserror for a missing binary'}}
-    findings = [{'label': 'A1', 'location': 'foo.py:12',
+    findings: list[Finding] = [{'name': 'S', 'label': 'A1', 'severity': 'MAJOR',
+                 'location': 'foo.py:12',
                  'desc': 'the run helper does not catch oserror when a binary is missing'}]
     n = review._verify_finding_labels(findings, threads)
     assert n == 0
@@ -1822,9 +1829,9 @@ def test_verify_finding_labels_reraise_line_shifted() -> None:
 
 def test_verify_finding_labels_dedupes_inrun() -> None:
     # Two findings sharing one label in a single run (a parser slip) get distinct labels.
-    findings = [
-        {'label': 'A1', 'location': 'a.py:1', 'desc': 'one'},
-        {'label': 'A1', 'location': 'a.py:2', 'desc': 'two'},
+    findings: list[Finding] = [
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:1', 'desc': 'one'},
+        {'name': 'S', 'label': 'A1', 'severity': 'MAJOR', 'location': 'a.py:2', 'desc': 'two'},
     ]
     n = review._verify_finding_labels(findings, {})
     assert n == 1

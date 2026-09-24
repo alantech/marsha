@@ -8,6 +8,7 @@ import os
 from unittest.mock import patch
 
 from marsha import personas as p
+from marsha.findings import Finding
 from marsha.parse import split_preamble
 
 
@@ -178,16 +179,17 @@ def test_drop_unsupported_findings() -> None:
     # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
     # unverified claim and is dropped before it is reported (the parser itself stays lenient so
     # its labeling logic can be tested with minimal fixtures).
-    bare = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
-            'desc': 'd', 'support': ''}
-    backed = dict(bare, label='B1', support='The spec requires it.')
+    bare: Finding = {'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR', 'location': 'x.py:1',
+                     'desc': 'd', 'support': ''}
+    backed: Finding = {'name': 'Ada', 'label': 'B1', 'severity': 'MAJOR', 'location': 'x.py:1',
+                       'desc': 'd', 'support': 'The spec requires it.'}
     assert p.drop_unsupported([]) == []
     assert p.drop_unsupported([bare, backed]) == [backed]
 
 
 # --- Finding model ----------------------------------------------------------
 
-def _f(name: str, label: str, severity: str, desc: str) -> Any:
+def _f(name: str, label: str, severity: str, desc: str) -> Finding:
     return {'name': name, 'label': label, 'severity': severity, 'location': '', 'desc': desc}
 
 
@@ -203,14 +205,14 @@ def test_dedup_findings() -> None:
 def test_dedup_by_location_merges_same_line() -> None:
     # Several reviewers flag the same file:line with different wording -> one finding,
     # keeping the highest severity (then the most detailed description).
-    f1 = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR',
-          'location': 'src/foo.py:10', 'desc': 'short'}
-    f2 = {'name': 'Eli', 'label': 'A1', 'severity': 'MAJOR',
-          'location': 'src/foo.py:10', 'desc': 'a much more detailed explanation'}
-    f3 = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT',
-          'location': 'src/foo.py:10', 'desc': 'tiny'}
-    f4 = {'name': 'Kit', 'label': 'A1', 'severity': 'MINOR',
-          'location': 'src/bar.py:5', 'desc': 'different file'}
+    f1: Finding = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR',
+                   'location': 'src/foo.py:10', 'desc': 'short'}
+    f2: Finding = {'name': 'Eli', 'label': 'A1', 'severity': 'MAJOR',
+                   'location': 'src/foo.py:10', 'desc': 'a much more detailed explanation'}
+    f3: Finding = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT',
+                   'location': 'src/foo.py:10', 'desc': 'tiny'}
+    f4: Finding = {'name': 'Kit', 'label': 'A1', 'severity': 'MINOR',
+                   'location': 'src/bar.py:5', 'desc': 'different file'}
     out = p.dedup_by_location([f1, f2, f3, f4])
     assert len(out) == 2  # one for foo.py:10, one for bar.py:5
     kept = {(f['location'], f['desc']) for f in out}
@@ -221,9 +223,9 @@ def test_dedup_by_location_merges_same_line() -> None:
 def test_dedup_by_location_keeps_unlocated_separate() -> None:
     # Findings with no location have nothing to merge on, so each is kept rather than collapsed
     # into a single unlocated finding.
-    a = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR', 'location': '', 'desc': 'one'}
-    b = {'name': 'Eli', 'label': 'B1', 'severity': 'MAJOR', 'location': '', 'desc': 'two'}
-    c = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT', 'location': 'x.py:1', 'desc': 'loc'}
+    a: Finding = {'name': 'Sage', 'label': 'A1', 'severity': 'MINOR', 'location': '', 'desc': 'one'}
+    b: Finding = {'name': 'Eli', 'label': 'B1', 'severity': 'MAJOR', 'location': '', 'desc': 'two'}
+    c: Finding = {'name': 'Dot', 'label': 'A1', 'severity': 'NIT', 'location': 'x.py:1', 'desc': 'loc'}
     out = p.dedup_by_location([a, b, c])
     assert len(out) == 3
     assert {f['desc'] for f in out} == {'one', 'two', 'loc'}
@@ -257,8 +259,8 @@ def test_parse_severities() -> None:
 
 
 def test_format_findings() -> None:
-    fs = [{'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR',
-           'location': 'x.py:3', 'desc': 'd'}]
+    fs: list[Finding] = [{'name': 'Ada', 'label': 'A1', 'severity': 'MAJOR',
+                          'location': 'x.py:3', 'desc': 'd'}]
     assert p.format_findings(fs) == '- [Ada-A1] MAJOR x.py:3 - d'
 
 
