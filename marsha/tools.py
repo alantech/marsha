@@ -1245,6 +1245,12 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         else:
             text = re.sub(r'[ \t]+', ' ', doc).strip()
         truncated = len(body) >= MAX_HTTP_BYTES
+        # Clip to the helper input cap like the file path does: a fetched page can be up to
+        # MAX_HTTP_BYTES, far beyond READ_INPUT_CHAR_LIMIT, and must not reach the helper model
+        # unclipped.
+        if len(text) > READ_INPUT_CHAR_LIMIT:
+            text = text[:READ_INPUT_CHAR_LIMIT]
+            truncated = True
     else:
         workdir = ctx.workdir if ctx is not None else None
         if not workdir or not os.path.isdir(workdir):
@@ -1314,12 +1320,14 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     # the numbered prompt itself stays within the cap (truncated is set, so the result says so).
     numbered_lines: list[str] = []
     numbered_len = 0  # len of '\n'.join(numbered_lines) so far
+    covered_chars = 0  # source characters in the lines included so far
     for n, ln in enumerate(text.split('\n'), 1):
         prefixed = f'{n}: {ln}'
         if numbered_lines and numbered_len + 1 + len(prefixed) > READ_INPUT_CHAR_LIMIT:
             truncated = True
             break
         numbered_len += len(prefixed) + (1 if numbered_lines else 0)
+        covered_chars += len(ln) + (1 if numbered_lines else 0)
         numbered_lines.append(prefixed)
     numbered = '\n'.join(numbered_lines)
     try:
@@ -1334,11 +1342,13 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
         if truncated:
             # A truncated file was only partially searched, so "no relevant content" is NOT
             # definitive — say so, or a reviewer may wrongly conclude the pattern is absent.
-            return (f'No relevant content in the first {READ_INPUT_CHAR_LIMIT} chars of {path} '
+            # covered_chars (not the cap) is what was actually searched: for a newline-dense
+            # file the numbered prompt can hit the cap before that many source characters.
+            return (f'No relevant content in the first {covered_chars} chars of {path} '
                     f'for: {query} — the rest of the file was not searched.')
         return f'No content in {path} is relevant to: {query}'
-    note = (f'\n[{path} is longer than {READ_INPUT_CHAR_LIMIT} chars; only the first part '
-            f'was searched]') if truncated else ''
+    note = (f'\n[only the first {covered_chars} chars of {path} were searched]'
+            if truncated else '')
     return f'Relevant parts of {path} for: {query}{note}\n\n{result}'
 
 

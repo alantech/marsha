@@ -1207,6 +1207,29 @@ def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
     assert 'truncated' not in out
 
 
+def test_summarize_url_clips_text_to_input_cap(monkeypatch: Any) -> None:
+    # The URL path must honor READ_INPUT_CHAR_LIMIT like the file path: a page body of up to
+    # MAX_HTTP_BYTES must not reach the helper model unclipped.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 50)
+
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', ('a' * 500).encode()
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=fake_get), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' in out
+    text = seen['m'].req.rsplit('\n\n', 1)[1]
+    assert len(text) <= 50
+
+
 def test_summarize_reports_helper_failure(tmp_path: Any) -> None:
     # A failed helper-model call is reported with its cause, not as a misleading "nothing".
     (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
@@ -1276,7 +1299,7 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     assert 'was not searched' in out
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
-    assert 'only the first part was searched' in out2
+    assert 'only the first 8 chars of big.md were searched' in out2
 
 
 def test_find_in_file_multibyte_not_falsely_truncated(tmp_path: Any,
@@ -1324,7 +1347,9 @@ def test_find_in_file_bounds_numbered_prompt(tmp_path: Any, monkeypatch: Any) ->
         out = asyncio.run(tools.find_in_file(['q', 'dense.md'], ctx))
     numbered = seen['m'].req.rsplit('\n\n', 1)[1]
     assert len(numbered) <= 60
-    assert 'only the first part was searched' in out
+    # 11 one-char lines fit the numbered cap (11 chars + 10 newlines = 21 source chars), so the
+    # note must say 21, not the 60-char cap.
+    assert 'only the first 21 chars of dense.md were searched' in out
 
 
 def test_http_get_blocks_private_initial_url() -> None:
