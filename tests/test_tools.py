@@ -1164,6 +1164,22 @@ def test_list_tree_flags_children_at_dir_cap(tmp_path: Any, monkeypatch: Any) ->
     assert 'traversal limited to 2 directories' in out
 
 
+def test_list_tree_bounds_queue_on_wide_tree(tmp_path: Any, monkeypatch: Any) -> None:
+    # A wide tree must not balloon the pending-directory queue beyond the visit cap (every
+    # queued path is a string allocation; uncapped, a directory-heavy tree queues O(D^2) of
+    # them). The excess siblings are dropped and the listing says so.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 5)
+    for i in range(4):
+        d = tmp_path / f'd{i}'
+        d.mkdir()
+        for j in range(4):
+            (d / f'c{j}').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 5 directories' in out
+
+
 def test_list_tree_bounds_per_directory_scan(tmp_path: Any, monkeypatch: Any) -> None:
     # A single directory with more entries than the per-directory budget is scanned only
     # partially (bounded time) and the listing says it is incomplete.

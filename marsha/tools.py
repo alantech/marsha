@@ -1205,10 +1205,17 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             # More kept subdirectories than the budget allows: the extras are dropped, and the
             # listing must say so, or a reviewer may mistake a partial tree for a complete one.
             dirs_truncated = True
-        # Visit the first kept subdirectories (sorted) next: push full paths in reverse so the
-        # first is popped next (os.walk's order).
-        stack.extend(reversed(
-            [os.path.join(dirpath, d) for d in sorted(sub_names)[:remaining_dirs]]))
+        to_visit = sorted(sub_names)[:remaining_dirs]
+        # Cap the queue at the number of directories that can still be visited: a wide tree
+        # must not balloon it into unbounded memory (every queued path is a string allocation,
+        # and uncapped a directory-heavy tree could queue O(D^2) of them).
+        queue_room = LIST_TREE_MAX_DIRS - dirs_visited - len(stack)
+        if len(to_visit) > queue_room:
+            # The excess are the last-visited siblings; they can never fit under the visit cap.
+            to_visit = to_visit[:max(queue_room, 0)]
+            dirs_truncated = True
+        # Push full paths in reverse so the first is popped next (os.walk's order).
+        stack.extend(reversed([os.path.join(dirpath, d) for d in to_visit]))
         for fn in sorted(file_names)[:room]:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
