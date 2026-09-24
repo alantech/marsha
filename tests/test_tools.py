@@ -9,7 +9,9 @@ driven by a scripted fake mapper.
 
 from typing import Any
 import asyncio
+import http.client
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -1115,13 +1117,21 @@ def test_list_tree_lists_and_filters(tmp_path: Any) -> None:
     (tmp_path / 'docs' / 'b.txt').write_text('x')
     (tmp_path / 'main.py').write_text('x')
     (tmp_path / '.hidden').write_text('x')
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'NOTES.md').write_text('x')
+    (tmp_path / '.mypy_cache').mkdir()
+    (tmp_path / '.mypy_cache' / 'cache.txt').write_text('x')
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     out = asyncio.run(tools.list_tree(['docs'], ctx))
     assert 'a.md' in out and 'b.txt' in out and 'main.py' not in out
     out2 = asyncio.run(tools.list_tree(['docs', '--ext', 'md'], ctx))
     assert 'a.md' in out2 and 'b.txt' not in out2
     out3 = asyncio.run(tools.list_tree([], ctx))
-    assert 'main.py' in out3 and '.hidden' not in out3
+    assert 'main.py' in out3
+    # Hidden files and directories are listed (a reviewer must be able to surface prior-issue
+    # docs kept in dotfiles); only the noisy skipped directories are pruned.
+    assert '.hidden' in out3 and '.claude/NOTES.md' in out3
+    assert '.mypy_cache' not in out3
 
 
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
@@ -1211,16 +1221,51 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     assert 'only the first part was searched' in out2
 
 
+def test_http_get_blocks_private_initial_url() -> None:
+    # http_get asserts the initial URL itself, so a private/local target is refused before any
+    # request is made (no network needed to prove it).
+    with pytest.raises(Exception):
+        asyncio.run(tools.http_get('http://localhost/secret'))
+
+
 def test_http_get_rechecks_redirect_destination() -> None:
-    # urlopen follows redirects; a public URL 302-ing to a local host must be rejected on the
-    # final URL (not just the original) or the SSRF guard is bypassed.
+    # Even with the per-hop redirect checks in place, the final URL is re-asserted before the
+    # body is handed back (defense in depth against any handler path the opener might take).
     resp = SimpleNamespace(status=200, headers={'Content-Type': 'text/plain'},
                            geturl=lambda: 'http://localhost/secret')
     resp.read = lambda _n: b'oops'
     cm = SimpleNamespace(__enter__=lambda _s: resp, __exit__=lambda _s, *_a: False)
-    with patch.object(urllib.request, 'urlopen', return_value=cm):
+    opener = SimpleNamespace(open=lambda _req, timeout=None: cm)
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(urllib.request, 'build_opener', return_value=opener):
         with pytest.raises(Exception):
             asyncio.run(tools.http_get('https://public.example.com/r'))
+
+
+def test_safe_redirect_handler_refuses_private_target() -> None:
+    # The redirect-SSRF fix proper: each redirect target is asserted *before* the opener
+    # contacts it, so a public URL 302-ing to a local host is never reached at all (the earlier
+    # final-URL check ran after urlopen had already connected to the private destination).
+    handler = tools._SafeRedirectHandler()
+    req = urllib.request.Request('https://public.example.com/r')
+    fp = io.BytesIO(b'')
+    headers = http.client.HTTPMessage()
+    with pytest.raises(Exception):
+        handler.redirect_request(req, fp, 302, 'Found', headers, 'http://localhost/secret')
+
+
+def test_safe_redirect_handler_allows_public_target() -> None:
+    # A redirect to a public host still goes through, so legitimate 301/302 chains work.
+    handler = tools._SafeRedirectHandler()
+    req = urllib.request.Request('https://public.example.com/r')
+    fp = io.BytesIO(b'')
+    headers = http.client.HTTPMessage()
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]):
+        new = handler.redirect_request(req, fp, 302, 'Found', headers,
+                                       'https://other.example.com/page')
+    assert new is not None and new.full_url == 'https://other.example.com/page'
 
 
 def test_read_tools_available_in_every_phase() -> None:

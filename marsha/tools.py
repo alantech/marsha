@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import http.client
 import html
 import importlib.util
 import ipaddress
@@ -47,7 +48,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Coroutine, Protocol
+from typing import Any, Callable, Coroutine, IO, Protocol
 
 from marsha.context import (
     budget_tokens, CHARS_PER_TOKEN, estimate_tokens, fits, resolve_context_window)
@@ -82,11 +83,13 @@ GIT_RESULT_CHAR_LIMIT = 48_000
 READ_INPUT_CHAR_LIMIT = 200_000
 SUMMARY_MAX_TOKENS = 1_024
 SEARCH_MAX_TOKENS = 2_048
-# Directories a `list-tree` walk skips (VCS metadata and dependency/build trees), so the listing
-# stays focused on the project's own files and bounded.
+# Directories a `list-tree` walk skips (VCS metadata, caches, dependency/build trees) — the only
+# things pruned, so the listing stays focused on the project's own files and bounded. Hidden files
+# and directories are *listed*: a reviewer must be able to surface prior-issue docs kept in
+# dotfiles (e.g. a `.claude/` or `.learnings/` directory).
 LIST_TREE_SKIP_DIRS = {
     '.git', '.hg', '.svn', 'venv', '.venv', 'node_modules', '__pycache__',
-    '.pytest_cache', '.mypy_cache', 'dist', 'build',
+    '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox', '.cache', 'dist', 'build',
 }
 LIST_TREE_MAX_ENTRIES = 2_000
 
@@ -339,21 +342,44 @@ def assert_public_url(url: str) -> None:
 # --- web fetching / parsing (shared by the web tools and the registry tools) ----
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that refuses to follow a redirect to a non-public target.
+
+    urllib follows redirects *inside* the opener, so a post-hoc check of the final URL would only
+    withhold the response — the private host has already been contacted. Each redirect target is
+    therefore asserted here, before any request is made to it, so a public URL cannot bounce the
+    fetch onto a private or local host. https is covered as well as http: the opener dispatches
+    https redirect errors through the same ``http_error_30x`` handlers (see
+    ``OpenerDirector.error``, which special-cases https as http).
+    """
+
+    def redirect_request(self, req: urllib.request.Request, fp: IO[bytes], code: int,
+                         msg: str, headers: http.client.HTTPMessage, newurl: str
+                         ) -> urllib.request.Request | None:
+        assert_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """GET a URL off the event loop and return (status, content_type, body).
     The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
-    memory before the text limits are applied."""
+    memory before the text limits are applied.
+
+    SSRF guard: the initial URL is asserted here, and every redirect hop is
+    asserted by _SafeRedirectHandler before the opener contacts it, so a
+    public URL cannot bounce the fetch onto a private or local host. The
+    final URL is asserted once more before the body is returned."""
     def get() -> tuple[int, str, bytes]:
+        assert_public_url(url)
         req = urllib.request.Request(
             url, headers={
                 'User-Agent': USER_AGENT,
                 'Accept': 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.8',
             })
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # urlopen follows redirects without re-checking the destination, so a public URL can
-            # 302 to a private/local host and bypass the SSRF guard that checked the original URL;
-            # re-assert on the final URL so a redirected response can never reach the model.
+        opener = urllib.request.build_opener(_SafeRedirectHandler())
+        with opener.open(req, timeout=timeout) as resp:
+            # Belt and braces on top of the per-hop checks in _SafeRedirectHandler.
             assert_public_url(resp.geturl())
             return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
     return await asyncio.to_thread(get)
@@ -1002,7 +1028,9 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     """`list-tree [path] [--ext a,b,c]` — list the files in the working tree under a path
     (default: the root), optionally filtered to file types by extension. Read-only and sandboxed
     to the local working tree, so it can surface files the git tool cannot (untracked or
-    git-ignored ones, e.g. a CLAUDE.local.md)."""
+    git-ignored ones, e.g. a CLAUDE.local.md). Hidden files and directories are listed too — only
+    the noisy directories in LIST_TREE_SKIP_DIRS are pruned — so documentation kept in dotfiles
+    (e.g. a .claude/ or .learnings/ directory) is not hidden from the reviewer."""
     path = '.'
     exts: set[str] = set()
     i = 0
@@ -1031,11 +1059,13 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     root = os.path.realpath(workdir)
     entries: list[str] = []
     for dirpath, dirnames, filenames in os.walk(start):
-        # Prune skipped and hidden directories in place so os.walk does not descend into them.
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in LIST_TREE_SKIP_DIRS and not d.startswith('.'))
+        # Prune the skipped directories in place so os.walk does not descend into them. Hidden
+        # directories are deliberately NOT pruned here: the reviewer must be able to surface
+        # prior-issue documentation kept in dotfiles, so only LIST_TREE_SKIP_DIRS is skipped.
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in LIST_TREE_SKIP_DIRS)
         for fn in sorted(filenames):
-            if fn.startswith('.') or (has_ext and not _matches_ext(fn, exts)):
+            if has_ext and not _matches_ext(fn, exts):
                 continue
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
