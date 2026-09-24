@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1186,6 +1187,40 @@ def test_find_in_file_reports_no_relevant_content(tmp_path: Any) -> None:
         out = asyncio.run(tools.find_in_file(
             ['zebra', 'docs.md'], tools.ToolContext('review', workdir=str(tmp_path))))
     assert 'No content in docs.md is relevant to: zebra' in out
+
+
+def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> None:
+    # A file longer than the read cap is only partially searched, so "no relevant content" must
+    # not be presented as definitive (the relevant passage may lie past the cap).
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 8)
+    (tmp_path / 'big.md').write_text('a line of text longer than the cap\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+
+    class NoRel:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            return 'NO RELEVANT CONTENT'
+
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: NoRel(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
+    assert 'was not searched' in out
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
+    assert 'only the first part was searched' in out2
+
+
+def test_http_get_rechecks_redirect_destination() -> None:
+    # urlopen follows redirects; a public URL 302-ing to a local host must be rejected on the
+    # final URL (not just the original) or the SSRF guard is bypassed.
+    resp = SimpleNamespace(status=200, headers={'Content-Type': 'text/plain'},
+                           geturl=lambda: 'http://localhost/secret')
+    resp.read = lambda _n: b'oops'
+    cm = SimpleNamespace(__enter__=lambda _s: resp, __exit__=lambda _s, *_a: False)
+    with patch.object(urllib.request, 'urlopen', return_value=cm):
+        with pytest.raises(Exception):
+            asyncio.run(tools.http_get('https://public.example.com/r'))
 
 
 def test_read_tools_available_in_every_phase() -> None:

@@ -351,6 +351,10 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
                 'Accept-Language': 'en-US,en;q=0.8',
             })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # urlopen follows redirects without re-checking the destination, so a public URL can
+            # 302 to a private/local host and bypass the SSRF guard that checked the original URL;
+            # re-assert on the final URL so a redirected response can never reach the model.
+            assert_public_url(resp.geturl())
             return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
     return await asyncio.to_thread(get)
 
@@ -1138,6 +1142,7 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     if not os.path.isfile(resolved):
         return f'error: `{path}` is not a file in the working tree.'
     try:
+        truncated = os.path.getsize(resolved) > READ_INPUT_CHAR_LIMIT
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
             text = f.read(READ_INPUT_CHAR_LIMIT)
     except Exception as e:
@@ -1153,8 +1158,15 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
         return 'error: find-in-file could not be run (the helper model failed).'
     result = result.strip()
     if not result or result.upper() == 'NO RELEVANT CONTENT':
+        if truncated:
+            # A truncated file was only partially searched, so "no relevant content" is NOT
+            # definitive — say so, or a reviewer may wrongly conclude the pattern is absent.
+            return (f'No relevant content in the first {READ_INPUT_CHAR_LIMIT} chars of {path} '
+                    f'for: {query} — the rest of the file was not searched.')
         return f'No content in {path} is relevant to: {query}'
-    return f'Relevant parts of {path} for: {query}\n\n{result}'
+    note = (f'\n[{path} is longer than {READ_INPUT_CHAR_LIMIT} chars; only the first part '
+            f'was searched]') if truncated else ''
+    return f'Relevant parts of {path} for: {query}{note}\n\n{result}'
 
 
 # --- the command set: agnostic base, layered per target -------------------------
