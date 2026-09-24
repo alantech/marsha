@@ -1200,7 +1200,10 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                 elif not has_ext or _matches_ext(name, exts):
                     file_names.append(name)
         except OSError:
-            pass  # unreadable directory: skipped, as os.walk does
+            # A failed scan (an unreadable directory, or an error while walking its entries)
+            # leaves this directory partially or not listed at all: mark the listing incomplete
+            # rather than present what was read as complete.
+            dirs_truncated = True
         if len(sub_names) > remaining_dirs:
             # More kept subdirectories than the budget allows: the extras are dropped, and the
             # listing must say so, or a reviewer may mistake a partial tree for a complete one.

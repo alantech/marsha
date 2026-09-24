@@ -1164,6 +1164,26 @@ def test_list_tree_flags_children_at_dir_cap(tmp_path: Any, monkeypatch: Any) ->
     assert 'traversal limited to 2 directories' in out
 
 
+def test_list_tree_flags_unreadable_directory(tmp_path: Any, monkeypatch: Any) -> None:
+    # A directory that fails to scan must mark the listing incomplete, not present a
+    # complete-looking listing of what happened to be read.
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'a' / 'x.txt').write_text('x')
+    (tmp_path / 'secret').mkdir()
+    (tmp_path / 'secret' / 'y.txt').write_text('y')
+    orig_scandir = os.scandir
+
+    def flaky(path: Any, *a: Any, **k: Any) -> Any:
+        if str(path).endswith('secret'):
+            raise PermissionError('unreadable')
+        return orig_scandir(path, *a, **k)
+    monkeypatch.setattr('os.scandir', flaky)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'a/x.txt' in out
+    assert 'incomplete' in out
+
+
 def test_list_tree_bounds_queue_on_wide_tree(tmp_path: Any, monkeypatch: Any) -> None:
     # A wide tree must not balloon the pending-directory queue beyond the visit cap (every
     # queued path is a string allocation; uncapped, a directory-heavy tree queues O(D^2) of
