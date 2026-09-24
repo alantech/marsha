@@ -2,55 +2,62 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, cast
+from typing import cast
 
 from mistletoe import ast_renderer
 from mistletoe.block_token import Document
 
+from marsha.ast_nodes import AstNode, DocumentNode, child_text
 from marsha.utils import read_file, get_filename_from_path
 
 
-def _get_ast(doc: Document) -> dict[str, Any]:
+def _get_ast(doc: Document) -> DocumentNode:
     # mistletoe's ast_renderer.get_ast is untyped; wrap it in a typed boundary that returns the
-    # raw markdown-AST node dict (dynamic — the keys present depend on the node type).
-    return cast('dict[str, Any]', ast_renderer.get_ast(doc))
+    # root markdown-AST node (a Document). The concrete node dicts carry extra keys (line
+    # numbers, alignment) that marsha does not read, so they are not checked here.
+    return cast('DocumentNode', ast_renderer.get_ast(doc))
 
 
-def to_markdown(node: dict[str, Any]) -> str:
+def to_markdown(node: AstNode) -> str:
     # Technically I should iterate on the `children` lists every time because they could have more
     # than one, but since this is hardwired for each node type, I'm just going to use the actual
     # implementations to skip that when possible to reduce recursion depth and simplify the code
     if node['type'] == 'AutoLink':
-        return f'''[{node['children'][0]['content']}]'''
+        return f'''[{child_text(node['children'])}]'''
     if node['type'] == 'BlockCode':
-        return '\n'.join([f'''    {line}''' for line in node['children'][0].split('\n')])
+        return '\n'.join([f'''    {line}''' for line in child_text(node['children']).split('\n')])
     if node['type'] == 'CodeFence':
         return f'''```{node['language']}
-{node['children'][0]['content']}
+{child_text(node['children'])}
 ```'''
     if node['type'] == 'Document':
         return ''.join([to_markdown(child) for child in node['children']])
     if node['type'] == 'Emphasis':
-        return f'''*{node['children'][0]['content']}*'''
+        return f'''*{child_text(node['children'])}*'''
     if node['type'] == 'EscapeSequence':
-        return f'''\\{node['children'][0]['content']}'''
+        return f'''\\{child_text(node['children'])}'''
     if node['type'] == 'Heading':
         level: int = node['level']
         return ('#' * level) + ' ' + ''.join([to_markdown(child) for child in node['children']])
     if node['type'] == 'Image':
-        if len(node['title']['children'][0]['content']) > 0:
-            return f'''![{''.join([to_markdown(child) for child in node['children']])}]({node['src']['children'][0]['content']} "{node['title']['children'][0]['content']}")'''
-        else:
-            return f'''![{''.join([to_markdown(child) for child in node['children']])}]({node['src']['children'][0]['content']})'''
+        # mistletoe stores an image's src and title as plain strings (empty title when absent).
+        alt = ''.join([to_markdown(child) for child in node['children']])
+        title = node['title']
+        if len(title) > 0:
+            return f'''![{alt}]({node['src']} "{title}")'''
+        return f'''![{alt}]({node['src']})'''
     if node['type'] == 'InlineCode':
-        return f'''`{node['children'][0]['content']}`'''
+        return f'''`{child_text(node['children'])}`'''
     if node['type'] == 'LineBreak':
         return '\n'
     if node['type'] == 'Link':
-        if len(node['title']['children'][0]['content']) > 0:
-            return f'''[{''.join([to_markdown(child) for child in node['children']])}]({node['src']['children'][0]['content']} "{node['title']['children'][0]['content']}")'''
-        else:
-            return f'''[{''.join([to_markdown(child) for child in node['children']])}]({node['src']['children'][0]['content']})'''
+        # mistletoe stores a link's destination as `target` (not `src`) and its title as a plain
+        # string (empty when absent).
+        text = ''.join([to_markdown(child) for child in node['children']])
+        title = node['title']
+        if len(title) > 0:
+            return f'''[{text}]({node['target']} "{title}")'''
+        return f'''[{text}]({node['target']})'''
     if node['type'] == 'List':
         if node['start'] is not None:
             return '\n'.join([f'''{i}. {text}''' for (i, text) in enumerate([to_markdown(child) for child in node['children']])])
@@ -63,14 +70,13 @@ def to_markdown(node: dict[str, Any]) -> str:
     if node['type'] == 'Quote':
         return '\n'.join([f'''> {to_markdown(child)}''' for child in node['children']])
     if node['type'] == 'RawText':
-        content: str = node['content']
-        return content
+        return node['content']
     if node['type'] == 'SetextHeading':
         raise NotImplementedError()
     if node['type'] == 'Strikethrough':
-        return f'''~~{node['children'][0]['content']}~~'''
+        return f'''~~{child_text(node['children'])}~~'''
     if node['type'] == 'Strong':
-        return f'''**{node['children'][0]['content']}**'''
+        return f'''**{child_text(node['children'])}**'''
     if node['type'] == 'Table':
         raise NotImplementedError()
     if node['type'] == 'TableCell':
@@ -84,7 +90,10 @@ def to_markdown(node: dict[str, Any]) -> str:
 
 def validate_marsha_fn(fn: str, void: bool = False) -> None:
     ast = _get_ast(Document(fn))
-    fn_heading: str = ast['children'][0]['children'][0]['content']
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
+        raise Exception('Invalid Marsha function')
+    fn_heading: str = child_text(first['children'])
     # Check function signature
     if not void:
         return_type: str = fn_heading.split('):')[1].strip()
@@ -92,23 +101,26 @@ def validate_marsha_fn(fn: str, void: bool = False) -> None:
             raise Exception(
                 f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
     # Check description
-    if ast['children'][1]['type'] != 'Paragraph':
+    second = ast['children'][1]
+    if second['type'] != 'Paragraph':
         raise Exception(
             f'Invalid Marsha function: Invalid description for `{fn_heading}`.')
     # Check usage examples if not void first because we need to check the length later
     if not void:
-        if ast['children'][-1]['type'] != 'List':
+        last = ast['children'][-1]
+        if last['type'] != 'List':
             raise Exception(
                 f'Invalid Marsha function: Invalid usage examples for `{fn_heading}`.')
-        if len(ast['children'][-1]['children']) < 2:  # We need at least a couple of examples
+        if len(last['children']) < 2:  # We need at least a couple of examples
             raise Exception(
                 f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
-    # Extract content from all children and nested children except header and examples if any
+    # Extract the description (the block nodes between the header and the trailing examples list,
+    # if any). to_markdown on a block node already concatenates its children, so this matches the
+    # former per-child iteration.
     fn_desc = ''
     range_stop = len(ast['children']) - 1 if not void else len(ast['children'])
     for i in range(1, range_stop):
-        for child in ast['children'][i]['children']:
-            fn_desc += to_markdown(child)
+        fn_desc += to_markdown(ast['children'][i])
     if len(fn_desc) <= 80:  # around a couple of sentences at least
         raise Exception(
             f'Invalid Marsha function: Description for `{fn_heading}` is too short.')
@@ -116,18 +128,22 @@ def validate_marsha_fn(fn: str, void: bool = False) -> None:
 
 def validate_marsha_type(type: str) -> None:
     ast = _get_ast(Document(type))
-    type_heading: str = ast['children'][0]['children'][0]['content']
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
+        raise Exception('Invalid Marsha type')
+    type_heading: str = child_text(first['children'])
 
     if len(ast['children']) == 1:
         if len(type_heading.split(' ')) != 3:
             raise Exception(
                 f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
     else:
-        if ast['children'][1]['type'] != 'Paragraph':
+        second = ast['children'][1]
+        if second['type'] != 'Paragraph':
             raise Exception(
                 f'Invalid Marsha type: Invalid type definition for `{type_heading}`.')
-        type_def_samples = filter(lambda x: x['type'] ==
-                                  'RawText', ast['children'][1]['children'])
+        type_def_samples = filter(
+            lambda x: x['type'] == 'RawText', second['children'])
         if len(list(type_def_samples)) <= 2:  # We need at least the headers and a couple of examples
             raise Exception(
                 f'Invalid Marsha type: Not enough examples for `{type_heading}`.')
@@ -183,9 +199,10 @@ async def process_types(raw_types: list[str], dirname: str) -> list[str]:
 
 def extract_type_name(type: str) -> str:
     ast = _get_ast(Document(type))
-    if ast['children'][0]['type'] != 'Heading':
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
         raise Exception('Invalid Marsha type')
-    header: str = ast['children'][0]['children'][0]['content']
+    header: str = child_text(first['children'])
     return header.split(' ')[1].strip()
 
 
@@ -193,9 +210,10 @@ def is_defined_from_file(md: str) -> bool:
     ast = _get_ast(Document(md))
     if len(ast['children']) != 1:
         return False
-    if ast['children'][0]['type'] != 'Heading':
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
         return False
-    header: str = ast['children'][0]['children'][0]['content']
+    header: str = child_text(first['children'])
     split_header = header.split(' ')
     if len(split_header) != 3:
         return False
@@ -204,15 +222,19 @@ def is_defined_from_file(md: str) -> bool:
 
 def extract_type_filename(md: str) -> str:
     ast = _get_ast(Document(md))
-    header: str = ast['children'][0]['children'][0]['content']
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
+        raise Exception('Invalid Marsha type')
+    header: str = child_text(first['children'])
     return header.split(' ')[2]
 
 
 def extract_func_name(type: str) -> str:
     ast = _get_ast(Document(type))
-    if ast['children'][0]['type'] != 'Heading':
+    first = ast['children'][0]
+    if first['type'] != 'Heading':
         raise Exception('Invalid Marsha function')
-    header: str = ast['children'][0]['children'][0]['content']
+    header: str = child_text(first['children'])
     return header.split('(')[0].split('func')[1].strip()
 
 

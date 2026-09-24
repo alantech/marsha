@@ -4,6 +4,7 @@ import os
 
 from mistletoe.block_token import Document
 
+from marsha.ast_nodes import child_text
 from marsha.meta import MarshaMeta, to_markdown, _get_ast
 from marsha.utils import write_file
 
@@ -37,7 +38,7 @@ def format_marsha_for_llm(meta: MarshaMeta) -> str:
                 # Special handling for the initial header (for now)
                 if child['type'] != 'Heading':
                     raise Exception('Invalid Marsha function')
-                header: str = child['children'][0]['content']
+                header: str = child_text(child['children'])
                 name = header.split('(')[0].split('func')[1].strip()
                 args = [arg.strip()
                         for arg in header.split('(')[1].split(')')[0].split(',')]
@@ -93,16 +94,16 @@ def write_files_from_markdown(md: str, subdir: str | None = None) -> list[str]:
     ast = _get_ast(Document(md))
     filenames: list[str] = []
     filename = ''
-    filedata: str | None = ''
+    filedata: str = ''
     for section in ast['children']:
         if section['type'] == 'Heading':
-            filename = section['children'][0]['content']
+            filename = child_text(section['children'])
             if subdir is not None:
                 filename = f'{subdir}/{filename}'
             filenames.append(filename)
         elif section['type'] == 'CodeFence':
-            filedata = section['children'][0]['content']
-            if filedata is None or filedata == '':
+            filedata = child_text(section['children'])
+            if filedata == '':
                 # If theres not data and we are not going to write the file, we should remove it from the filenames list
                 filenames.pop()
                 continue
