@@ -1184,6 +1184,40 @@ def test_list_tree_flags_unreadable_directory(tmp_path: Any, monkeypatch: Any) -
     assert 'incomplete' in out
 
 
+def test_list_tree_flags_per_entry_stat_error(tmp_path: Any,
+                                              monkeypatch: Any) -> None:
+    # An entry whose metadata lookup fails is skipped, but the listing must say it is
+    # incomplete, not look complete.
+    (tmp_path / 'ok.txt').write_text('x')
+    (tmp_path / 'bad.txt').write_text('x')
+    orig_scandir = os.scandir
+
+    class Flaky:
+        def __init__(self, entry: Any) -> None:
+            self._e = entry
+
+        @property
+        def name(self) -> Any:
+            return self._e.name
+
+        def is_dir(self) -> Any:
+            if self._e.name == 'bad.txt':
+                raise OSError('stat failed')
+            return self._e.is_dir()
+
+        def is_symlink(self) -> Any:
+            return self._e.is_symlink()
+
+    def flaky(path: Any, *a: Any, **k: Any) -> Any:
+        return [Flaky(e) for e in orig_scandir(path, *a, **k)]
+    monkeypatch.setattr('os.scandir', flaky)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'ok.txt' in out
+    assert 'bad.txt' not in out
+    assert 'incomplete' in out
+
+
 def test_list_tree_bounds_queue_on_wide_tree(tmp_path: Any, monkeypatch: Any) -> None:
     # A wide tree must not balloon the pending-directory queue beyond the visit cap (every
     # queued path is a string allocation; uncapped, a directory-heavy tree queues O(D^2) of

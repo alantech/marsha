@@ -1206,7 +1206,9 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                 try:
                     is_dir = entry.is_dir()
                 except OSError:
-                    # per-entry stat error: skipped, as os.walk (onerror=None) does
+                    # per-entry stat error: entry skipped, but the
+                    # listing must say it is incomplete, not look complete.
+                    dirs_truncated = True
                     continue
                 name = entry.name
                 if is_dir:
