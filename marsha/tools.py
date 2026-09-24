@@ -1246,11 +1246,11 @@ _FIND_IN_FILE_PROMPT = '''You pull out the parts of a document that are relevant
 '''
 
 
-async def _summarize_source(source: str, text: str) -> str:
-    # The shared helper-model call for summarize / find-in-file: a bounded one-shot (a small
-    # max_tokens and low reasoning effort), so an auxiliary read stays cheap. Returns the raw
-    # model output ('' when the model answered nothing). A failed call RAISES so the caller can
-    # report the actual cause instead of a misleading "returned nothing".
+async def _summarize_source(text: str) -> str:
+    # The helper-model call behind summarize: a bounded one-shot (a small max_tokens and low
+    # reasoning effort), so an auxiliary read stays cheap. Returns the raw model output (''
+    # when the model answered nothing). A failed call RAISES so the caller can report the
+    # actual cause instead of a misleading "returned nothing".
     mapper = get_mapper(_SUMMARIZE_PROMPT, n_results=1, max_tokens=SUMMARY_MAX_TOKENS,
                         reasoning_effort='low', label='read:summarize')
     return (await mapper.run(text)) or ''
@@ -1319,8 +1319,7 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         text = text[:READ_INPUT_CHAR_LIMIT - len(header)]
         truncated = True
     try:
-        summary = (await _summarize_source(
-            target, header + text)).strip()
+        summary = (await _summarize_source(header + text)).strip()
     except Exception as e:
         return f'error: summarize could not be run (the helper model failed: {e}).'
     if not summary:
