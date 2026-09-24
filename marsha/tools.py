@@ -54,7 +54,7 @@ from marsha.context import (
 from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
-from marsha.utils import run_subprocess
+from marsha.utils import JSON, run_subprocess
 
 # Safety cap on how many tool rounds one generation may spend issuing commands
 # before the stage falls back to its normal retry logic (the last, still-a-command
@@ -351,7 +351,7 @@ async def http_post(url: str, body: bytes, headers: dict[str, str] | None = None
     return await asyncio.to_thread(post)
 
 
-async def _mcp_tools_call(url: str, tool: str, arguments: dict[str, Any],
+async def _mcp_tools_call(url: str, tool: str, arguments: dict[str, JSON],
                           timeout: int = HTTP_TIMEOUT) -> Any:
     """One-shot MCP `tools/call` against a keyless endpoint: a single JSON-RPC
     POST with no initialize/session/streaming client. Returns the response's

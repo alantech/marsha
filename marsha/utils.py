@@ -8,6 +8,13 @@ import shutil
 from typing import cast
 
 
+# A JSON-serializable value: the shape of data that crosses an untyped boundary — a
+# json.loads/json.load result, a GitHub GraphQL payload, an LLM's JSON output, a /models
+# discovery response. Tighter than Any: it rules out non-JSON values (tuples, objects,
+# callables) while still allowing the arbitrary nesting that real JSON has.
+type JSON = bool | str | int | float | list[JSON] | dict[str, JSON] | None
+
+
 def prettify_time_delta(delta: float, max_depth: int = 2) -> str:
     rnd: 'Callable[[float], int]' = round if max_depth == 1 else int
     if not max_depth:
