@@ -7,7 +7,7 @@ from typing import cast
 from mistletoe import ast_renderer
 from mistletoe.block_token import Document
 
-from marsha.ast_nodes import AstNode, DocumentNode, child_text
+from marsha.ast_nodes import AstNode, DocumentNode, block_children, child_text
 from marsha.utils import read_file, get_filename_from_path
 
 
@@ -115,12 +115,13 @@ def validate_marsha_fn(fn: str, void: bool = False) -> None:
             raise Exception(
                 f'Invalid Marsha function: Not enough usage examples for `{fn_heading}`.')
     # Extract the description (the block nodes between the header and the trailing examples list,
-    # if any). to_markdown on a block node already concatenates its children, so this matches the
-    # former per-child iteration.
+    # if any). Render each block's children directly rather than the block itself, so block-level
+    # markers (a Quote's `> `, a List's `* `) do not count toward the length below.
     fn_desc = ''
     range_stop = len(ast['children']) - 1 if not void else len(ast['children'])
     for i in range(1, range_stop):
-        fn_desc += to_markdown(ast['children'][i])
+        for child in block_children(ast['children'][i]):
+            fn_desc += to_markdown(child)
     if len(fn_desc) <= 80:  # around a couple of sentences at least
         raise Exception(
             f'Invalid Marsha function: Description for `{fn_heading}` is too short.')

@@ -152,3 +152,16 @@ def child_text(children: list[AstNode]) -> str:
     if first['type'] == 'RawText':
         return first['content']
     raise Exception(f'expected a RawText leaf, got {first["type"]}')
+
+
+def block_children(node: AstNode) -> list[AstNode]:
+    # The child nodes of a container node. A Document's top-level children are always block
+    # nodes, so this is what callers iterating a document body (e.g. measuring a description's
+    # length, or rendering a block's children directly) use. Leaf/bare nodes (RawText/LineBreak/
+    # ThematicBreak/Table/...) have no children; meeting one here is a structural error.
+    if node['type'] in (
+            'Document', 'Heading', 'SetextHeading', 'Paragraph', 'Quote', 'List', 'ListItem',
+            'CodeFence', 'BlockCode', 'Emphasis', 'Strong', 'InlineCode', 'Strikethrough',
+            'EscapeSequence', 'Link', 'Image', 'AutoLink'):
+        return node['children']
+    raise Exception(f'{node["type"]} has no children')
