@@ -1147,7 +1147,20 @@ def test_list_tree_bounds_traversal(tmp_path: Any, monkeypatch: Any) -> None:
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     out = asyncio.run(tools.list_tree([], ctx))
     assert 'no files under' in out
-    assert 'traversal stopped after visiting 5 directories' in out
+    assert 'directory traversal was limited to 5 directories' in out
+
+
+def test_list_tree_flags_pruned_subdirs(tmp_path: Any, monkeypatch: Any) -> None:
+    # When the traversal budget cannot hold all subdirectories, the listing must say so even if
+    # the walk never exceeds the limit (the budget is consumed exactly): silently dropping
+    # directories would let a reviewer mistake an incomplete tree for a complete one.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 2)
+    for i in range(3):
+        (tmp_path / f'd{i}').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'directory traversal was limited to 2 directories' in out
 
 
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
@@ -1375,6 +1388,27 @@ def test_pinned_connection_uses_validated_address(monkeypatch: Any) -> None:
     with pytest.raises(Exception):
         tools._PinnedHTTPConnection('rebinding.example.com').connect()
     assert connected == [('93.184.216.34', 80)]  # the private address was never contacted
+
+
+def test_pinned_opener_ignores_environment_proxies(monkeypatch: Any) -> None:
+    # A proxy configured in the environment must not be used: the proxy would resolve and
+    # connect to the target itself, defeating the address pinning (and enabling egress to
+    # internal hosts via the proxy). A fetch must connect direct to the target's pinned address,
+    # never to the proxy.
+    monkeypatch.setenv('http_proxy', 'http://127.0.0.1:3128')
+    monkeypatch.setenv('https_proxy', 'http://127.0.0.1:3128')
+    attempted: list[Any] = []
+
+    def fake_create_connection(address: Any, timeout: Any = None,
+                               source_address: Any = None) -> Any:
+        attempted.append(address)
+        raise OSError('connection stopped for the test')
+    monkeypatch.setattr('socket.create_connection', fake_create_connection)
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('93.184.216.34', 80))])
+    with pytest.raises(Exception):
+        asyncio.run(tools.http_get('http://example.com/page'))
+    assert attempted == [('93.184.216.34', 80)]  # direct to the target, not the proxy
 
 
 def test_read_tools_available_in_every_phase() -> None:

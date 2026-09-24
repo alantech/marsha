@@ -439,6 +439,19 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_PinnedHTTPSConnection, req)
 
 
+def _build_pinned_opener() -> urllib.request.OpenerDirector:
+    # The opener every fetch in this module goes through. Security properties:
+    # - _SafeRedirectHandler asserts every redirect target before it is contacted;
+    # - the pinned connections validate and connect to one freshly resolved public address, so
+    #   DNS rebinding cannot reach a private host;
+    # - ProxyHandler({}) disables environment-configured proxies: a proxy would resolve and
+    #   connect to the target itself, re-opening the validation/connect gap (and allowing
+    #   egress to internal hosts via the proxy), so guarded fetches go direct by design.
+    return urllib.request.build_opener(
+        _SafeRedirectHandler(), _PinnedHTTPHandler(), _PinnedHTTPSHandler(),
+        urllib.request.ProxyHandler({}))
+
+
 async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """GET a URL off the event loop and return (status, content_type, body).
     The body is capped at MAX_HTTP_BYTES so a runaway page cannot exhaust
@@ -447,9 +460,9 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
     SSRF guard (three layers): the initial URL is asserted here; every
     redirect hop is asserted by _SafeRedirectHandler before the opener
     contacts it; and the pinned connections resolve, validate, and connect
-    to a single address at connect time, so DNS rebinding between the
-    checks and the connection cannot reach a private host. The final URL
-    is asserted once more before the body is returned."""
+    to a single address at connect time (no environment proxies), so DNS
+    rebinding cannot reach a private host. The final URL is asserted once
+    more before the body is returned."""
     def get() -> tuple[int, str, bytes]:
         assert_public_url(url)
         req = urllib.request.Request(
@@ -458,9 +471,7 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
                 'Accept': 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.8',
             })
-        opener = urllib.request.build_opener(
-            _SafeRedirectHandler(), _PinnedHTTPHandler(), _PinnedHTTPSHandler())
-        with opener.open(req, timeout=timeout) as resp:
+        with _build_pinned_opener().open(req, timeout=timeout) as resp:
             # Belt and braces on top of the per-hop checks in _SafeRedirectHandler.
             assert_public_url(resp.geturl())
             return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
@@ -470,7 +481,8 @@ async def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> tuple[int, str, byt
 async def http_post(url: str, body: bytes, headers: dict[str, str] | None = None,
                     timeout: int = HTTP_TIMEOUT) -> tuple[int, str, bytes]:
     """POST a bytes body off the event loop and return (status, content_type,
-    body). Mirrors http_get (browser UA, capped read) for the MCP endpoints."""
+    body). Mirrors http_get (browser UA, capped read, address-pinned direct
+    connections with no environment proxies) for the MCP endpoints."""
     def post() -> tuple[int, str, bytes]:
         req = urllib.request.Request(
             url, data=body, method='POST', headers={
@@ -478,7 +490,7 @@ async def http_post(url: str, body: bytes, headers: dict[str, str] | None = None
                 'Accept-Language': 'en-US,en;q=0.8',
                 **dict(headers or {}),
             })
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _build_pinned_opener().open(req, timeout=timeout) as resp:
             return resp.status, resp.headers.get('Content-Type', ''), resp.read(MAX_HTTP_BYTES)
     return await asyncio.to_thread(post)
 
@@ -1151,11 +1163,15 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         # directories are deliberately kept: the reviewer must be able to surface prior-issue
         # docs in dotfiles). Visit at most as many subdirectories as the traversal budget allows,
         # in sorted order, so a directory with an enormous number of entries is not walked or
-        # sorted past that budget.
-        keep = (d for d in dirnames if d not in LIST_TREE_SKIP_DIRS)
+        # sorted past that budget — and flag the listing incomplete when any are dropped, so a
+        # reviewer never mistakes a partial tree for a complete one.
+        keep = [d for d in dirnames if d not in LIST_TREE_SKIP_DIRS]
         remaining_dirs = LIST_TREE_MAX_DIRS - dirs_visited
-        dirnames[:] = (sorted(keep) if len(dirnames) <= remaining_dirs
-                       else heapq.nsmallest(remaining_dirs, keep))
+        if len(keep) > remaining_dirs:
+            dirs_truncated = True
+            dirnames[:] = heapq.nsmallest(remaining_dirs, keep)
+        else:
+            dirnames[:] = sorted(keep)
         room = LIST_TREE_MAX_ENTRIES - len(entries)
         if room <= 0:
             break
@@ -1176,7 +1192,8 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     if len(entries) >= LIST_TREE_MAX_ENTRIES:
         note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
     elif dirs_truncated:
-        note = f'\n[traversal stopped after visiting {LIST_TREE_MAX_DIRS} directories]'
+        note = (f'\n[listing incomplete: directory traversal was limited to '
+                f'{LIST_TREE_MAX_DIRS} directories]')
     else:
         note = ''
     if not entries:
