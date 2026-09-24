@@ -1374,15 +1374,16 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     assert 'was not searched' in out
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
-    assert 'only the first 40 chars of big.md were searched' in out2
+    assert 'only the first 10 chars of big.md were searched' in out2
 
 
 def test_find_in_file_multibyte_not_falsely_truncated(tmp_path: Any,
                                                       monkeypatch: Any) -> None:
     # Truncation must be judged by the characters actually read, not the byte size: a multibyte
-    # file whose bytes exceed the cap but whose characters do not is searched in full.
-    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
-    (tmp_path / 'uni.md').write_text('é' * 21)  # 21 chars, 42 UTF-8 bytes
+    # file whose bytes exceed the cap is searched in full when the characters (plus the 27-char
+    # header and '1: ' prefix) still fit.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 64)
+    (tmp_path / 'uni.md').write_text('é' * 34)  # 34 chars, 68 UTF-8 bytes
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out = asyncio.run(tools.find_in_file(['q', 'uni.md'], ctx))
@@ -1445,6 +1446,28 @@ def test_find_in_file_bounds_query_in_request(tmp_path: Any,
         out = asyncio.run(tools.find_in_file(['q' * 30, 'd.md'], ctx))
     assert len(seen['m'].req) <= 60
     out = asyncio.run(tools.find_in_file(['q' * 60, 'd.md'], ctx))
+    assert out.startswith('error:') and 'too large' in out
+
+
+def test_find_in_file_clips_single_oversized_line(tmp_path: Any,
+                                                  monkeypatch: Any) -> None:
+    # A file with one very long line cannot be trimmed by dropping lines, so the line itself is
+    # clipped to what fits after the header, and a header that leaves no room for even the
+    # empty '1: ' line is refused outright.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'one.md').write_text('x' * 100)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q' * 20, 'one.md'], ctx))
+    assert len(seen['m'].req) <= 60
+    assert 'only the first 11 chars of one.md were searched' in out
+    out = asyncio.run(tools.find_in_file(['q' * 32, 'one.md'], ctx))
     assert out.startswith('error:') and 'too large' in out
 
 

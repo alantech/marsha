@@ -1341,9 +1341,10 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     if not query:
         return 'error: find-in-file needs a non-empty query before the file path.'
     # Bound the WHOLE helper request, not just the document: the header carries the query and
-    # path (unbounded user text), so refuse it before any read when it cannot fit.
+    # path (unbounded user text), so refuse it before any read when it cannot fit. '1: ' is
+    # the shortest numbered line, so the header must leave room for it.
     header = f'# Query\n{query}\n\n# File: {path}\n\n'
-    if len(header) >= READ_INPUT_CHAR_LIMIT:
+    if len(header) + 3 > READ_INPUT_CHAR_LIMIT:
         return 'error: the query and path are too large for the input cap.'
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
@@ -1390,6 +1391,15 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
             numbered_len -= len(dropped) + 1
         else:
             numbered_len = 0
+        truncated = True
+    # A lone line cannot be dropped, but it can still be longer than the budget left after
+    # the header: clip it so the full request fits the cap (the check above guarantees an
+    # empty line fits, so the budget is never negative).
+    if numbered_len > READ_INPUT_CHAR_LIMIT - len(header):
+        kept = src_lines[0][:READ_INPUT_CHAR_LIMIT - len(header) - 3]
+        src_lines[0] = kept
+        numbered_lines[0] = f'1: {kept}'
+        numbered_len = len(numbered_lines[0])
         truncated = True
     numbered = '\n'.join(numbered_lines)
     # The source characters actually searched: the included lines plus the newlines between them.
