@@ -1124,6 +1124,20 @@ def _matches_ext(filename: str, exts: set[str]) -> bool:
     return os.path.splitext(filename.lower())[1] in exts
 
 
+def _list_tree_note(entry_capped: bool, char_capped: bool,
+                    dirs_truncated: bool) -> str:
+    # Listing note by reason (first match wins): entry cap, char cap, or traversal limit.
+    if entry_capped:
+        return f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
+    if char_capped:
+        return ('\n[listing truncated at the '
+                f'{RESULT_CHAR_LIMIT}-char result limit]')
+    if dirs_truncated:
+        return (f'\n[listing incomplete: traversal limited to {LIST_TREE_MAX_DIRS} '
+                f'directories and {LIST_TREE_MAX_NAMES_PER_DIR} entries per directory]')
+    return ''
+
+
 async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     """`list-tree [path] [--ext a,b,c]` — list the files in the working tree under a path
     (default: the root), optionally filtered to file types by extension. Read-only and sandboxed
@@ -1158,6 +1172,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         return f'error: `{path}` is not a directory in the working tree.'
     root = os.path.realpath(workdir)
     entries: list[str] = []
+    listing_len = 0  # sum of len(entry) + 1 per entry (the joining newlines)
     dirs_visited = 0
     dirs_truncated = False
 
@@ -1222,20 +1237,31 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         for fn in sorted(file_names)[:room]:
             rel = os.path.relpath(os.path.join(dirpath, fn), root)
             entries.append(rel)
+            listing_len += len(rel) + 1
         if len(entries) >= LIST_TREE_MAX_ENTRIES:
             break
-    if len(entries) >= LIST_TREE_MAX_ENTRIES:
-        note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
-    elif dirs_truncated:
-        note = (f'\n[listing incomplete: traversal limited to {LIST_TREE_MAX_DIRS} '
-                f'directories and {LIST_TREE_MAX_NAMES_PER_DIR} entries per directory]')
-    else:
-        note = ''
+    # Bound the result by characters as well as by entry count: many long paths can push the
+    # listing far past the shared tool-result budget, and one oversized result would bloat the
+    # reviewer's context. Drop whole paths from the tail — never a path in half — until the
+    # listing plus its note fits RESULT_CHAR_LIMIT (a single path always fits: a path is at
+    # most PATH_MAX long, well under the budget).
+    rel_start = os.path.relpath(start, root) or '.'
+    chars_truncated = False
+    while len(entries) > 1:
+        header = f'{len(entries)} file(s) under {rel_start}:\n'
+        note = _list_tree_note(len(entries) >= LIST_TREE_MAX_ENTRIES,
+                               chars_truncated, dirs_truncated)
+        if len(header) + listing_len - 1 + len(note) <= RESULT_CHAR_LIMIT:
+            break
+        listing_len -= len(entries.pop()) + 1
+        chars_truncated = True
+    note = _list_tree_note(len(entries) >= LIST_TREE_MAX_ENTRIES,
+                           chars_truncated, dirs_truncated)
     if not entries:
         scope = ' (no match for the extension filter)' if has_ext else ''
         return f'(no files under {path!r} to list{scope}){note}'
-    rel_start = os.path.relpath(start, root) or '.'
-    return f'{len(entries)} file(s) under {rel_start}:\n' + '\n'.join(entries) + note
+    header = f'{len(entries)} file(s) under {rel_start}:\n'
+    return header + '\n'.join(entries) + note
 
 
 _SUMMARIZE_PROMPT = '''You summarize a document into 1-3 short paragraphs. Capture what it is, the concrete points or facts it states, and anything that reads as a warning, lesson, or known problem. Be faithful to the source: do not add, infer, or editorialize beyond what it says. Output only the summary, with no preamble.

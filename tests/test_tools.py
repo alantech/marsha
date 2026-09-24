@@ -1227,6 +1227,18 @@ def test_list_tree_flags_pruned_subdirs(tmp_path: Any, monkeypatch: Any) -> None
     assert 'traversal limited to 2 directories' in out
 
 
+def test_list_tree_bounds_result_chars(tmp_path: Any) -> None:
+    # The entry-count cap alone does not bound the result: many long paths can push the listing
+    # past the shared tool-result budget, so whole paths are dropped from the tail (never a
+    # path in half) until the listing fits, and the listing says so.
+    for i in range(60):
+        (tmp_path / (('f' * 199) + f'{i:03d}.txt')).write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'result limit' in out
+
+
 def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     assert asyncio.run(tools.list_tree(['../..'], ctx)).startswith('error:')
