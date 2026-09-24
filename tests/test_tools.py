@@ -1195,6 +1195,18 @@ def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
     assert 'not a file' in asyncio.run(tools.summarize(['d'], ctx))
 
 
+def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
+                                                   monkeypatch: Any) -> None:
+    # Same byte-vs-character rule as find-in-file: 11 two-byte characters are 22 bytes (> the
+    # 20-char cap in bytes) but only 11 characters (<= the cap), so the whole file is read.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 20)
+    (tmp_path / 'uni.md').write_text('é' * 11)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.summarize(['uni.md'], ctx))
+    assert 'truncated' not in out
+
+
 def test_summarize_reports_helper_failure(tmp_path: Any) -> None:
     # A failed helper-model call is reported with its cause, not as a misleading "nothing".
     (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
@@ -1265,6 +1277,19 @@ def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> Non
     with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
         out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
     assert 'only the first part was searched' in out2
+
+
+def test_find_in_file_multibyte_not_falsely_truncated(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # Truncation must be judged by the characters actually read, not the byte size: a multibyte
+    # file whose bytes exceed the cap but whose characters do not is searched in full.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 20)
+    (tmp_path / 'uni.md').write_text('é' * 11)  # 11 characters, 22 UTF-8 bytes
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'uni.md'], ctx))
+    assert 'was searched' not in out
+    assert 'first part' not in out
 
 
 def test_find_in_file_reports_helper_failure(tmp_path: Any) -> None:

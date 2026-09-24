@@ -1255,9 +1255,14 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         if not os.path.isfile(resolved):
             return f'error: `{target}` is not a file in the working tree.'
         try:
-            truncated = os.path.getsize(resolved) > READ_INPUT_CHAR_LIMIT
+            # Read one character past the cap so truncation is judged by the characters actually
+            # read, not the byte size (a multibyte file can exceed the byte cap while its
+            # character count still fits, and must then be reported as fully read).
             with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
-                text = f.read(READ_INPUT_CHAR_LIMIT)
+                text = f.read(READ_INPUT_CHAR_LIMIT + 1)
+            truncated = len(text) > READ_INPUT_CHAR_LIMIT
+            if truncated:
+                text = text[:READ_INPUT_CHAR_LIMIT]
         except Exception as e:
             return f'error: could not read {target}: {e}'
     text = text.strip()
@@ -1294,9 +1299,14 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     if not os.path.isfile(resolved):
         return f'error: `{path}` is not a file in the working tree.'
     try:
-        truncated = os.path.getsize(resolved) > READ_INPUT_CHAR_LIMIT
+        # Read one character past the cap so truncation is judged by the characters actually
+        # read, not the byte size (a multibyte file can exceed the byte cap while its character
+        # count still fits, and must then be reported as fully read).
         with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read(READ_INPUT_CHAR_LIMIT)
+            text = f.read(READ_INPUT_CHAR_LIMIT + 1)
+        truncated = len(text) > READ_INPUT_CHAR_LIMIT
+        if truncated:
+            text = text[:READ_INPUT_CHAR_LIMIT]
     except Exception as e:
         return f'error: could not read {path}: {e}'
     # The numbered form (not the raw read) is what is sent to the helper model, and its per-line
