@@ -9,10 +9,14 @@ driven by a scripted fake mapper.
 
 from typing import Any
 import asyncio
+import http.client
 import importlib.util
+import io
 import json
 import os
 import subprocess
+import sys
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -164,7 +168,7 @@ def test_execute_handler_exception_is_error_text() -> None:
 # The command names, by category, for the (only) wired target: python. The
 # language-agnostic set is shared by every target; the registry + installed-env
 # sets are python-specific and layered on by the backend.
-AGNOSTIC = {'web-search', 'view-web-page', 'calc'}
+AGNOSTIC = {'web-search', 'view-web-page', 'calc', 'list-tree', 'summarize', 'find-in-file'}
 PY_REGISTRY = {'search-dependencies', 'dependency-docs'}
 ENV = {'list-dependencies', 'show-dependency', 'list-symbols', 'show-symbol'}
 
@@ -213,6 +217,8 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_INSTALLED_ENV} == ENV
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_GIT} == {'git'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
+        == {'list-tree', 'summarize', 'find-in-file'}
 
 
 def test_tool_instructions_lists_phase_tools() -> None:
@@ -371,6 +377,13 @@ def test_view_web_page_truncates_long_pages() -> None:
     assert out.rstrip().endswith('[page truncated]')
 
 
+def test_strip_tags_is_linear_on_tag_dense_input() -> None:
+    # A tag-dense document must be stripped in a single pass: re-slicing the whole
+    # fragment per tag would be quadratic and stall the tool on a near-limit page.
+    assert tools._strip_tags('<div>x</div>' * 12_000) == 'x' * 12_000
+    assert tools._strip_tags('<b>a</b>. <i>b</i>c') == 'a. b c'
+
+
 def test_view_web_page_rejects_bad_urls() -> None:
     assert asyncio.run(tools.view_web_page([])).startswith('error:')
     assert asyncio.run(tools.view_web_page(['a', 'b'])).startswith('error:')
@@ -499,6 +512,7 @@ def test_ssrf_blocks_local_and_private_ips() -> None:
     assert tools.is_blocked_host('10.1.2.3') is True
     assert tools.is_blocked_host('192.168.0.10') is True
     assert tools.is_blocked_host('169.254.169.254') is True  # cloud metadata
+    assert tools.is_blocked_host('100.64.0.1') is True  # shared address space (CGNAT)
     assert tools.is_blocked_host('0.0.0.0') is True
 
 
@@ -1077,6 +1091,995 @@ def test_impl_stage_without_tools_keeps_single_call_fanout() -> None:
     assert seen[0].kwargs.get('n_results') == 3
     assert 'web-search' not in seen[0].system
     assert isinstance(seen[0].requests[0], str)
+
+
+# --- read/exploration tools: sandbox, list-tree, summarize, find-in-file ----------
+
+
+class _SummMapper:
+    # A stand-in for the helper-model mapper the read tools build; records what it was asked.
+    def __init__(self, system: Any, **kw: Any) -> None:
+        self.system = system
+        self.kw = kw
+        self.req: Any = None
+
+    async def run(self, req: Any) -> Any:
+        self.req = req
+        return 'SUMMARY TEXT'
+
+
+def test_resolve_in_workdir_sandbox(tmp_path: Any) -> None:
+    root = str(tmp_path)
+    (tmp_path / 'sub').mkdir()
+    (tmp_path / 'sub' / 'a.md').write_text('x')
+    assert tools._resolve_in_workdir(root, '') == os.path.realpath(root)
+    assert tools._resolve_in_workdir(root, '.') == os.path.realpath(root)
+    assert tools._resolve_in_workdir(root, 'sub/a.md') == \
+        os.path.realpath(str(tmp_path / 'sub' / 'a.md'))
+    for bad in ('../outside', 'sub/../../outside', '~/secret', '/etc/passwd'):
+        assert tools._resolve_in_workdir(root, bad) is None, bad
+
+
+def test_list_tree_lists_and_filters(tmp_path: Any) -> None:
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs' / 'a.md').write_text('x')
+    (tmp_path / 'docs' / 'b.txt').write_text('x')
+    (tmp_path / 'main.py').write_text('x')
+    (tmp_path / '.hidden').write_text('x')
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'NOTES.md').write_text('x')
+    (tmp_path / '.mypy_cache').mkdir()
+    (tmp_path / '.mypy_cache' / 'cache.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree(['docs'], ctx))
+    assert 'a.md' in out and 'b.txt' in out and 'main.py' not in out
+    out2 = asyncio.run(tools.list_tree(['docs', '--ext', 'md'], ctx))
+    assert 'a.md' in out2 and 'b.txt' not in out2
+    out3 = asyncio.run(tools.list_tree([], ctx))
+    assert 'main.py' in out3
+    # Hidden files and directories are listed (a reviewer must be able to surface prior-issue
+    # docs kept in dotfiles); only the noisy skipped directories are pruned.
+    assert '.hidden' in out3 and '.claude/NOTES.md' in out3
+    assert '.mypy_cache' not in out3
+
+
+def test_list_tree_bounds_traversal(tmp_path: Any, monkeypatch: Any) -> None:
+    # The entry cap bounds output, not work: a tree of many empty directories must stop after
+    # the directory budget even when no files are found (an extension filter that matches
+    # nothing would otherwise walk the whole tree before the cap could trigger).
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 5)
+    for i in range(20):
+        d = tmp_path / f'd{i:02d}'
+        d.mkdir()
+        (d / 'a').mkdir()
+        (d / 'b').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 5 directories' in out
+
+
+def test_list_tree_flags_children_at_dir_cap(tmp_path: Any, monkeypatch: Any) -> None:
+    # The last directory the cap allows may itself have children: dropping them (a zero
+    # remaining budget) must be reported, not silently swallowed.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 2)
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'a' / 'child').mkdir()
+    (tmp_path / 'b').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 2 directories' in out
+
+
+def test_list_tree_flags_unreadable_directory(tmp_path: Any, monkeypatch: Any) -> None:
+    # A directory that fails to scan must mark the listing incomplete, not present a
+    # complete-looking listing of what happened to be read.
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'a' / 'x.txt').write_text('x')
+    (tmp_path / 'secret').mkdir()
+    (tmp_path / 'secret' / 'y.txt').write_text('y')
+    orig_scandir = os.scandir
+
+    def flaky(path: Any, *a: Any, **k: Any) -> Any:
+        # The walk scans by directory descriptor; translate it back to a path so the
+        # fake can still target the 'secret' directory by name.
+        if isinstance(path, int):
+            path = os.readlink(f'/proc/self/fd/{path}')
+        if str(path).endswith('secret'):
+            raise PermissionError('unreadable')
+        return orig_scandir(path, *a, **k)
+    monkeypatch.setattr('os.scandir', flaky)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'a/x.txt' in out
+    assert 'incomplete' in out
+
+
+def test_list_tree_flags_per_entry_stat_error(tmp_path: Any,
+                                              monkeypatch: Any) -> None:
+    # An entry whose metadata lookup fails is skipped, but the listing must say it is
+    # incomplete, not look complete.
+    (tmp_path / 'ok.txt').write_text('x')
+    (tmp_path / 'bad.txt').write_text('x')
+    orig_scandir = os.scandir
+
+    class Flaky:
+        def __init__(self, entry: Any) -> None:
+            self._e = entry
+
+        @property
+        def name(self) -> Any:
+            return self._e.name
+
+        def is_dir(self) -> Any:
+            if self._e.name == 'bad.txt':
+                raise OSError('stat failed')
+            return self._e.is_dir()
+
+        def is_symlink(self) -> Any:
+            return self._e.is_symlink()
+
+    def flaky(path: Any, *a: Any, **k: Any) -> Any:
+        return [Flaky(e) for e in orig_scandir(path, *a, **k)]
+    monkeypatch.setattr('os.scandir', flaky)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'ok.txt' in out
+    assert 'bad.txt' not in out
+    assert 'incomplete' in out
+
+
+def test_list_tree_bounds_queue_on_wide_tree(tmp_path: Any, monkeypatch: Any) -> None:
+    # A wide tree must not balloon the pending-directory queue beyond the visit cap (every
+    # queued path is a string allocation; uncapped, a directory-heavy tree queues O(D^2) of
+    # them). The excess siblings are dropped and the listing says so.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 5)
+    for i in range(4):
+        d = tmp_path / f'd{i}'
+        d.mkdir()
+        for j in range(4):
+            (d / f'c{j}').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 5 directories' in out
+
+
+def test_list_tree_bounds_per_directory_scan(tmp_path: Any, monkeypatch: Any) -> None:
+    # A single directory with more entries than the per-directory budget is scanned only
+    # partially (bounded time) and the listing says it is incomplete.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_NAMES_PER_DIR', 5)
+    big = tmp_path / 'big'
+    big.mkdir()
+    for i in range(20):
+        (big / f'f{i:02d}.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'traversal limited to' in out
+    assert out.count('big/') == 5  # only the first 5 of the 20 entries were listed
+
+
+def test_list_tree_flags_pruned_subdirs(tmp_path: Any, monkeypatch: Any) -> None:
+    # When the traversal budget cannot hold all subdirectories, the listing must say so even if
+    # the walk never exceeds the limit (the budget is consumed exactly): silently dropping
+    # directories would let a reviewer mistake an incomplete tree for a complete one.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_DIRS', 2)
+    for i in range(3):
+        (tmp_path / f'd{i}').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'no files under' in out
+    assert 'traversal limited to 2 directories' in out
+
+
+def test_list_tree_bounds_result_chars(tmp_path: Any) -> None:
+    # The entry-count cap alone does not bound the result: many long paths can push the listing
+    # past the shared tool-result budget, so whole paths are dropped from the tail (never a
+    # path in half) until the listing fits, and the listing says so.
+    for i in range(60):
+        (tmp_path / (('f' * 199) + f'{i:03d}.txt')).write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'result limit' in out
+
+
+def test_list_tree_drops_lone_oversized_path(tmp_path: Any, monkeypatch: Any) -> None:
+    # On long-path platforms (Windows) one path can exceed the result budget: a lone
+    # path that cannot fit is dropped too, so the result still fits the cap and the
+    # note says the listing was truncated at the result limit.
+    monkeypatch.setattr(tools, 'RESULT_CHAR_LIMIT', 300)
+    deep = tmp_path
+    for _ in range(8):
+        deep = deep / ('d' * 60)
+        deep.mkdir()
+    (deep / 'f.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert len(out) <= 300
+    assert 'result limit' in out
+
+
+def test_list_tree_distinguishes_complete_cap_listing(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # Hitting the entry cap without a dropped entry is not proof of truncation:
+    # exactly N matching files are listed in full; a dropped file or an unvisited
+    # directory says the listing stopped.
+    monkeypatch.setattr(tools, 'LIST_TREE_MAX_ENTRIES', 3)
+    for i in range(3):
+        (tmp_path / f'f{i}.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'truncated' not in out and 'limited to 3' not in out
+    (tmp_path / 'f3.txt').write_text('x')  # a fourth file: one was dropped
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'truncated at 3 entries' in out
+    (tmp_path / 'f3.txt').unlink()
+    (tmp_path / 'empty').mkdir()  # an unvisited directory: more may exist
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'may have more' in out
+
+
+def test_list_tree_rejects_escaping_and_missing_workdir(tmp_path: Any) -> None:
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    assert asyncio.run(tools.list_tree(['../..'], ctx)).startswith('error:')
+    assert 'no working directory' in asyncio.run(
+        tools.list_tree([], tools.ToolContext('review')))
+
+
+def test_summarize_file_uses_helper_model(tmp_path: Any) -> None:
+    (tmp_path / 'notes.md').write_text('# Notes\nthe body\n')
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.summarize(
+            ['notes.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert out.startswith('Summary of notes.md')
+    assert 'SUMMARY TEXT' in out
+    assert '# Notes' in seen['m'].req
+    assert seen['m'].kw.get('label') == 'read:summarize'
+
+
+def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
+    (tmp_path / 'd').mkdir()
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    esc = asyncio.run(tools.summarize(['../secret.md'], ctx))
+    assert esc.startswith('error:') and 'escapes the working tree' in esc
+    assert 'not a file' in asyncio.run(tools.summarize(['d'], ctx))
+
+
+def test_summarize_rejects_swapped_symlink(tmp_path: Any, monkeypatch: Any) -> None:
+    # The check-then-open is a race: between the containment check and the open, the
+    # file can be swapped for an outside-pointing symlink. The open must re-verify
+    # containment on the descriptor and refuse such a swap.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'doc.md').write_text('x')
+    secret = tmp_path / 'secret.md'
+    secret.write_text('secret')
+    orig_resolve = tools._resolve_in_workdir
+
+    def swapping(workdir: Any, requested: Any) -> Any:
+        resolved = orig_resolve(workdir, requested)
+        os.replace(tree / 'doc.md', tree / 'gone.md')
+        os.symlink(secret, tree / 'doc.md')
+        return resolved
+    monkeypatch.setattr(tools, '_resolve_in_workdir', swapping)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.summarize(['doc.md'], ctx))
+    assert out.startswith('error:') and 'working tree' in out
+
+
+def test_fd_target_path_reports_opened_file(tmp_path: Any) -> None:
+    # The descriptor->path facility (where the OS provides one) must name the real
+    # file behind the descriptor, so the post-open containment check can compare it.
+    p = tmp_path / 'f.txt'
+    p.write_text('x')
+    fd = os.open(p, os.O_RDONLY)
+    try:
+        target = tools._fd_target_path(fd)
+    finally:
+        os.close(fd)
+    assert target is None or os.path.realpath(target) == os.path.realpath(str(p))
+
+
+def test_open_workdir_file_rejects_unknown_target(tmp_path: Any,
+                                                   monkeypatch: Any) -> None:
+    # Where the opened file's target cannot be determined, the open is refused:
+    # failing open would let a swap slip past the post-open containment check.
+    (tmp_path / 'f.txt').write_text('x')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: None)
+    with pytest.raises(OSError):
+        tools._open_workdir_file(str(tmp_path), str(tmp_path / 'f.txt'))
+
+
+def test_open_workdir_file_rejects_outside_descriptor(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # When the facility reports the descriptor pointing outside the tree, the open
+    # is refused even though the pre-open check passed.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'f.txt').write_text('x')
+    outside = tmp_path / 'outside.md'
+    outside.write_text('secret')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: str(outside))
+    with pytest.raises(OSError):
+        tools._open_workdir_file(str(tree), str(tree / 'f.txt'))
+
+
+def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) -> None:
+    # A directory queued for the walk can be swapped for an outside-pointing symlink
+    # before it is scanned: the scan opens it by descriptor and re-verifies containment
+    # on that descriptor, so the outside tree is never listed, and the listing says it
+    # is incomplete.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'leak.txt').write_text('x')
+    orig_open = os.open
+
+    def swapping(path: Any, flags: Any = 0, *a: Any, **k: Any) -> Any:
+        if str(path) == str(tree / 'd') and not (tree / 'd').is_symlink():
+            os.replace(tree / 'd', tree / 'd.real')
+            os.symlink(outside, tree / 'd')
+        return orig_open(path, flags, *a, **k)
+    monkeypatch.setattr('os.open', swapping)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'leak.txt' not in out
+    assert 'incomplete' in out
+
+
+def test_list_tree_refuses_directory_with_unknown_target(tmp_path: Any,
+                                                          monkeypatch: Any) -> None:
+    # A directory whose descriptor target cannot be determined is not listed:
+    # failing open would let a swapped path slip past the containment check.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: None)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'inner.txt' not in out
+    assert 'incomplete' in out
+
+
+def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
+                                                           monkeypatch: Any) -> None:
+    # The Windows branch has no fd-based scandir: it enumerates through the open
+    # descriptor (NtQueryDirectoryFile), so a path swap installed after the open
+    # cannot redirect the read — the listing comes from the descriptor's contents,
+    # and a symlinked directory is not descended into.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'real.txt').write_text('x')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'leak.txt').write_text('x')
+    # Force asyncio's lazy event-loop-policy init while still on Linux: with
+    # sys.platform patched to win32, a first asyncio.run in the process would
+    # select the Windows policy and fail to import _overlapped.
+    asyncio.new_event_loop().close()
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    orig_open = os.open
+
+    def swapping(path: str) -> int:
+        # open the real directory, then swap the path for an outside symlink
+        fd = orig_open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        if path == str(tree / 'd'):
+            os.replace(tree / 'd', tree / 'd.real')
+            os.symlink(outside, tree / 'd')
+        return fd
+    monkeypatch.setattr(tools, '_open_dir_fd', swapping)
+    calls: list[int] = []
+
+    def fake_scandir(fd: int, limit: int) -> Any:
+        calls.append(fd)
+        if len(calls) == 1:
+            return (
+                [
+                    tools._WindowsDirEntry('keep.txt', False, False),
+                    tools._WindowsDirEntry('d', True, False),
+                    tools._WindowsDirEntry('link', True, True),
+                ],
+                False,
+            )
+        return ([tools._WindowsDirEntry('inner.txt', False, False)], False)
+    monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'keep.txt' in out
+    assert 'd/inner.txt' in out
+    assert 'link/inner.txt' not in out  # symlinked dir not descended
+    assert 'real.txt' not in out  # disk contents never read by path
+    assert 'leak.txt' not in out  # outside tree never enumerated
+    assert len(calls) == 2  # only the root and d were enumerated
+    assert 'incomplete' not in out
+
+
+def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
+                                                          monkeypatch: Any) -> None:
+    # When the descriptor-bound enumeration fails, the directory is not listed
+    # partially: the listing says it is incomplete.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    # Force asyncio's lazy event-loop-policy init while still on Linux (see the
+    # note in test_list_tree_windows_branch_reads_through_descriptor).
+    asyncio.new_event_loop().close()
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    orig_open = os.open
+
+    def fake_open_dir(path: str) -> int:
+        return orig_open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    monkeypatch.setattr(tools, '_open_dir_fd', fake_open_dir)
+
+    def fake_scandir(fd: int, limit: int) -> Any:
+        raise OSError('NtQueryDirectoryFile failed')
+    monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'inner.txt' not in out
+    assert 'incomplete' in out
+
+
+def test_windows_enumeration_stops_at_end_of_directory(monkeypatch: Any) -> None:
+    # NtQueryDirectoryFile returns NTSTATUS as a signed 32-bit value: the normal
+    # end-of-directory status 0x80000006 arrives as a negative number, and the
+    # enumeration must stop there with the entries it collected, not raise.
+    import ctypes
+    from ctypes import wintypes
+    import types
+
+    def fake_get_osfhandle(fd: int) -> int:
+        return 0x1234
+    fake_msvcrt = types.SimpleNamespace(get_osfhandle=fake_get_osfhandle)
+    monkeypatch.setitem(sys.modules, 'msvcrt', fake_msvcrt)
+
+    class _hdr(ctypes.Structure):
+        # The same fields the production code parses, so the record below has
+        # the same layout the code expects on this platform.
+        _fields_ = [
+            ('next_entry_offset', wintypes.ULONG),
+            ('file_index', wintypes.ULONG),
+            ('creation_time', ctypes.c_int64),
+            ('last_access_time', ctypes.c_int64),
+            ('last_write_time', ctypes.c_int64),
+            ('change_time', ctypes.c_int64),
+            ('end_of_file', ctypes.c_int64),
+            ('allocation_size', ctypes.c_int64),
+            ('file_attributes', wintypes.ULONG),
+            ('file_name_length', wintypes.ULONG),
+        ]
+
+    header_size = ctypes.sizeof(_hdr)
+    raw_name = 'file.txt'.encode('utf-16-le')
+    header = _hdr()
+    header.file_index = 1
+    header.file_attributes = 0x20  # a normal file
+    header.file_name_length = len(raw_name)
+    record = ctypes.string_at(ctypes.addressof(header), header_size) + raw_name
+
+    state = {'calls': 0}
+
+    def fake_ntqdf(handle: Any, event: Any, apc: Any, apc_ctx: Any,
+                   io_block: Any, buffer: Any, length: Any, info_class: Any,
+                   restart: Any, file_name: Any) -> int:
+        state['calls'] += 1
+        if state['calls'] == 1:
+            io_block[0].information = len(record)
+            buffer[:len(record)] = record
+            return 0
+        return 0x80000006 - 0x100000000  # STATUS_NO_MORE_FILES, signed 32-bit
+
+    fake_ntdll = types.SimpleNamespace(NtQueryDirectoryFile=fake_ntqdf)
+
+    def fake_windll(*args: Any, **kwargs: Any) -> Any:
+        return fake_ntdll
+    monkeypatch.setattr(ctypes, 'WinDLL', fake_windll, raising=False)
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    entries, more = tools._scandir_dir_fd_windows(3, 10)
+    assert [e.name for e in entries] == ['file.txt']
+    assert not entries[0].is_dir()
+    assert not entries[0].is_symlink()
+    assert more is False  # no (limit+1)th entry exists
+    assert state['calls'] == 2
+
+
+def test_windows_enumeration_stops_at_the_entry_limit(monkeypatch: Any) -> None:
+    # The enumeration is bounded by the caller's per-directory limit: a directory
+    # with more entries than the limit stops after the (limit+1)th and reports
+    # `more`, so a wide directory is never fully materialized.
+    import ctypes
+    from ctypes import wintypes
+    import types
+
+    def fake_get_osfhandle(fd: int) -> int:
+        return 0x1234
+    fake_msvcrt = types.SimpleNamespace(get_osfhandle=fake_get_osfhandle)
+    monkeypatch.setitem(sys.modules, 'msvcrt', fake_msvcrt)
+
+    class _hdr(ctypes.Structure):
+        _fields_ = [
+            ('next_entry_offset', wintypes.ULONG),
+            ('file_index', wintypes.ULONG),
+            ('creation_time', ctypes.c_int64),
+            ('last_access_time', ctypes.c_int64),
+            ('last_write_time', ctypes.c_int64),
+            ('change_time', ctypes.c_int64),
+            ('end_of_file', ctypes.c_int64),
+            ('allocation_size', ctypes.c_int64),
+            ('file_attributes', wintypes.ULONG),
+            ('file_name_length', wintypes.ULONG),
+        ]
+
+    header_size = ctypes.sizeof(_hdr)
+
+    def make_record(index: int, name: str) -> bytes:
+        raw_name = name.encode('utf-16-le')
+        header = _hdr()
+        header.file_index = index
+        header.file_attributes = 0x20  # a normal file
+        header.file_name_length = len(raw_name)
+        return ctypes.string_at(ctypes.addressof(header), header_size) + raw_name
+
+    records = [make_record(1, 'one.txt'), make_record(2, 'two.txt'),
+               make_record(3, 'three.txt')]
+    state = {'calls': 0}
+
+    def fake_ntqdf(handle: Any, event: Any, apc: Any, apc_ctx: Any,
+                   io_block: Any, buffer: Any, length: Any, info_class: Any,
+                   restart: Any, file_name: Any) -> int:
+        state['calls'] += 1
+        if state['calls'] <= len(records):
+            record = records[state['calls'] - 1]
+            io_block[0].information = len(record)
+            buffer[:len(record)] = record
+            return 0
+        return 0x80000006 - 0x100000000  # STATUS_NO_MORE_FILES, signed 32-bit
+
+    fake_ntdll = types.SimpleNamespace(NtQueryDirectoryFile=fake_ntqdf)
+
+    def fake_windll(*args: Any, **kwargs: Any) -> Any:
+        return fake_ntdll
+    monkeypatch.setattr(ctypes, 'WinDLL', fake_windll, raising=False)
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    entries, more = tools._scandir_dir_fd_windows(3, 2)
+    assert [e.name for e in entries] == ['one.txt', 'two.txt']
+    assert more is True  # a third entry exists beyond the limit
+    assert state['calls'] == 3  # stopped as soon as the third entry was seen
+
+
+def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
+                                                   monkeypatch: Any) -> None:
+    # Same byte-vs-character rule as find-in-file: 21 two-byte characters are 42 bytes (more
+    # than the 40-char cap, in bytes) but only 21 characters (within the cap), so the whole
+    # file is read.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
+    (tmp_path / 'uni.md').write_text('é' * 21)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.summarize(['uni.md'], ctx))
+    assert 'truncated' not in out
+
+
+def test_summarize_url_clips_text_to_input_cap(monkeypatch: Any) -> None:
+    # The URL path must honor READ_INPUT_CHAR_LIMIT like the file path: a page body of up to
+    # MAX_HTTP_BYTES must not reach the helper model unclipped.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 50)
+
+    async def fake_get(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', ('a' * 500).encode()
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=fake_get), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' in out
+    # The full request (header + text), not just the text, must stay within the cap.
+    assert len(seen['m'].req) <= 50
+
+
+def test_summarize_refuses_oversized_header(monkeypatch: Any) -> None:
+    # The header carries the target, so a URL that alone cannot fit the cap is refused before
+    # any fetch is attempted.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 30)
+    out = asyncio.run(tools.summarize(
+        ['https://public.example.com/' + 'a' * 40], None))
+    assert out.startswith('error:') and 'too large' in out
+
+
+def test_summarize_bounded_url_validation_error() -> None:
+    # The SSRF guard's error names the host: with a near-cap hostname the echoed
+    # error is clipped, so the result stays within the shared result budget.
+    url = 'https://' + 'a' * 190_000 + '/x'
+    out = asyncio.run(tools.summarize([url], None))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'error truncated' in out
+
+
+def test_summarize_exact_size_body_not_falsely_truncated(monkeypatch: Any) -> None:
+    # http_get reads one byte past the cap, so a body of exactly MAX_HTTP_BYTES is a
+    # complete response (no false truncation warning); one byte more is clipped.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 2_000_000)
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+
+    async def exact(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', b'a' * tools.MAX_HTTP_BYTES
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=exact), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(
+            tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' not in out
+
+    async def clipped(url: Any, timeout: Any = None) -> Any:
+        return 200, 'text/plain', b'a' * (tools.MAX_HTTP_BYTES + 1)
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(tools, 'http_get', new=clipped), \
+         patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(
+            tools.summarize(['https://public.example.com/doc'], None))
+    assert 'truncated' in out
+
+
+def test_summarize_reports_helper_failure(tmp_path: Any) -> None:
+    # A failed helper-model call is reported with its cause, not as a misleading "nothing".
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+
+    class Boom:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            raise Exception('rate limited')
+
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: Boom(system, **kw)):
+        out = asyncio.run(tools.summarize(['notes.md'], ctx))
+    assert out.startswith('error:') and 'rate limited' in out
+
+
+def test_find_in_file_uses_helper_model(tmp_path: Any) -> None:
+    (tmp_path / 'docs.md').write_text('line one\nthe crash cause\nline three\n')
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(
+            ['crash cause', 'docs.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert out.startswith('Relevant parts of docs.md for: crash cause')
+    assert 'SUMMARY TEXT' in out
+    assert 'the crash cause' in seen['m'].req
+    assert seen['m'].kw.get('label') == 'read:find-in-file'
+
+
+def test_find_in_file_reports_no_relevant_content(tmp_path: Any) -> None:
+    (tmp_path / 'docs.md').write_text('x\n')
+
+    class NoRel:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            return 'NO RELEVANT CONTENT'
+
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: NoRel(system, **kw)):
+        out = asyncio.run(tools.find_in_file(
+            ['zebra', 'docs.md'], tools.ToolContext('review', workdir=str(tmp_path))))
+    assert 'No content in docs.md is relevant to: zebra' in out
+
+
+def test_find_in_file_reports_truncation(tmp_path: Any, monkeypatch: Any) -> None:
+    # A file longer than the read cap is only partially searched, so "no relevant content" must
+    # not be presented as definitive (the relevant passage may lie past the cap).
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 40)
+    (tmp_path / 'big.md').write_text(
+        'a line of text that is longer than the read cap for sure\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+
+    class NoRel:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            return 'NO RELEVANT CONTENT'
+
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: NoRel(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
+    assert 'was not searched' in out
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out2 = asyncio.run(tools.find_in_file(['q', 'big.md'], ctx))
+    assert 'only the first 10 chars of big.md were searched' in out2
+
+
+def test_find_in_file_multibyte_not_falsely_truncated(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # Truncation must be judged by the characters actually read, not the byte size: a multibyte
+    # file whose bytes exceed the cap is searched in full when the characters (plus the 27-char
+    # header and '1: ' prefix) still fit.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 64)
+    (tmp_path / 'uni.md').write_text('é' * 34)  # 34 chars, 68 UTF-8 bytes
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'uni.md'], ctx))
+    assert 'was searched' not in out
+    assert 'first part' not in out
+
+
+def test_find_in_file_reports_helper_failure(tmp_path: Any) -> None:
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+
+    class Boom:
+        def __init__(self, system: Any, **kw: Any) -> None:
+            pass
+
+        async def run(self, req: Any) -> Any:
+            raise Exception('rate limited')
+
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=lambda system, **kw: Boom(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q', 'notes.md'], ctx))
+    assert out.startswith('error:') and 'rate limited' in out
+
+
+def test_find_in_file_bounds_numbered_prompt(tmp_path: Any, monkeypatch: Any) -> None:
+    # Numbering prefixes every line, so a newline-dense file that fits the read cap can still
+    # push the numbered prompt past it: the numbered text itself is trimmed back to the cap.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'dense.md').write_text('\n'.join(['x'] * 40) + '\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q', 'dense.md'], ctx))
+    # The full request (header + numbered document), not just the document, must stay within
+    # the cap.
+    assert len(seen['m'].req) <= 60
+    # 6 one-char lines fit the remaining budget (header 29 + numbered 29 = 58 <= 60), so the
+    # note must say 11, not the 60-char cap.
+    assert 'only the first 11 chars of dense.md were searched' in out
+
+
+def test_find_in_file_bounds_query_in_request(tmp_path: Any,
+                                              monkeypatch: Any) -> None:
+    # The header carries the (unbounded) query and path, so a query that alone cannot fit the
+    # cap is refused outright, and a long query trims the document to what still fits.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'd.md').write_text('x\n' * 10)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q' * 30, 'd.md'], ctx))
+    assert len(seen['m'].req) <= 60
+    out = asyncio.run(tools.find_in_file(['q' * 60, 'd.md'], ctx))
+    assert out.startswith('error:') and 'too large' in out
+
+
+def test_find_in_file_clips_single_oversized_line(tmp_path: Any,
+                                                  monkeypatch: Any) -> None:
+    # A file with one very long line cannot be trimmed by dropping lines, so the line itself is
+    # clipped to what fits after the header, and a header that leaves no room for even the
+    # empty '1: ' line is refused outright.
+    monkeypatch.setattr(tools, 'READ_INPUT_CHAR_LIMIT', 60)
+    (tmp_path / 'one.md').write_text('x' * 100)
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        seen['m'] = m
+        return m
+    with patch.object(tools, 'get_mapper', new=make):
+        out = asyncio.run(tools.find_in_file(['q' * 20, 'one.md'], ctx))
+    assert len(seen['m'].req) <= 60
+    assert 'only the first 11 chars of one.md were searched' in out
+    out = asyncio.run(tools.find_in_file(['q' * 32, 'one.md'], ctx))
+    assert out.startswith('error:') and 'too large' in out
+
+
+def test_find_in_file_bounds_echoed_query(tmp_path: Any) -> None:
+    # The query is echoed into the result; a query near the read cap must not
+    # make the tool result far exceed the shared result budget.
+    (tmp_path / 'd.md').write_text('x\n')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper',
+                      new=lambda system, **kw: _SummMapper(system, **kw)):
+        out = asyncio.run(tools.find_in_file(['q' * 100_000, 'd.md'], ctx))
+    assert len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'query truncated' in out
+
+
+def test_read_tools_bound_echoed_paths(tmp_path: Any) -> None:
+    # A near-limit path argument is echoed only as a bounded prefix, in the
+    # escape error of both read tools alike.
+    long = '../' + 'a' * 100_000
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.summarize([long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'target truncated' in out
+    out = asyncio.run(tools.find_in_file(['q', long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
+    out = asyncio.run(tools.list_tree([long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
+    empty = tmp_path / 'e'
+    empty.mkdir()
+    # a long but valid directory argument: the empty-list response bounds it too
+    out = asyncio.run(tools.list_tree(['e' + ('/./' * 50_000)], ctx))
+    assert 'no files under' in out and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
+    # a read failure echoes the bounded path too (the raw argument is not in the error)
+    if os.geteuid() != 0:  # as root, the permission trick below cannot fail the read
+        deep = tmp_path
+        for _ in range(60):
+            deep = deep / ('d' * 60)
+            deep.mkdir()
+        victim = deep / 'f.txt'
+        victim.write_text('x')
+        os.chmod(victim, 0)
+        try:
+            rel = os.path.relpath(str(victim), str(tmp_path))
+            out = asyncio.run(tools.find_in_file(['q', rel], ctx))
+            assert out.startswith('error:') and 'could not read' in out
+            assert 'path truncated' in out and len(out) <= tools.RESULT_CHAR_LIMIT
+        finally:
+            os.chmod(victim, 0o644)
+
+
+def test_http_get_blocks_private_initial_url() -> None:
+    # http_get asserts the initial URL itself, so a private/local target is refused before any
+    # request is made (no network needed to prove it).
+    with pytest.raises(Exception):
+        asyncio.run(tools.http_get('http://localhost/secret'))
+
+
+def test_http_get_rechecks_redirect_destination() -> None:
+    # Even with the per-hop redirect checks in place, the final URL is re-asserted before the
+    # body is handed back (defense in depth against any handler path the opener might take).
+    resp = SimpleNamespace(status=200, headers={'Content-Type': 'text/plain'},
+                           geturl=lambda: 'http://localhost/secret')
+    resp.read = lambda _n: b'oops'
+    cm = SimpleNamespace(__enter__=lambda _s: resp, __exit__=lambda _s, *_a: False)
+    opener = SimpleNamespace(open=lambda _req, timeout=None: cm)
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+         patch.object(urllib.request, 'build_opener', return_value=opener):
+        with pytest.raises(Exception):
+            asyncio.run(tools.http_get('https://public.example.com/r'))
+
+
+def test_safe_redirect_handler_refuses_private_target() -> None:
+    # The redirect-SSRF fix proper: each redirect target is asserted *before* the opener
+    # contacts it, so a public URL 302-ing to a local host is never reached at all (the earlier
+    # final-URL check ran after urlopen had already connected to the private destination).
+    handler = tools._SafeRedirectHandler()
+    req = urllib.request.Request('https://public.example.com/r')
+    fp = io.BytesIO(b'')
+    headers = http.client.HTTPMessage()
+    with pytest.raises(Exception):
+        handler.redirect_request(req, fp, 302, 'Found', headers, 'http://localhost/secret')
+
+
+def test_safe_redirect_handler_allows_public_target() -> None:
+    # A redirect to a public host still goes through, so legitimate 301/302 chains work.
+    handler = tools._SafeRedirectHandler()
+    req = urllib.request.Request('https://public.example.com/r')
+    fp = io.BytesIO(b'')
+    headers = http.client.HTTPMessage()
+    with patch('socket.getaddrinfo',
+               return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]):
+        new = handler.redirect_request(req, fp, 302, 'Found', headers,
+                                       'https://other.example.com/page')
+    assert new is not None and new.full_url == 'https://other.example.com/page'
+
+
+def test_resolve_public_address_prefers_public_ip(monkeypatch: Any) -> None:
+    # A host resolving to both private and public addresses pins the public one.
+    infos = [(2, 1, 6, '', ('10.0.0.5', 80)), (2, 1, 6, '', ('93.184.216.34', 80))]
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: infos)
+    assert tools._resolve_public_address('mixed.example.com', 80) == '93.184.216.34'
+
+
+def test_resolve_public_address_blocks_private_only(monkeypatch: Any) -> None:
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('192.168.1.5', 80))])
+    with pytest.raises(Exception):
+        tools._resolve_public_address('private.example.com', 80)
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
+    with pytest.raises(Exception):
+        tools._resolve_public_address('gone.example.com', 80)
+
+
+def test_pinned_connection_uses_validated_address(monkeypatch: Any) -> None:
+    # The pinned connection must connect to the address it validated itself (no re-resolution
+    # between check and connect, which DNS rebinding exploits); a private-only resolution must
+    # not connect at all.
+    connected: list[Any] = []
+    fake_sock = SimpleNamespace(setsockopt=lambda *_a, **_k: None)
+
+    def fake_create_connection(address: Any, timeout: Any = None,
+                               source_address: Any = None) -> Any:
+        connected.append(address)
+        return fake_sock
+    monkeypatch.setattr('socket.create_connection', fake_create_connection)
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('93.184.216.34', 80))])
+    tools._PinnedHTTPConnection('public.example.com').connect()
+    assert connected == [('93.184.216.34', 80)]
+
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('127.0.0.1', 80))])
+    with pytest.raises(Exception):
+        tools._PinnedHTTPConnection('rebinding.example.com').connect()
+    assert connected == [('93.184.216.34', 80)]  # the private address was never contacted
+
+
+def test_pinned_opener_ignores_environment_proxies(monkeypatch: Any) -> None:
+    # A proxy configured in the environment must not be used: the proxy would resolve and
+    # connect to the target itself, defeating the address pinning (and enabling egress to
+    # internal hosts via the proxy). A fetch must connect direct to the target's pinned address,
+    # never to the proxy.
+    monkeypatch.setenv('http_proxy', 'http://127.0.0.1:3128')
+    monkeypatch.setenv('https_proxy', 'http://127.0.0.1:3128')
+    attempted: list[Any] = []
+
+    def fake_create_connection(address: Any, timeout: Any = None,
+                               source_address: Any = None) -> Any:
+        attempted.append(address)
+        raise OSError('connection stopped for the test')
+    monkeypatch.setattr('socket.create_connection', fake_create_connection)
+    monkeypatch.setattr('socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('93.184.216.34', 80))])
+    with pytest.raises(Exception):
+        asyncio.run(tools.http_get('http://example.com/page'))
+    assert attempted == [('93.184.216.34', 80)]  # direct to the target, not the proxy
+
+
+def test_read_tools_available_in_every_phase() -> None:
+    b = backends.current()
+    for phase in ('gen', 'oracle-opt', 'impl-opt', 'correction'):
+        cmds = tools.build_commands(tools.ToolContext(phase, backend=b))
+        assert {'list-tree', 'summarize', 'find-in-file'} <= set(cmds), phase
+    review = set(tools.build_commands(tools.ToolContext('review')))
+    assert {'git', 'notes', 'list-tree', 'summarize', 'find-in-file'} <= review
 
 
 # --- persona / editor tool threading -------------------------------------------------

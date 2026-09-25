@@ -115,7 +115,9 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
     system = b.oracle_prompt(meta)
-    ctx = tools.ToolContext(backend=b, phase='gen')
+    # The run was invoked in a repository: give the context its workdir so the sandboxed read
+    # tools this phase advertises (list-tree, summarize, find-in-file) can actually read files.
+    ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
     if tool_use:
         system += tools.tool_instructions(ctx)
     gpt_gen_test = get_mapper(system, n_results=1,
@@ -328,7 +330,7 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug
     if level <= 0:
         return oracle_md
     tool_ctx = None if args.no_tools else tools.ToolContext(
-        backend=backends.current(), phase='oracle-opt')
+        backend=backends.current(), phase='oracle-opt', workdir=os.getcwd())
     registry = build_registry()
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
@@ -379,7 +381,7 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
     # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
     b = backends.current()
     system = b.impl_prompt(meta)
-    ctx = tools.ToolContext(backend=b, phase='gen')
+    ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
     if tool_use:
         system += tools.tool_instructions(ctx)
     marsha_for_code_llm = format_marsha_for_llm(meta)
