@@ -1285,6 +1285,22 @@ def test_list_tree_bounds_result_chars(tmp_path: Any) -> None:
     assert 'result limit' in out
 
 
+def test_list_tree_drops_lone_oversized_path(tmp_path: Any, monkeypatch: Any) -> None:
+    # On long-path platforms (Windows) one path can exceed the result budget: a lone
+    # path that cannot fit is dropped too, so the result still fits the cap and the
+    # note says the listing was truncated at the result limit.
+    monkeypatch.setattr(tools, 'RESULT_CHAR_LIMIT', 300)
+    deep = tmp_path
+    for _ in range(8):
+        deep = deep / ('d' * 60)
+        deep.mkdir()
+    (deep / 'f.txt').write_text('x')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert len(out) <= 300
+    assert 'result limit' in out
+
+
 def test_list_tree_distinguishes_complete_cap_listing(tmp_path: Any,
                                                       monkeypatch: Any) -> None:
     # Hitting the entry cap without a dropped entry is not proof of truncation:
@@ -1688,6 +1704,15 @@ def test_summarize_refuses_oversized_header(monkeypatch: Any) -> None:
     out = asyncio.run(tools.summarize(
         ['https://public.example.com/' + 'a' * 40], None))
     assert out.startswith('error:') and 'too large' in out
+
+
+def test_summarize_bounded_url_validation_error() -> None:
+    # The SSRF guard's error names the host: with a near-cap hostname the echoed
+    # error is clipped, so the result stays within the shared result budget.
+    url = 'https://' + 'a' * 190_000 + '/x'
+    out = asyncio.run(tools.summarize([url], None))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'error truncated' in out
 
 
 def test_summarize_exact_size_body_not_falsely_truncated(monkeypatch: Any) -> None:

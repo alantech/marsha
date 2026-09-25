@@ -1140,10 +1140,16 @@ def _fd_target_path(fd: int) -> str | None:
         try:
             import ctypes
             import msvcrt
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetFinalPathNameByHandleW.argtypes = [
+                wintypes.HANDLE, ctypes.c_wchar_p,
+                wintypes.DWORD, wintypes.DWORD]
+            kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
             handle = msvcrt.get_osfhandle(fd)
             buf = ctypes.create_unicode_buffer(32_768)
-            size = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
-                handle, buf, 32_768, 0)
+            size = kernel32.GetFinalPathNameByHandleW(handle, buf, 32_768, 0)
             if size > 0:
                 path = buf.value
                 if path.startswith('\\\\?\\'):
@@ -1513,8 +1519,9 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     # Bound the result by characters as well as by entry count: many long paths can push the
     # listing far past the shared tool-result budget, and one oversized result would bloat the
     # reviewer's context. Drop whole paths from the tail — never a path in half — until the
-    # listing plus its note fits RESULT_CHAR_LIMIT (a single path always fits: a path is at
-    # most PATH_MAX long, well under the budget).
+    # listing plus its note fits RESULT_CHAR_LIMIT; a lone path that cannot fit on its own is
+    # dropped too (on long-path platforms such as Windows, one path can exceed the whole
+    # budget), and the note then says the listing was truncated at the result limit.
     rel_start = os.path.relpath(start, root) or '.'
     if entry_capped:
         trunc_note = f'\n[listing truncated at {LIST_TREE_MAX_ENTRIES} entries]'
@@ -1527,7 +1534,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     else:
         trunc_note = ''
     chars_truncated = False
-    while len(entries) > 1:
+    while entries:
         header = f'{len(entries)} file(s) under {rel_start}:\n'
         note = _list_tree_note(trunc_note, chars_truncated)
         if len(header) + listing_len - 1 + len(note) <= RESULT_CHAR_LIMIT:
@@ -1582,7 +1589,12 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         try:
             assert_public_url(target)
         except Exception as e:
-            return f'error: {e}'
+            # The guard's error names the host: with a near-cap hostname it would far
+            # exceed the result budget, so the message is echoed bounded like the target.
+            message = str(e)
+            if len(message) > 200:
+                message = message[:197] + '…[error truncated]'
+            return f'error: {shown}: {message}'
         try:
             _status, ctype, body = await http_get(target)
         except Exception as e:
