@@ -1271,8 +1271,16 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                 os.close(dir_fd)
                 dirs_truncated = True  # swapped out of the tree: not listed
                 continue
+            if sys.platform == 'win32':
+                # No fd-based scandir on Windows: the descriptor probe stands,
+                # then scan by path (the race window reopens only here).
+                os.close(dir_fd)
+                dir_fd = -1
+                scan = os.scandir(dirpath)
+            else:
+                scan = os.scandir(dir_fd)
             try:
-                for count, entry in enumerate(os.scandir(dir_fd), 1):
+                for count, entry in enumerate(scan, 1):
                     if count > LIST_TREE_MAX_NAMES_PER_DIR:
                         dirs_truncated = True  # more entries than the per-directory budget
                         break
@@ -1290,7 +1298,8 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                     elif not has_ext or _matches_ext(name, exts):
                         file_names.append(name)
             finally:
-                os.close(dir_fd)
+                if dir_fd != -1:
+                    os.close(dir_fd)
         except OSError:
             # A failed scan (an unreadable directory, or an error while walking its entries)
             # leaves this directory partially or not listed at all: mark the listing incomplete
