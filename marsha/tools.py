@@ -101,6 +101,9 @@ LIST_TREE_MAX_DIRS = 10_000
 # directory: a directory with more entries than this is listed partially, and the listing says
 # so (without it, one enormous directory would cost unbounded time and memory).
 LIST_TREE_MAX_NAMES_PER_DIR = 10_000
+# O_DIRECTORY is Unix-only: open with O_RDONLY on other platforms (scandir on a
+# non-directory descriptor still fails, and the walk flags it as incomplete).
+_DIR_OPEN_FLAGS = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
 # cap turns memory bombs into an error, and the default stack cap turns deep
@@ -1255,7 +1258,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             # (check-then-open race: it may have been swapped for an outside-pointing
             # symlink since it was queued), then scan through that descriptor so the scan
             # itself cannot follow a swap either.
-            dir_fd = os.open(dirpath, os.O_RDONLY | os.O_DIRECTORY)
+            dir_fd = os.open(dirpath, _DIR_OPEN_FLAGS)
             target = _fd_target_path(dir_fd)
             if (target is not None and target != root
                     and not target.startswith(root + os.sep)):
