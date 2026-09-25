@@ -70,8 +70,13 @@ def test_parse_issue_ref_qualified() -> None:
 def test_parse_issue_ref_url() -> None:
     assert refine.parse_issue_ref(
         'https://github.com/acme/widget/issues/218') == (218, 'acme/widget')
-    assert refine.parse_issue_ref(
-        'https://github.com/acme/widget/pull/9') == (9, 'acme/widget')
+
+
+def test_parse_issue_ref_rejects_pull_request_url() -> None:
+    # A pull-request URL is not an issue: it is rejected rather than mis-handled by the
+    # issue-only load/write path (gh issue view / gh issue edit).
+    with pytest.raises(Exception, match='pull-request'):
+        refine.parse_issue_ref('https://github.com/acme/widget/pull/9')
 
 
 def test_parse_issue_ref_invalid() -> None:
@@ -305,6 +310,50 @@ def test_run_check_not_compilable_returns_one(capsys: Any) -> None:
 
 def test_run_refine_usage_error_with_no_source() -> None:
     assert asyncio.run(refine.run_refine(_args())) == 2
+
+
+def test_run_refine_refuses_oversized_source_for_rewrite(
+        tmp_path: Any, capsys: Any) -> None:
+    # A source over the chat limit must not be rewritten from a truncated view: the interactive
+    # path refuses rather than letting _apply overwrite it with a partial spec.
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('x' * (refine.REFINE_SPEC_LIMIT + 1))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        raise AssertionError('the chat must not run on a source it could not see in full')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'over the' in capsys.readouterr().err
+    with open(p) as f:
+        assert len(f.read()) == refine.REFINE_SPEC_LIMIT + 1  # untouched
+
+
+def test_run_refine_check_analyzes_full_oversized_source(
+        tmp_path: Any, capsys: Any) -> None:
+    # --check never writes back, so an oversized source is analyzed in full (not refused) and the
+    # rewrite guard does not apply.
+    p = str(tmp_path / 'spec.mrsh')
+    size = refine.REFINE_SPEC_LIMIT + 1
+    with open(p, 'w') as f:
+        f.write('x' * size)
+    seen: dict[str, int] = {}
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        seen['len'] = len(spec_text)
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze):
+        rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
+    assert rc == 1  # the open ambiguity, not a size refusal
+    assert seen['len'] == size  # the full source was analyzed, not truncated
+    assert 'open ambiguity' in capsys.readouterr().out
 
 
 def test_run_refine_check_mrsh_reports_and_never_mutates(
