@@ -1262,8 +1262,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         try:
             # Open the directory by descriptor and re-verify containment on the descriptor
             # (check-then-open race: it may have been swapped for an outside-pointing
-            # symlink since it was queued), then scan through that descriptor so the scan
-            # itself cannot follow a swap either.
+            # symlink since it was queued).
             dir_fd = os.open(dirpath, _DIR_OPEN_FLAGS)
             target = _fd_target_path(dir_fd)
             if (target is not None and target != root
@@ -1271,13 +1270,17 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                 os.close(dir_fd)
                 dirs_truncated = True  # swapped out of the tree: not listed
                 continue
+            pin: os.stat_result | None = None
             if sys.platform == 'win32':
-                # No fd-based scandir on Windows: the descriptor probe stands,
-                # then scan by path (the race window reopens only here).
-                os.close(dir_fd)
-                dir_fd = -1
+                # No fd-based scandir on Windows: pin the directory's identity on the
+                # descriptor, scan by path, and compare the identity after the scan —
+                # a directory swapped for an outside symlink while the scan ran is
+                # discarded (only a swap that also reverts before the comparison, and
+                # pure Python has no scan-by-handle, can slip through).
+                pin = os.fstat(dir_fd)
                 scan = os.scandir(dirpath)
             else:
+                # Scan through the descriptor so the scan itself cannot follow a swap.
                 scan = os.scandir(dir_fd)
             try:
                 for count, entry in enumerate(scan, 1):
@@ -1298,8 +1301,21 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                     elif not has_ext or _matches_ext(name, exts):
                         file_names.append(name)
             finally:
-                if dir_fd != -1:
-                    os.close(dir_fd)
+                os.close(dir_fd)
+            if pin is not None:
+                # The scan read the PATH, which may have been swapped mid-scan: a
+                # directory whose identity no longer matches the pin may have listed
+                # outside the tree, so discard what it read.
+                try:
+                    now = os.stat(dirpath)
+                except OSError:
+                    now = None
+                if now is None or (now.st_dev, now.st_ino) != (
+                        pin.st_dev, pin.st_ino):
+                    sub_names.clear()
+                    file_names.clear()
+                    dirs_truncated = True
+                    continue
         except OSError:
             # A failed scan (an unreadable directory, or an error while walking its entries)
             # leaves this directory partially or not listed at all: mark the listing incomplete

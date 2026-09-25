@@ -15,6 +15,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -1415,6 +1416,35 @@ def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) ->
             os.symlink(outside, tree / 'd')
         return orig_open(path, flags, *a, **k)
     monkeypatch.setattr('os.open', swapping)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'leak.txt' not in out
+    assert 'incomplete' in out
+
+
+def test_list_tree_windows_branch_discards_swapped_scan(tmp_path: Any,
+                                                        monkeypatch: Any) -> None:
+    # The Windows branch (no fd-based scandir) scans by path: a directory swapped
+    # for an outside symlink while the scan runs is detected by comparing the
+    # directory's identity against the pin taken on the descriptor, and what the
+    # scan read is discarded.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'leak.txt').write_text('x')
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    orig_scandir = os.scandir
+
+    def swapping(path: Any, *a: Any, **k: Any) -> Any:
+        # swap the directory for an outside symlink while the scan runs
+        if str(path) == str(tree / 'd'):
+            os.replace(tree / 'd', tree / 'd.real')
+            os.symlink(outside, tree / 'd')
+        return orig_scandir(path, *a, **k)
+    monkeypatch.setattr('os.scandir', swapping)
     ctx = tools.ToolContext('review', workdir=str(tree))
     out = asyncio.run(tools.list_tree([], ctx))
     assert 'leak.txt' not in out
