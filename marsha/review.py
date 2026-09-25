@@ -346,26 +346,36 @@ def new_side_lines_from_patch(patch: str) -> set[int] | None:
     # contrast, is truncated to REVIEW_DIFF_LIMIT and can drift from the PR, which is how a
     # finding ends up inlined on a line GitHub does not show (the 422 that used to sink the
     # whole review post). New-side numbers advance on ' ' and '+' lines and hold on '-' and '\'.
-    # Returns None when the patch cannot be trusted: it has no hunk at all, or a '@@' line that is
-    # not a valid hunk header. (A valid patch always has at least one hunk, so None never means
-    # "valid but empty"; and a partial result is worse than none, so a malformed later hunk also
-    # yields None rather than a truncated line set.)
+    # Returns None when the patch cannot be trusted: it has no hunk at all, a '@@' line that is
+    # not a valid hunk header, or a hunk whose body is shorter than its header's new-side count
+    # (a truncated diff). (A valid patch always has at least one complete hunk, so None never
+    # means "valid but empty"; and a partial result is worse than none, so any of these yields
+    # None rather than a truncated line set that would misclassify findings.)
     lines: set[int] = set()
     new_lineno = 0
     in_hunk = False
+    expected_new = 0  # new-side line count the current hunk header declares
+    seen_new = 0      # new-side lines actually seen in the current hunk
     for raw in patch.splitlines():
         if raw.startswith('@@'):
             # Every '@@' line is a hunk header (content lines always carry a leading prefix char),
             # so one that does not match is a malformed header: stop rather than trust the rest.
-            m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', raw)
+            # Also verify the hunk we just left was complete before starting the next one.
+            if in_hunk and seen_new != expected_new:
+                return None
+            m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', raw)
             if not m:
                 return None
             new_lineno = int(m.group(1))
+            expected_new = int(m.group(2)) if m.group(2) is not None else 1
+            seen_new = 0
             in_hunk = True
         elif in_hunk and (raw.startswith('+') or raw.startswith(' ')):
             lines.add(new_lineno)
             new_lineno += 1
-    if not in_hunk:
+            seen_new += 1
+    # The final hunk must be complete too, and there must have been at least one hunk.
+    if not in_hunk or seen_new != expected_new:
         return None
     return lines
 
@@ -1437,8 +1447,12 @@ def _is_review_anchoring_rejection(out: str, err: str) -> bool:
     errors = body.get('errors')
     if not isinstance(errors, list):
         return False
+    # Match a ReviewComment whose line/position is invalid: that is the unanchorable-comment
+    # case. A `line`/`position` error on any other resource is an unrelated validation failure.
     return any(
-        isinstance(e, dict) and e.get('field') in ('line', 'position')
+        isinstance(e, dict)
+        and e.get('resource') == 'ReviewComment'
+        and e.get('field') in ('line', 'position')
         for e in errors)
 
 

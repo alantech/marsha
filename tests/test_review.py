@@ -169,6 +169,10 @@ def test_new_side_lines_from_patch() -> None:
     # char, so it is genuinely a header line, not a context line whose text happens to start @.)
     assert review.new_side_lines_from_patch(
         '@@ -1,2 +1,2 @@\n a\n b\n@@ broken @@\n+ c\n') is None
+    # A hunk whose body is shorter than its header's new-side count is a truncated diff: None.
+    assert review.new_side_lines_from_patch('@@ -1,2 +1,2 @@\n a\n') is None
+    # ... and a hunk whose body is longer than declared is also untrustworthy: None.
+    assert review.new_side_lines_from_patch('@@ -1,1 +1,1 @@\n a\n b\n') is None
 
 
 def test_pr_anchorable_lines_maps_patches() -> None:
@@ -1921,6 +1925,10 @@ def test_is_review_anchoring_rejection() -> None:
     pos = json.dumps({'status': '422', 'errors': [
         {'resource': 'ReviewComment', 'field': 'position', 'code': 'invalid'}]})
     assert review._is_review_anchoring_rejection(pos, 'gh: x (HTTP 422)') is True
+    # A `line` error on a resource other than ReviewComment is an unrelated validation failure.
+    other = json.dumps({'status': '422', 'errors': [
+        {'resource': 'Review', 'field': 'line', 'code': 'invalid'}]})
+    assert review._is_review_anchoring_rejection(other, 'gh: x (HTTP 422)') is False
     # A 422 about a different field (not placement) is not an anchoring rejection.
     event = json.dumps({'status': '422', 'errors': [
         {'resource': 'Review', 'field': 'event', 'code': 'invalid'}]})
