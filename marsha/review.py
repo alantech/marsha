@@ -346,18 +346,22 @@ def new_side_lines_from_patch(patch: str) -> set[int] | None:
     # contrast, is truncated to REVIEW_DIFF_LIMIT and can drift from the PR, which is how a
     # finding ends up inlined on a line GitHub does not show (the 422 that used to sink the
     # whole review post). New-side numbers advance on ' ' and '+' lines and hold on '-' and '\'.
-    # Returns None when no hunk header is recognized: a non-empty patch with no hunk is malformed,
-    # so the caller cannot trust it and must fall back to the local diff. (A valid patch always
-    # has at least one hunk, so None never means "valid but empty".)
+    # Returns None when the patch cannot be trusted: it has no hunk at all, or a '@@' line that is
+    # not a valid hunk header. (A valid patch always has at least one hunk, so None never means
+    # "valid but empty"; and a partial result is worse than none, so a malformed later hunk also
+    # yields None rather than a truncated line set.)
     lines: set[int] = set()
     new_lineno = 0
     in_hunk = False
     for raw in patch.splitlines():
         if raw.startswith('@@'):
+            # Every '@@' line is a hunk header (content lines always carry a leading prefix char),
+            # so one that does not match is a malformed header: stop rather than trust the rest.
             m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', raw)
-            if m:
-                new_lineno = int(m.group(1))
-                in_hunk = True
+            if not m:
+                return None
+            new_lineno = int(m.group(1))
+            in_hunk = True
         elif in_hunk and (raw.startswith('+') or raw.startswith(' ')):
             lines.add(new_lineno)
             new_lineno += 1
@@ -393,18 +397,23 @@ async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) ->
         if not isinstance(files, list):
             return None  # unexpected shape: fall back to the local diff rather than guess
         for f in files:
+            # A well-formed files list holds file objects, each naming its path and carrying either
+            # a patch string or null. Anything else is malformed and means the PR files cannot be
+            # trusted, so fall back to the local diff (not a partial map with files missing).
             if not isinstance(f, dict):
-                continue
+                return None
             path = f.get('filename')
+            if not isinstance(path, str) or not path:
+                return None
             patch = f.get('patch')
-            if not path or not isinstance(patch, str) or not patch:
-                continue  # no patch (binary/too large): nothing to anchor on
+            if patch is None:
+                # binary or too large to diff: no anchorable lines (expected)
+                continue
+            if not isinstance(patch, str):
+                return None
             lines = new_side_lines_from_patch(patch)
             if lines is None:
-                # A malformed patch (non-empty but no recognizable hunk) means the PR files
-                # cannot be parsed, so fall back to the local diff rather than anchor on a
-                # result we cannot trust.
-                return None
+                return None  # malformed patch: fall back to the local diff
             anchorable[path] = lines
         if len(files) < 100:
             break  # last page

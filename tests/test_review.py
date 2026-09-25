@@ -164,6 +164,11 @@ def test_new_side_lines_from_patch() -> None:
     # A non-empty patch with no recognizable hunk header is malformed and also None.
     assert review.new_side_lines_from_patch('not a patch') is None
     assert review.new_side_lines_from_patch('@@ broken header @@\n x\n') is None
+    # A valid hunk followed by a malformed hunk header is unparseable too: None, not a partial
+    # (truncated) line set that would misclassify findings. (The bad header has no leading prefix
+    # char, so it is genuinely a header line, not a context line whose text happens to start @.)
+    assert review.new_side_lines_from_patch(
+        '@@ -1,2 +1,2 @@\n a\n b\n@@ broken @@\n+ c\n') is None
 
 
 def test_pr_anchorable_lines_maps_patches() -> None:
@@ -249,6 +254,24 @@ def test_pr_anchorable_lines_none_on_malformed_patch() -> None:
 
     with patch.object(review, '_gh', new=fake_gh):
         assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
+
+
+def test_pr_anchorable_lines_none_on_malformed_entry() -> None:
+    # A files list with a malformed entry (not a file object, missing its path, or a patch that is
+    # neither a string nor null) is not trusted: it yields None so the caller falls back to the
+    # local diff, not a partial map with the affected files missing.
+    bads = (
+        json.dumps([{'filename': 'ok.py', 'patch': '@@ -1,1 +1,1 @@\n x\n'}, 'oops']),
+        json.dumps([{'patch': '@@ -1,1 +1,1 @@\n x\n'}]),
+        json.dumps([{'filename': 'ok.py', 'patch': 123}]),
+    )
+    for bad in bads:
+        async def fake_gh(*a: Any, **k: Any) -> Any:
+            if a and a[0] == 'repo':
+                return (0, '{"nameWithOwner": "acme/widget"}', '')
+            return (0, bad, '')
+        with patch.object(review, '_gh', new=fake_gh):
+            assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
 
 
 def test_build_review_message_stat_and_context() -> None:
