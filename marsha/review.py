@@ -37,6 +37,11 @@ from marsha.utils import run_subprocess
 # dropping the whole change. Both are char counts, truncated before the reviewer ever sees them.
 REVIEW_CONTEXT_LIMIT = 48_000
 REVIEW_DIFF_LIMIT = 120_000
+# When anchoring inline comments on the PR's own files (GET /pulls/{pr}/files), the file list is
+# paginated 100 per page; cap the pages so an abnormally large PR cannot make posting spin
+# forever. A finding on a file beyond the cap simply is not anchorable and is folded into the
+# review body instead (safe: it loses inline placement, not the finding).
+PR_FILES_MAX_PAGES = 10
 # A reviewer probing a large codebase with the git tool needs many rounds to map a diff against
 # the code it touches; a tight cap cut reviewers off mid-inspection on big PRs, so they finished
 # with no findings at all. 75 lets a reviewer walk the relevant call graph and read the files it
@@ -331,6 +336,64 @@ def diff_new_lines(diff_text: str) -> dict[str, set[int]]:
             new_lineno += 1
         # '-' (old-side) and '\' (no-newline) lines do not advance the new-side number.
     return touched
+
+
+def new_side_lines_from_patch(patch: str) -> set[int]:
+    # The new-side line numbers a single file's unified-diff patch touches (added '+' and
+    # context ' ' lines). GitHub's GET /pulls/{pr}/files returns this per file as the `patch`
+    # field: hunk headers plus content lines, with no file headers. This is the authoritative
+    # set of lines an inline review comment can anchor on for that file — the local diff, by
+    # contrast, is truncated to REVIEW_DIFF_LIMIT and can drift from the PR, which is how a
+    # finding ends up inlined on a line GitHub does not show (the 422 that used to sink the
+    # whole review post). New-side numbers advance on ' ' and '+' lines and hold on '-' and '\'.
+    lines: set[int] = set()
+    new_lineno = 0
+    in_hunk = False
+    for raw in patch.splitlines():
+        if raw.startswith('@@'):
+            m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', raw)
+            if m:
+                new_lineno = int(m.group(1))
+                in_hunk = True
+        elif in_hunk and (raw.startswith('+') or raw.startswith(' ')):
+            lines.add(new_lineno)
+            new_lineno += 1
+    return lines
+
+
+async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) -> dict[str, set[int]] | None:
+    # Map each PR file path to the set of new-side line numbers GitHub will anchor an inline
+    # review comment on, taken from the PR's own diff (GET /pulls/{pr}/files) rather than the
+    # local diff. Returns None when the files cannot be fetched or parsed, so the caller falls
+    # back to the local diff; a file with no patch (binary or too large to diff) is simply
+    # absent, so findings on it fold into the review body. The file list is paginated 100 per
+    # page and capped at PR_FILES_MAX_PAGES so an abnormally large PR cannot make posting spin.
+    anchorable: dict[str, set[int]] = {}
+    page = 1
+    while page <= PR_FILES_MAX_PAGES:
+        rc, out, _err = await _gh(
+            'api', f'repos/{repo}/pulls/{pr_num}/files?per_page=100&page={page}',
+            cwd=cwd)
+        if rc != 0:
+            return None
+        try:
+            files = json.loads(out)
+        except ValueError:
+            return None
+        if not isinstance(files, list):
+            return None  # unexpected shape: fall back to the local diff rather than guess
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            path = f.get('filename')
+            patch = f.get('patch')
+            if not path or not isinstance(patch, str) or not patch:
+                continue  # no patch (binary/too large): nothing to anchor on
+            anchorable[path] = new_side_lines_from_patch(patch)
+        if len(files) < 100:
+            break  # last page
+        page += 1
+    return anchorable
 
 
 def build_review_message(stat_text: str, base_name: str, base_ref: str, context_blocks: list[str]) -> str:
@@ -1294,6 +1357,42 @@ async def _post_all_clear(repo: str, pr_num: int, cwd: str | None = None) -> Non
             f'Failed to post the all-clear to PR #{pr_num}: {err or out}')
 
 
+def _finding_body_item(f: Finding) -> str:
+    # The review-body rendering of a finding that could not (or no longer can) be inlined: a
+    # single bullet with its location backticked and its support indented under it. A blank line
+    # before the support would end the list item (CommonMark), detaching it into a standalone
+    # paragraph; indenting it under the bullet keeps it part of the item. Used both for findings
+    # classified into the body up front and for inline findings demoted here after a 422.
+    loc = f['location'] or 'n/a'
+    item = f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}"
+    if f.get('support'):
+        item += '\n' + '\n'.join('  ' + ln for ln in f['support'].split('\n'))
+    return item
+
+
+def _review_payload(comments: list[dict[str, Any]], body_items: list[str]) -> str:
+    # The JSON body of a PR review POST: inline comments under `comments` (omitted when empty,
+    # matching the all-clear shape) and body findings under `body` as a bullet list. Factored so
+    # the 422-recovery retry can rebuild the payload with a different (demoted) comment set.
+    review: dict[str, Any] = {'event': 'COMMENT'}
+    if comments:
+        review['comments'] = comments
+    if body_items:
+        review['body'] = (
+            'Marsha review — findings that could not be placed on a diff line:\n\n'
+            + '\n\n'.join(body_items))
+    return json.dumps(review)
+
+
+async def _post_review_payload(repo: str, pr_num: int, payload: str, cwd: str | None = None) -> tuple[int | None, str, str]:
+    # POST a single PR review (one JSON payload). Split from post_review so the 422-recovery
+    # retry can re-post a demoted, body-only payload without duplicating the call.
+    return await _gh(
+        'api', f'repos/{repo}/pulls/{pr_num}/reviews',
+        '--method', 'POST', '--input', '-',
+        cwd=cwd, input=payload.encode('utf-8'))
+
+
 async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None) -> None:
     repo = await _repo_name(cwd)
     if not repo:
@@ -1303,7 +1402,13 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
         await _post_all_clear(repo, pr_num, cwd)
         print(f'All clear: posted a no-issues note to PR #{pr_num}.')
         return
-    touched = diff_new_lines(diff_text)
+    # Anchor inline comments on the PR's own diff, not the local one: the local diff is truncated
+    # to REVIEW_DIFF_LIMIT and can drift from the PR (a rebased head, a moved base), which is how a
+    # finding ends up inlined on a line GitHub does not show — the 422 that used to sink the whole
+    # post. Fall back to the local diff only when the PR files cannot be fetched.
+    anchorable = await pr_anchorable_lines(repo, pr_num, cwd)
+    if anchorable is None:
+        anchorable = diff_new_lines(diff_text)
     # Prior threads keyed by the [label] of their root finding. A finding re-raised under a label
     # that already has a thread replies there (the reviewer still stands by it) rather than
     # opening a new top-level comment, so the PR reads as one thread per point.
@@ -1327,6 +1432,7 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
     if dup_dropped:
         log(f'review: dropped {dup_dropped} finding(s) that re-raised a prior concern')
     new_inline: list[dict[str, Any]] = []
+    inline_findings: list[Finding] = []
     replies: list[tuple[Any, str]] = []
     body_findings: list[str] = []
     for f in findings:
@@ -1336,35 +1442,33 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
             body += f"\n\n{f['support']}"
         if f['label'] in threads:
             replies.append((threads[f['label']]['root_id'], body))
-        elif path and line is not None and line in touched.get(path, set()):
+        elif path and line is not None and line in anchorable.get(path, set()):
             new_inline.append(
                 {'path': path, 'line': line, 'side': 'RIGHT', 'body': body})
+            inline_findings.append(f)
         else:
-            loc = f['location'] or 'n/a'
-            item = f"- **[{f['label']}] {f['severity']}** `{loc}`: {f['desc']}"
-            if f.get('support'):
-                # A blank line before the support would end the list item (CommonMark), detaching
-                # it into a standalone paragraph; indent it under the bullet instead so it stays
-                # part of the item.
-                item += '\n' + '\n'.join(
-                    '  ' + ln for ln in f['support'].split('\n'))
-            body_findings.append(item)
+            body_findings.append(_finding_body_item(f))
+    demoted = 0
     if new_inline or body_findings:
-        review = {'event': 'COMMENT', 'comments': new_inline}
-        if body_findings:
-            review['body'] = (
-                'Marsha review — findings that could not be placed on a diff line:\n\n'
-                + '\n\n'.join(body_findings))
-        payload = json.dumps(review)
-        rc, out, err = await _gh(
-            'api', f'repos/{repo}/pulls/{pr_num}/reviews',
-            '--method', 'POST', '--input', '-',
-            cwd=cwd, input=payload.encode('utf-8'))
+        payload = _review_payload(new_inline, body_findings)
+        rc, out, err = await _post_review_payload(repo, pr_num, payload, cwd)
+        if rc != 0 and new_inline:
+            # The POST was rejected (typically HTTP 422: an inline comment could not be anchored
+            # on the PR diff). Demote every inline finding into the review body and retry once,
+            # so a single unanchorable finding cannot take the whole review down with it. The
+            # retry is body-only, so it cannot 422 on anchoring; a second failure is a genuine
+            # posting problem and is surfaced as-is.
+            demoted = len(inline_findings)
+            log(f'review: PR #{pr_num} rejected the review with {demoted} inline '
+                f'comment(s); demoting them into the review body and retrying')
+            for f in inline_findings:
+                body_findings.append(_finding_body_item(f))
+            new_inline = []
+            payload = _review_payload(new_inline, body_findings)
+            rc, out, err = await _post_review_payload(repo, pr_num, payload, cwd)
         if rc != 0:
             raise Exception(
-                f'Failed to post the review to PR #{pr_num}: {err or out}\n'
-                'A finding line may fall outside the PR diff; those are listed in the '
-                'review body instead.')
+                f'Failed to post the review to PR #{pr_num}: {err or out}')
     for cid, body in replies:
         # A reply is created via the main review-comment endpoint with `in_reply_to` (the
         # .../comments/{id}/replies sub-resource no longer exists in the GitHub API); the
@@ -1390,10 +1494,16 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
             continue
         if await _resolve_thread(thread['thread_id'], cwd):
             closed += 1
-    print(
+    summary = (
         f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
         f'{len(replies)} replies, {len(body_findings)} in the review body, '
         f'{closed} threads resolved.')
+    if demoted:
+        # The user should see that some findings lost inline placement (and why), not just that
+        # the body count grew.
+        summary += (f' ({demoted} finding(s) could not be anchored on the PR diff and were '
+                    f'moved into the review body.)')
+    print(summary)
 
 
 async def _per_persona_critique(reviewers: list[tuple[str, str, int]],

@@ -136,6 +136,101 @@ def test_diff_new_lines() -> None:
     assert review.diff_new_lines(diff) == {'foo.py': {1, 2, 3, 4}}
 
 
+def test_new_side_lines_from_patch() -> None:
+    # A single file's patch (as returned per-file by GET /pulls/{pr}/files): hunk headers plus
+    # content lines, no file headers. New-side numbers advance on ' ' and '+' and hold on '-'.
+    patch = ('@@ -1,3 +1,4 @@\n'
+             ' ctx1\n'
+             '+ added\n'
+             ' ctx2\n'
+             ' ctx3\n')
+    assert review.new_side_lines_from_patch(patch) == {1, 2, 3, 4}
+    # A removed line ('-') does not consume a new-side number.
+    patch2 = ('@@ -5,3 +5,2 @@\n'
+              ' keep\n'
+              '- gone\n'
+              ' next\n')
+    assert review.new_side_lines_from_patch(patch2) == {5, 6}
+    # A second hunk restarts the numbering at its own new-side start.
+    patch3 = ('@@ -1,2 +1,2 @@\n'
+              ' a\n'
+              ' b\n'
+              '@@ -20,2 +20,2 @@\n'
+              ' x\n'
+              '+ y\n')
+    assert review.new_side_lines_from_patch(patch3) == {1, 2, 20, 21}
+    # An empty patch anchors nothing.
+    assert review.new_side_lines_from_patch('') == set()
+
+
+def test_pr_anchorable_lines_maps_patches() -> None:
+    # Maps each PR file to its anchorable new-side lines; a file with no patch (binary/too large)
+    # is simply absent, so findings on it fold into the review body.
+    files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -1,2 +1,3 @@\n ctx\n+ add\n ctx\n'},
+        {'filename': 'img.png', 'patch': None},
+        {'filename': 'bar.py', 'patch': '@@ -3,1 +3,1 @@\n-x\n+y\n'},
+    ])
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        return (0, files, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        got = asyncio.run(review.pr_anchorable_lines('acme/widget', 123))
+
+    assert got == {'foo.py': {1, 2, 3}, 'bar.py': {3}}
+
+
+def test_pr_anchorable_lines_paginates() -> None:
+    # The file list is 100 per page; a PR with more than 100 changed files is read across pages
+    # until a short (last) page arrives.
+    page1 = json.dumps([{'filename': f'f{i}.py', 'patch': '@@ -1,1 +1,1 @@\n x\n'}
+                        for i in range(100)])
+    page2 = json.dumps([{'filename': f'g{i}.py', 'patch': '@@ -1,1 +1,1 @@\n x\n'}
+                        for i in range(2)])
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        # Match the trailing `&page=N` (not a bare `page=N`, which also matches `per_page=100`).
+        if '&page=1' in joined:
+            return (0, page1, '')
+        if '&page=2' in joined:
+            return (0, page2, '')
+        return (0, '[]', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        got = asyncio.run(review.pr_anchorable_lines('acme/widget', 123))
+
+    assert got is not None
+    assert len(got) == 102
+    assert 'f0.py' in got and 'g1.py' in got
+
+
+def test_pr_anchorable_lines_none_on_bad_shape_or_error() -> None:
+    # A non-list response or a gh failure yields None so the caller falls back to the local diff.
+    for out in ('{}',):  # a JSON object, not the expected list of files
+        async def fake_gh(*a: Any, **k: Any) -> Any:
+            if a and a[0] == 'repo':
+                return (0, '{"nameWithOwner": "acme/widget"}', '')
+            return (0, out, '')
+        with patch.object(review, '_gh', new=fake_gh):
+            assert asyncio.run(
+                review.pr_anchorable_lines('acme/widget', 123)) is None
+
+    async def fake_err(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        return (1, '', 'boom')
+
+    with patch.object(review, '_gh', new=fake_err):
+        assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
+
+
 def test_build_review_message_stat_and_context() -> None:
     stat = 'a.txt | 4 +++-\n 1 file changed'
     msg = review.build_review_message(stat, 'main', 'origin/main',
@@ -1603,6 +1698,127 @@ def test_post_review_maps_inline_and_body() -> None:
     assert payload['comments'][0]['body'] == '**[A1] MAJOR**: inline one'
     assert 'bar.py' in payload['body']
     assert '**[B1] MINOR**' in payload['body']
+
+
+def test_post_review_anchors_on_pr_diff_not_local() -> None:
+    # The local diff is empty and shows nothing about foo.py:5, but the PR's own diff does. We
+    # anchor on the PR diff (not the truncated local one), so the finding is inlined rather than
+    # demoted to the body.
+    pr_files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -4,2 +4,3 @@\n ctx\n+ new\n ctx\n'},  # new-side lines 4,5,6
+    ])
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:5', 'desc': 'on a PR-diff line'},
+    ]
+    posted: Any = None
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/123/files' in joined:
+            return (0, pr_files, '')
+        if '/reviews' in joined:
+            nonlocal posted
+            posted = k.get('input')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, findings, ''))
+
+    payload = json.loads(posted.decode('utf-8'))
+    # Inlined on the PR-diff line, not folded into a body that does not exist.
+    assert [c['path'] for c in payload['comments']] == ['foo.py']
+    assert payload['comments'][0]['line'] == 5
+    assert 'body' not in payload
+
+
+def test_post_review_classifies_inline_and_body_by_pr_diff() -> None:
+    # With the PR files available, a finding on a PR-diff line is inlined and one that is not
+    # (even in the same file) is folded into the body.
+    pr_files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -1,2 +1,3 @@\n ctx\n+ add\n ctx\n'},  # new-side lines 1,2,3
+    ])
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'in the PR diff'},
+        {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
+         'location': 'foo.py:99', 'desc': 'not in the PR diff'},
+    ]
+    posted: Any = None
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/123/files' in joined:
+            return (0, pr_files, '')
+        if '/reviews' in joined:
+            nonlocal posted
+            posted = k.get('input')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, findings, ''))
+
+    payload = json.loads(posted.decode('utf-8'))
+    assert [c['path'] for c in payload['comments']] == ['foo.py']
+    assert payload['comments'][0]['line'] == 2
+    assert '**[B1] MINOR**' in payload['body']
+
+
+def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
+    # Both findings are in the PR diff, so both are classified inline. If the POST is still
+    # rejected (HTTP 422: e.g. the diff changed between fetch and post), every inline finding is
+    # demoted into the review body and the review is re-posted body-only — the whole review is
+    # not lost, and the demotion is reported.
+    pr_files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -1,2 +1,3 @@\n ctx\n+ add\n ctx\n'},  # new-side lines 1,2,3
+    ])
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'one'},
+        {'name': 'Eli', 'label': 'B1', 'severity': 'MINOR',
+         'location': 'foo.py:3', 'desc': 'two'},
+    ]
+    posts: list[Any] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/123/files' in joined:
+            return (0, pr_files, '')
+        if '/reviews' in joined:
+            inp = k.get('input')
+            if inp is not None:  # only the POST carries a payload; the prior-body GET does not
+                posts.append(inp)
+                if len(posts) == 1:
+                    # Simulate GitHub's all-or-nothing 422: the whole review is rejected.
+                    return (1, '', 'HTTP 422: line 3 could not be resolved')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, findings, ''))
+
+    # Two posts: the first (with inline comments) was rejected; the retry (body-only) succeeded.
+    assert len(posts) == 2
+    first = json.loads(posts[0])
+    second = json.loads(posts[1])
+    # The first attempt tried to inline both; the retry carries no inline comments, and both
+    # demoted findings now live in the body.
+    assert len(first['comments']) == 2
+    assert 'comments' not in second
+    assert '**[A1] MAJOR**' in second['body']
+    assert '**[B1] MINOR**' in second['body']
+    assert 'moved into the review body' in capsys.readouterr().out
 
 
 def test_post_review_all_clear_posts_note() -> None:
