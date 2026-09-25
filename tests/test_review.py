@@ -1788,6 +1788,9 @@ def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
          'location': 'foo.py:3', 'desc': 'two'},
     ]
     posts: list[Any] = []
+    # The realistic shape of a GitHub 422 as `gh` reports it: a JSON error body on stdout (with a
+    # "status": "422" field) and a "... (HTTP 422)" line on stderr.
+    err422 = json.dumps({'message': 'Invalid request.', 'status': '422'})
 
     async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
@@ -1801,7 +1804,7 @@ def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
                 posts.append(inp)
                 if len(posts) == 1:
                     # Simulate GitHub's all-or-nothing 422: the whole review is rejected.
-                    return (1, '', 'HTTP 422: line 3 could not be resolved')
+                    return (1, err422, 'gh: Invalid request. (HTTP 422)')
             return (0, '{}', '')
         return (0, '{}', '')
 
@@ -1819,6 +1822,57 @@ def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
     assert '**[A1] MAJOR**' in second['body']
     assert '**[B1] MINOR**' in second['body']
     assert 'moved into the review body' in capsys.readouterr().out
+
+
+def test_post_review_no_demote_on_non_422_failure() -> None:
+    # A failure that is NOT an anchoring 422 (e.g. a transient 500 or an auth error) must not
+    # demote the inline findings or re-post: that would needlessly strip inline placement and
+    # report a misleading reason. It is surfaced as a plain posting failure instead.
+    pr_files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -1,2 +1,3 @@\n ctx\n+ add\n ctx\n'},  # new-side lines 1,2,3
+    ])
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'one'},
+    ]
+    posts: list[Any] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/123/files' in joined:
+            return (0, pr_files, '')
+        if '/reviews' in joined:
+            inp = k.get('input')
+            if inp is not None:
+                posts.append(inp)
+                # A transient server error, not a 422.
+                return (1, '{"status": "500"}', 'gh: Internal Server Error (HTTP 500)')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        with pytest.raises(Exception, match='Failed to post the review'):
+            asyncio.run(review.post_review(123, findings, ''))
+
+    # Exactly one post was attempted: no demoted body-only retry.
+    assert len(posts) == 1
+    first = json.loads(posts[0])
+    assert len(first['comments']) == 1  # the inline comment was not demoted
+
+
+def test_pr_anchorable_lines_none_on_exception() -> None:
+    # A timeout (or spawn failure) in the files request raises from _gh; that must be treated as
+    # "cannot fetch" (return None) so the caller falls back to the local diff, not abort posting.
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        raise Exception('run_subprocess timeout...')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
 
 
 def test_post_review_all_clear_posts_note() -> None:

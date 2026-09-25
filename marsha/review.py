@@ -371,9 +371,14 @@ async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) ->
     anchorable: dict[str, set[int]] = {}
     page = 1
     while page <= PR_FILES_MAX_PAGES:
-        rc, out, _err = await _gh(
-            'api', f'repos/{repo}/pulls/{pr_num}/files?per_page=100&page={page}',
-            cwd=cwd)
+        try:
+            rc, out, _err = await _gh(
+                'api', f'repos/{repo}/pulls/{pr_num}/files?per_page=100&page={page}',
+                cwd=cwd)
+        except Exception:
+            # A timeout or spawn failure in the files request must degrade to the local-diff
+            # fallback (the caller's None check), not abort the whole review post.
+            return None
         if rc != 0:
             return None
         try:
@@ -1393,6 +1398,16 @@ async def _post_review_payload(repo: str, pr_num: int, payload: str, cwd: str | 
         cwd=cwd, input=payload.encode('utf-8'))
 
 
+def _is_review_anchoring_rejection(out: str, err: str) -> bool:
+    # Whether a failed review POST was rejected because an inline comment could not be anchored on
+    # the PR diff — GitHub's HTTP 422. `gh` reports it as "... (HTTP 422)" on stderr and/or a
+    # "status": "422" field in the JSON error body on stdout. Only this failure is worth demoting
+    # inline comments to the body: a transient or auth error is not (demoting would needlessly lose
+    # inline placement and report a misleading reason).
+    return ('HTTP 422' in err
+            or '"status": "422"' in out or '"status":"422"' in out)
+
+
 async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None) -> None:
     repo = await _repo_name(cwd)
     if not repo:
@@ -1452,15 +1467,18 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
     if new_inline or body_findings:
         payload = _review_payload(new_inline, body_findings)
         rc, out, err = await _post_review_payload(repo, pr_num, payload, cwd)
-        if rc != 0 and new_inline:
-            # The POST was rejected (typically HTTP 422: an inline comment could not be anchored
-            # on the PR diff). Demote every inline finding into the review body and retry once,
-            # so a single unanchorable finding cannot take the whole review down with it. The
-            # retry is body-only, so it cannot 422 on anchoring; a second failure is a genuine
-            # posting problem and is surfaced as-is.
+        if rc != 0 and new_inline and _is_review_anchoring_rejection(out, err):
+            # The POST was rejected with HTTP 422: an inline comment could not be anchored on the
+            # PR diff. Demote every inline finding into the review body and re-post body-only, so
+            # a single unanchorable finding cannot take the whole review down with it. Only a 422
+            # is demoted this way — a transient or auth failure is not, so findings never lose
+            # inline placement (or get a misleading "could not be anchored" note) over an error
+            # that is unrelated to placement. The retry is body-only, so it cannot 422 again; a
+            # second failure is a genuine posting problem and is surfaced as-is.
             demoted = len(inline_findings)
-            log(f'review: PR #{pr_num} rejected the review with {demoted} inline '
-                f'comment(s); demoting them into the review body and retrying')
+            log(f'review: PR #{pr_num} rejected the review (HTTP 422: an inline comment '
+                f'could not be anchored on the diff); demoting {demoted} inline finding(s) '
+                f'into the review body and retrying')
             for f in inline_findings:
                 body_findings.append(_finding_body_item(f))
             new_inline = []
