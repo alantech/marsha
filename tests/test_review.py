@@ -159,8 +159,11 @@ def test_new_side_lines_from_patch() -> None:
               ' x\n'
               '+ y\n')
     assert review.new_side_lines_from_patch(patch3) == {1, 2, 20, 21}
-    # An empty patch anchors nothing.
-    assert review.new_side_lines_from_patch('') == set()
+    # An empty patch has no hunk: not "valid but empty" but unparseable, so it is None.
+    assert review.new_side_lines_from_patch('') is None
+    # A non-empty patch with no recognizable hunk header is malformed and also None.
+    assert review.new_side_lines_from_patch('not a patch') is None
+    assert review.new_side_lines_from_patch('@@ broken header @@\n x\n') is None
 
 
 def test_pr_anchorable_lines_maps_patches() -> None:
@@ -228,6 +231,23 @@ def test_pr_anchorable_lines_none_on_bad_shape_or_error() -> None:
         return (1, '', 'boom')
 
     with patch.object(review, '_gh', new=fake_err):
+        assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
+
+
+def test_pr_anchorable_lines_none_on_malformed_patch() -> None:
+    # A non-empty patch with no recognizable hunk is malformed: it must yield None (so the caller
+    # falls back to the local diff), not be accepted as "this file has no anchorable lines".
+    files = json.dumps([
+        {'filename': 'ok.py', 'patch': '@@ -1,1 +1,1 @@\n x\n'},
+        {'filename': 'bad.py', 'patch': 'not a patch'},
+    ])
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        return (0, files, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
         assert asyncio.run(review.pr_anchorable_lines('acme/widget', 123)) is None
 
 

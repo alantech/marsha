@@ -338,7 +338,7 @@ def diff_new_lines(diff_text: str) -> dict[str, set[int]]:
     return touched
 
 
-def new_side_lines_from_patch(patch: str) -> set[int]:
+def new_side_lines_from_patch(patch: str) -> set[int] | None:
     # The new-side line numbers a single file's unified-diff patch touches (added '+' and
     # context ' ' lines). GitHub's GET /pulls/{pr}/files returns this per file as the `patch`
     # field: hunk headers plus content lines, with no file headers. This is the authoritative
@@ -346,6 +346,9 @@ def new_side_lines_from_patch(patch: str) -> set[int]:
     # contrast, is truncated to REVIEW_DIFF_LIMIT and can drift from the PR, which is how a
     # finding ends up inlined on a line GitHub does not show (the 422 that used to sink the
     # whole review post). New-side numbers advance on ' ' and '+' lines and hold on '-' and '\'.
+    # Returns None when no hunk header is recognized: a non-empty patch with no hunk is malformed,
+    # so the caller cannot trust it and must fall back to the local diff. (A valid patch always
+    # has at least one hunk, so None never means "valid but empty".)
     lines: set[int] = set()
     new_lineno = 0
     in_hunk = False
@@ -358,6 +361,8 @@ def new_side_lines_from_patch(patch: str) -> set[int]:
         elif in_hunk and (raw.startswith('+') or raw.startswith(' ')):
             lines.add(new_lineno)
             new_lineno += 1
+    if not in_hunk:
+        return None
     return lines
 
 
@@ -394,7 +399,13 @@ async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) ->
             patch = f.get('patch')
             if not path or not isinstance(patch, str) or not patch:
                 continue  # no patch (binary/too large): nothing to anchor on
-            anchorable[path] = new_side_lines_from_patch(patch)
+            lines = new_side_lines_from_patch(patch)
+            if lines is None:
+                # A malformed patch (non-empty but no recognizable hunk) means the PR files
+                # cannot be parsed, so fall back to the local diff rather than anchor on a
+                # result we cannot trust.
+                return None
+            anchorable[path] = lines
         if len(files) < 100:
             break  # last page
         page += 1
