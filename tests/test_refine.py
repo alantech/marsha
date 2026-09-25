@@ -17,6 +17,7 @@ import pytest
 
 from marsha import refine
 from marsha import term
+from marsha.spec_check import SPEC_CHECK_GROUNDED_NOTE
 
 
 @pytest.fixture(autouse=True)
@@ -120,12 +121,35 @@ def test_resolve_source_requires_exactly_one() -> None:
 # --- _repo_gate (fast-fail, before any LLM call) ------------------------------
 
 
-def test_repo_gate_mrsh_is_a_noop() -> None:
-    async def boom(*a: Any, **k: Any) -> Any:
-        raise AssertionError('must not call _repo_name for a .mrsh file')
+def test_repo_gate_mrsh_reports_repo_without_gating() -> None:
+    # A .mrsh file is standalone: no gate, no gh/linear required, but the current repo (if any)
+    # is reported so the chat can use the read-only codebase tools.
     s = refine.resolve_source(_args(source='spec.mrsh'))
-    with patch.object(refine, '_repo_name', new=boom):
-        assert asyncio.run(refine._repo_gate(s, '/nowhere')) == ''
+    with patch.object(refine, '_git_repo_name',
+                      new=AsyncMock(return_value='acme/widget')):
+        assert asyncio.run(refine._repo_gate(s, '/x')) == 'acme/widget'
+
+
+def test_repo_gate_mrsh_without_repo_reports_empty() -> None:
+    s = refine.resolve_source(_args(source='spec.mrsh'))
+    with patch.object(refine, '_git_repo_name', new=AsyncMock(return_value='')):
+        assert asyncio.run(refine._repo_gate(s, '/x')) == ''
+
+
+def test_git_repo_name_parses_remote() -> None:
+    for url, want in (
+            ('git@github.com:acme/widget.git', 'acme/widget'),
+            ('https://github.com/acme/widget.git', 'acme/widget'),
+            ('https://github.com/acme/widget', 'acme/widget')):
+        async def fake_run(cmd: Any, *args: Any, **k: Any) -> Any:
+            return (0, url, '')
+        with patch.object(refine, '_run', new=fake_run):
+            assert asyncio.run(refine._git_repo_name('/x')) == want
+    # No origin remote (or a git failure) -> empty, not an error.
+    async def no_remote(cmd: Any, *args: Any, **k: Any) -> Any:
+        return (1, '', 'fatal: no remote named origin')
+    with patch.object(refine, '_run', new=no_remote):
+        assert asyncio.run(refine._git_repo_name('/x')) == ''
 
 
 def test_repo_gate_issue_requires_a_repo() -> None:
@@ -168,9 +192,23 @@ def test_repo_gate_issue_repo_match_is_case_insensitive() -> None:
 def test_repo_gate_linear_requires_a_repo() -> None:
     s = refine.resolve_source(_args(linear='ENG-5'))
     with patch.object(refine, 'linear_available', lambda: True), \
-         patch.object(refine, '_repo_name', new=AsyncMock(return_value='')):
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         with pytest.raises(Exception, match='inside a git repository'):
             asyncio.run(refine._repo_gate(s, '/x'))
+
+
+def test_repo_gate_linear_uses_git_not_gh() -> None:
+    # A Linear ticket must be refinable without GitHub auth: the gate uses git (not gh) and takes
+    # the repo name from the remote, so gh/_repo_name must not be consulted.
+    async def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError('the linear gate must not call gh (_repo_name)')
+    s = refine.resolve_source(_args(linear='ENG-5'))
+    with patch.object(refine, 'linear_available', lambda: True), \
+         patch.object(refine, '_repo_name', new=boom), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=True)), \
+         patch.object(refine, '_git_repo_name',
+                      new=AsyncMock(return_value='acme/widget')):
+        assert asyncio.run(refine._repo_gate(s, '/x')) == 'acme/widget'
 
 
 def test_repo_gate_linear_requires_linear_cli() -> None:
@@ -218,18 +256,30 @@ def test_gh_issue_context_surfaces_gh_failure() -> None:
 # --- _extract_section / parse_locked_output -----------------------------------
 
 
-def test_extract_section_basic() -> None:
-    text = 'intro\n[[NEW:SPEC]]\nspec line 1\nspec line 2\n'
-    assert refine._extract_section(text, '[[NEW:SPEC]]') == 'spec line 1\nspec line 2'
+def test_section_to_end() -> None:
+    lines = 'intro\n[[NEW:SPEC]]\nspec line 1\nspec line 2\n'.split('\n')
+    assert refine._section_to_end(lines, '[[NEW:SPEC]]') == 'spec line 1\nspec line 2'
+    # A marker-like line in the content is preserved (runs to the end, not truncated).
+    lines2 = ('[[NEW:SPEC]]\na\n[[DESIGN:LOCKED]]\nb\n').split('\n')
+    assert refine._section_to_end(lines2, '[[NEW:SPEC]]') == 'a\n[[DESIGN:LOCKED]]\nb'
+    assert refine._section_to_end(['no marker'], '[[NEW:SPEC]]') is None
 
 
-def test_extract_section_stops_at_next_marker() -> None:
-    text = '[[NEW:TITLE]]\nTitle here\n[[NEW:BODY]]\nBody here'
-    assert refine._extract_section(text, '[[NEW:TITLE]]') == 'Title here'
+def test_section_to_stops_only_at_named_end_marker() -> None:
+    lines = '[[NEW:TITLE]]\nTitle here\n[[NEW:BODY]]\nBody here'.split('\n')
+    assert refine._section_to(lines, '[[NEW:TITLE]]', '[[NEW:BODY]]') == 'Title here'
+    # A marker other than the named end marker does not terminate the section.
+    lines2 = '[[NEW:TITLE]]\nT\n[[NEW:SPEC]]\nU\n[[NEW:BODY]]\nB'.split('\n')
+    assert refine._section_to(lines2, '[[NEW:TITLE]]', '[[NEW:BODY]]') == 'T\n[[NEW:SPEC]]\nU'
+    assert refine._section_to(['x'], '[[NEW:TITLE]]', '[[NEW:BODY]]') is None
 
 
-def test_extract_section_missing_marker() -> None:
-    assert refine._extract_section('no marker here', '[[NEW:SPEC]]') is None
+def test_parse_locked_output_mrsh_preserves_marker_line() -> None:
+    # A .mrsh spec that legitimately contains a line equal to a protocol marker must not be
+    # truncated at that line: the spec section runs to the end of the response.
+    text = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nline one\n[[DESIGN:LOCKED]]\nline two'
+    assert refine.parse_locked_output(text, 'mrsh') == {
+        'spec': 'line one\n[[DESIGN:LOCKED]]\nline two'}
 
 
 def test_parse_locked_output_mrsh() -> None:
@@ -591,3 +641,42 @@ def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
     assert res.status == 'locked'
     assert res.payload == {'title': 'Updated Issue Title',
                            'body': 'Updated body text'}
+
+
+def test_run_refine_chat_mrsh_in_repo_gets_readonly_tools() -> None:
+    # A .mrsh refined inside a repository gets the read-only codebase tools too (the grounded note
+    # is appended to the system prompt), matching issue/linear.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    captured: dict[str, str] = {}
+
+    def get_mapper(system: str, **k: Any) -> Any:
+        captured['system'] = system
+        return _scripted_mapper([locked])
+
+    with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='acme/widget', cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
+
+
+def test_run_refine_chat_standalone_mrsh_has_no_tools() -> None:
+    # A .mrsh with no repository has nothing to inspect, so it runs without the codebase tools
+    # (no grounded note, and no context-window lookup).
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    captured: dict[str, str] = {}
+
+    def get_mapper(system: str, **k: Any) -> Any:
+        captured['system'] = system
+        return _scripted_mapper([locked])
+
+    with patch.object(refine, 'get_mapper', new=get_mapper):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert SPEC_CHECK_GROUNDED_NOTE not in captured['system']

@@ -41,9 +41,6 @@ _ISSUE_URL_RE = re.compile(
 _ISSUE_QUALIFIED_RE = re.compile(r'^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#(\d+)$')
 _ISSUE_BARE_RE = re.compile(r'^\d+$')
 
-_MARKERS = {'[[DESIGN:LOCKED]]', '[[DESIGN:BAIL]]',
-            '[[NEW:SPEC]]', '[[NEW:TITLE]]', '[[NEW:BODY]]'}
-
 
 @dataclasses.dataclass
 class SpecSource:
@@ -101,31 +98,54 @@ def resolve_source(args: Any) -> SpecSource:
     return SpecSource(kind='linear', name=cast(str, args.linear))
 
 
-async def _repo_gate(source: SpecSource, cwd: str | None) -> str:
-    """Fast-fail the repo restriction (before any LLM call) and return the current repo.
+async def _is_git_repo(cwd: str | None) -> bool:
+    """Whether cwd is inside a git working tree (via git itself, no gh/GitHub needed)."""
+    rc, _out, _err = await _run('git', 'rev-parse', '--is-inside-work-tree', cwd=cwd)
+    return rc == 0
 
-    `.mrsh` files are standalone and have no gate (returns ''). A GitHub issue or Linear ticket
-    must be refined from inside a git repository so the codebase can ground the analysis; a
-    repo-qualified issue reference must also match the current checkout.
+
+async def _git_repo_name(cwd: str | None) -> str:
+    """Best-effort owner/name of the current repo from its `origin` remote (no gh/GitHub)."""
+    rc, out, _err = await _run('git', 'remote', 'get-url', 'origin', cwd=cwd)
+    if rc != 0:
+        return ''
+    url = out.strip()
+    # git@github.com:owner/repo.git or https://github.com/owner/repo[.git]
+    m = re.search(r'[:/]([^/:]+)/([^/]+?)(?:\.git)?$', url)
+    return f'{m.group(1)}/{m.group(2)}' if m else ''
+
+
+async def _repo_gate(source: SpecSource, cwd: str | None) -> str:
+    """Resolve the repo context and fast-fail (before any LLM call), returning owner/name.
+
+    `.mrsh` files are standalone: no gate, but the current repo (if any) is still reported so the
+    chat can use the read-only codebase tools. A GitHub issue is a GitHub object, so it is
+    resolved via gh and a repo-qualified reference must match the current checkout. A Linear
+    ticket has no GitHub dependency: it only needs a git working tree (Linear exposes no
+    ticket-to-repo mapping, so the current repo is assumed).
     """
     if source.kind == 'mrsh':
-        return ''
-    if source.kind == 'issue' and not gh_available():
-        raise Exception('--issue requires the `gh` CLI to be on PATH.')
-    if source.kind == 'linear' and not linear_available():
+        return await _git_repo_name(cwd)
+    if source.kind == 'issue':
+        if not gh_available():
+            raise Exception('--issue requires the `gh` CLI to be on PATH.')
+        current = await _repo_name(cwd)
+        if not current:
+            raise Exception(
+                'marsha refine must run inside a git repository to refine this GitHub issue; '
+                'the codebase grounds the ambiguity analysis.')
+        if source.repo is not None and source.repo.lower() != current.lower():
+            raise Exception(
+                f'Issue #{source.num} belongs to {source.repo}, but you are in {current}. '
+                f'cd into {source.repo} and re-run.')
+        return current
+    if not linear_available():
         raise Exception('--linear requires the `linear` CLI to be on PATH.')
-    current = await _repo_name(cwd)
-    if not current:
-        what = 'this GitHub issue' if source.kind == 'issue' else 'this Linear ticket'
+    if not await _is_git_repo(cwd):
         raise Exception(
-            f'marsha refine must run inside a git repository to refine {what}; the codebase '
-            'grounds the ambiguity analysis.')
-    if (source.kind == 'issue' and source.repo is not None
-            and source.repo.lower() != current.lower()):
-        raise Exception(
-            f'Issue #{source.num} belongs to {source.repo}, but you are in {current}. '
-            f'cd into {source.repo} and re-run.')
-    return current
+            'marsha refine must run inside a git repository to refine this Linear ticket; the '
+            'codebase grounds the ambiguity analysis.')
+    return await _git_repo_name(cwd)
 
 
 async def gh_issue_context(num: int, cwd: str | None = None) -> str:
@@ -181,19 +201,37 @@ When (and only when) every open ambiguity is resolved, signal that the design is
 '''
 
 
-def _extract_section(text: str, marker: str) -> str | None:
-    """The content after a line that is exactly `marker`, up to the next known marker or end."""
-    lines = text.split('\n')
+def _section_to_end(lines: list[str], start_marker: str) -> str | None:
+    """Content from the line after a line that is exactly `start_marker` to the end of the text
+    (trailing blanks stripped); None if the marker is absent. Runs to the end so legitimate
+    content that merely looks like a marker line is preserved, not truncated away."""
     start = None
     for i, ln in enumerate(lines):
-        if ln.strip() == marker:
+        if ln.strip() == start_marker:
+            start = i + 1
+            break
+    if start is None:
+        return None
+    out = lines[start:]
+    while out and not out[-1].strip():
+        out.pop()
+    return '\n'.join(out)
+
+
+def _section_to(lines: list[str], start_marker: str, end_marker: str) -> str | None:
+    """Content from the line after a line that is exactly `start_marker` up to (not including) a
+    line that is exactly `end_marker`, or the end of the text; None if `start_marker` is absent.
+    Only the named end marker terminates, so other marker-like lines are kept as content."""
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == start_marker:
             start = i + 1
             break
     if start is None:
         return None
     out = []
     for ln in lines[start:]:
-        if ln.strip() in _MARKERS:
+        if ln.strip() == end_marker:
             break
         out.append(ln)
     while out and not out[-1].strip():
@@ -202,16 +240,24 @@ def _extract_section(text: str, marker: str) -> str | None:
 
 
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
-    """Extract the updated source from a locked response, or None if it is malformed."""
+    """Extract the updated source from a locked response, or None if it is malformed.
+
+    Each section runs to its named terminator (or the end of the text), so a marker-like line in
+    the content is preserved rather than silently truncating what is later written back.
+    """
     if '[[DESIGN:LOCKED]]' not in text:
         return None
+    lines = text.split('\n')
     if kind == 'mrsh':
-        spec = _extract_section(text, '[[NEW:SPEC]]')
+        # A .mrsh has a single payload section, so it runs to the end of the response.
+        spec = _section_to_end(lines, '[[NEW:SPEC]]')
         if not spec or not spec.strip():
             return None
         return {'spec': spec}
-    title = _extract_section(text, '[[NEW:TITLE]]')
-    body = _extract_section(text, '[[NEW:BODY]]')
+    # An issue/ticket has a title followed by a body: the title stops at the body marker, and the
+    # body (the last section) runs to the end.
+    title = _section_to(lines, '[[NEW:TITLE]]', '[[NEW:BODY]]')
+    body = _section_to_end(lines, '[[NEW:BODY]]')
     if not title or not title.strip() or body is None:
         return None
     return {'title': title.strip().split('\n', 1)[0].strip(), 'body': body}
@@ -277,10 +323,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                           debug: bool = False) -> ChatResult:
     """Drive the multi-turn conversation until the design is locked, bailed, or turns run out.
 
-    Each turn the assistant may first use the read-only tools (issue/linear) to investigate,
-    then speaks to the user. The user may answer, ask back, or bail. Returns the outcome.
+    Each turn the assistant may first use the read-only tools to investigate, then speaks to the
+    user. The user may answer, ask back, or bail. Returns the outcome.
     """
-    tool_ctx = None if kind == 'mrsh' else tools.ToolContext(
+    # The read-only codebase tools are available whenever we are inside a repository (any source
+    # kind): a .mrsh refined in a repo lets the assistant inspect that repo, and for an issue or
+    # linear ticket the gate has already guaranteed one. A standalone .mrsh (no repo) has nothing
+    # to inspect, so it runs without tools.
+    tool_ctx = None if not current_repo else tools.ToolContext(
         phase='refine', workdir=cwd, require_evidence=False,
         context_window=await _resolve_window(model))
     system = REFINE_SYSTEM_PROMPT + _locked_format_note(kind)
