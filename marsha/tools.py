@@ -1273,15 +1273,16 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             pin: os.stat_result | None = None
             if sys.platform == 'win32':
                 # No fd-based scandir on Windows: pin the directory's identity on the
-                # descriptor, scan by path, and compare the identity after the scan —
-                # a directory swapped for an outside symlink while the scan ran is
-                # discarded (only a swap that also reverts before the comparison, and
-                # pure Python has no scan-by-handle, can slip through).
+                # descriptor, scan the path, check the identity, and re-scan: a swap
+                # installed for the first scan must be reverted to pass the check, and
+                # then the re-scan (which runs after the check) disagrees with the
+                # first scan, so what was read is discarded either way.
                 pin = os.fstat(dir_fd)
                 scan = os.scandir(dirpath)
             else:
                 # Scan through the descriptor so the scan itself cannot follow a swap.
                 scan = os.scandir(dir_fd)
+            seen_names: list[str] = []
             try:
                 for count, entry in enumerate(scan, 1):
                     if count > LIST_TREE_MAX_NAMES_PER_DIR:
@@ -1295,6 +1296,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                         dirs_truncated = True
                         continue
                     name = entry.name
+                    seen_names.append(name)
                     if is_dir:
                         if not entry.is_symlink() and name not in LIST_TREE_SKIP_DIRS:
                             sub_names.append(name)
@@ -1312,6 +1314,19 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                     now = None
                 if now is None or (now.st_dev, now.st_ino) != (
                         pin.st_dev, pin.st_ino):
+                    sub_names.clear()
+                    file_names.clear()
+                    dirs_truncated = True
+                    continue
+                # A swap reverted before the identity check leaves the identity
+                # matching again: the re-scan (after the check) must then disagree
+                # with the first scan, which is discarded too.
+                rescan: list[str] = []
+                for e2 in os.scandir(dirpath):
+                    if len(rescan) >= len(seen_names):
+                        break
+                    rescan.append(e2.name)
+                if rescan != seen_names:
                     sub_names.clear()
                     file_names.clear()
                     dirs_truncated = True

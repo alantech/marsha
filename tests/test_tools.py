@@ -1451,6 +1451,48 @@ def test_list_tree_windows_branch_discards_swapped_scan(tmp_path: Any,
     assert 'incomplete' in out
 
 
+def test_list_tree_windows_branch_catches_swap_and_revert(tmp_path: Any,
+                                                          monkeypatch: Any) -> None:
+    # A swap installed for the first scan and reverted before the identity check
+    # would match the pin again: the post-check re-scan then disagrees with the
+    # first scan, so what was read is discarded.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'leak.txt').write_text('x')
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    orig_scandir = os.scandir
+    phase = 0
+
+    def swapping(path: Any, *a: Any, **k: Any) -> Any:
+        # swap in for the first scan only (the revert happens at stat time below)
+        nonlocal phase
+        if str(path) == str(tree / 'd') and phase == 0:
+            phase = 1
+            os.replace(tree / 'd', tree / 'd.real')
+            os.symlink(outside, tree / 'd')
+        return orig_scandir(path, *a, **k)
+    monkeypatch.setattr('os.scandir', swapping)
+    orig_stat = os.stat
+
+    def reverting(path: Any, *a: Any, **k: Any) -> Any:
+        # restore the directory after the first scan, before the identity check
+        nonlocal phase
+        if phase == 1:
+            phase = 2
+            os.replace(tree / 'd', tree / 'd.symlink')
+            os.replace(tree / 'd.real', tree / 'd')
+        return orig_stat(path, *a, **k)
+    monkeypatch.setattr('os.stat', reverting)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'leak.txt' not in out
+    assert 'incomplete' in out
+
+
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
                                                    monkeypatch: Any) -> None:
     # Same byte-vs-character rule as find-in-file: 21 two-byte characters are 42 bytes (more
