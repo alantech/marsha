@@ -1391,7 +1391,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
     note = _list_tree_note(trunc_note, chars_truncated)
     if not entries:
         scope = ' (no match for the extension filter)' if has_ext else ''
-        return f'(no files under {path!r} to list{scope}){note}'
+        return f'(no files under {shown!r} to list{scope}){note}'
     header = f'{len(entries)} file(s) under {rel_start}:\n'
     return header + '\n'.join(entries) + note
 

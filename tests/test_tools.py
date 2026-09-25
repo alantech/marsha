@@ -1763,6 +1763,12 @@ def test_read_tools_bound_echoed_paths(tmp_path: Any) -> None:
     out = asyncio.run(tools.list_tree([long], ctx))
     assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
     assert 'path truncated' in out
+    empty = tmp_path / 'e'
+    empty.mkdir()
+    # a long but valid directory argument: the empty-list response bounds it too
+    out = asyncio.run(tools.list_tree(['e' + ('/./' * 50_000)], ctx))
+    assert 'no files under' in out and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
 
 
 def test_http_get_blocks_private_initial_url() -> None:
