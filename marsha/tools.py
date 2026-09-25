@@ -1251,9 +1251,13 @@ def _scandir_dir_fd_windows(dir_fd: int) -> list[_WindowsDirEntry]:
         entries: list[_WindowsDirEntry] = []
         restart = True
         while True:
-            status = int(ntdll.NtQueryDirectoryFile(
-                handle, None, None, None, ctypes.byref(status_block), buffer,
+            raw = int(ntdll.NtQueryDirectoryFile(
+                handle, None, None, None, ctypes.pointer(status_block), buffer,
                 buffer_size, file_directory_information, restart, None))
+            # NTSTATUS is a signed 32-bit value: mask it to unsigned, so the
+            # end-of-directory status (0x80000006, negative as signed) compares
+            # against the constant and failures print in their unsigned form.
+            status = raw & 0xFFFFFFFF
             restart = False
             if status == status_no_more_files:
                 break

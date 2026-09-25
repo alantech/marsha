@@ -1435,6 +1435,10 @@ def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
     outside = tmp_path / 'outside'
     outside.mkdir()
     (outside / 'leak.txt').write_text('x')
+    # Force asyncio's lazy event-loop-policy init while still on Linux: with
+    # sys.platform patched to win32, a first asyncio.run in the process would
+    # select the Windows policy and fail to import _overlapped.
+    asyncio.new_event_loop().close()
     monkeypatch.setattr(sys, 'platform', 'win32')
     orig_open = os.open
 
@@ -1477,6 +1481,9 @@ def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
     tree.mkdir()
     (tree / 'd').mkdir()
     (tree / 'd' / 'inner.txt').write_text('x')
+    # Force asyncio's lazy event-loop-policy init while still on Linux (see the
+    # note in test_list_tree_windows_branch_reads_through_descriptor).
+    asyncio.new_event_loop().close()
     monkeypatch.setattr(sys, 'platform', 'win32')
 
     def fake_scandir(fd: int) -> Any:
@@ -1486,6 +1493,68 @@ def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
     out = asyncio.run(tools.list_tree([], ctx))
     assert 'inner.txt' not in out
     assert 'incomplete' in out
+
+
+def test_windows_enumeration_stops_at_end_of_directory(monkeypatch: Any) -> None:
+    # NtQueryDirectoryFile returns NTSTATUS as a signed 32-bit value: the normal
+    # end-of-directory status 0x80000006 arrives as a negative number, and the
+    # enumeration must stop there with the entries it collected, not raise.
+    import ctypes
+    from ctypes import wintypes
+    import types
+
+    def fake_get_osfhandle(fd: int) -> int:
+        return 0x1234
+    fake_msvcrt = types.SimpleNamespace(get_osfhandle=fake_get_osfhandle)
+    monkeypatch.setitem(sys.modules, 'msvcrt', fake_msvcrt)
+
+    class _hdr(ctypes.Structure):
+        # The same fields the production code parses, so the record below has
+        # the same layout the code expects on this platform.
+        _fields_ = [
+            ('next_entry_offset', wintypes.ULONG),
+            ('file_index', wintypes.ULONG),
+            ('creation_time', ctypes.c_int64),
+            ('last_access_time', ctypes.c_int64),
+            ('last_write_time', ctypes.c_int64),
+            ('change_time', ctypes.c_int64),
+            ('end_of_file', ctypes.c_int64),
+            ('allocation_size', ctypes.c_int64),
+            ('file_attributes', wintypes.ULONG),
+            ('file_name_length', wintypes.ULONG),
+        ]
+
+    header_size = ctypes.sizeof(_hdr)
+    raw_name = 'file.txt'.encode('utf-16-le')
+    header = _hdr()
+    header.file_index = 1
+    header.file_attributes = 0x20  # a normal file
+    header.file_name_length = len(raw_name)
+    record = ctypes.string_at(ctypes.addressof(header), header_size) + raw_name
+
+    state = {'calls': 0}
+
+    def fake_ntqdf(handle: Any, event: Any, apc: Any, apc_ctx: Any,
+                   io_block: Any, buffer: Any, length: Any, info_class: Any,
+                   restart: Any, file_name: Any) -> int:
+        state['calls'] += 1
+        if state['calls'] == 1:
+            io_block[0].information = len(record)
+            buffer[:len(record)] = record
+            return 0
+        return 0x80000006 - 0x100000000  # STATUS_NO_MORE_FILES, signed 32-bit
+
+    fake_ntdll = types.SimpleNamespace(NtQueryDirectoryFile=fake_ntqdf)
+
+    def fake_windll(*args: Any, **kwargs: Any) -> Any:
+        return fake_ntdll
+    monkeypatch.setattr(ctypes, 'WinDLL', fake_windll, raising=False)
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    entries = tools._scandir_dir_fd_windows(3)
+    assert [e.name for e in entries] == ['file.txt']
+    assert not entries[0].is_dir()
+    assert not entries[0].is_symlink()
+    assert state['calls'] == 2
 
 
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
