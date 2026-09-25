@@ -547,13 +547,19 @@ async def _mcp_tools_call(url: str, tool: str, arguments: dict[str, JSON],
 def _strip_tags(fragment: str) -> str:
     # Drop tags; insert a space only where two word characters would otherwise
     # run together, so `</a>.` stays `.` and `<b>CSV</b> file` keeps one space.
-    def repl(m: re.Match[str]) -> str:
-        before = fragment[:m.start()]
-        after = fragment[m.end():]
-        if before and after and before[-1].isalnum() and after[0].isalnum():
-            return ' '
-        return ''
-    return re.sub(r'(?s)<[^>]+>', repl, fragment)
+    # A single finditer pass over the raw text (no re-slicing the whole fragment
+    # per tag) keeps tag-dense documents linear in size.
+    parts: list[str] = []
+    prev_end = 0
+    for m in re.finditer(r'(?s)<[^>]+>', fragment):
+        parts.append(fragment[prev_end:m.start()])
+        if (m.start() > 0 and m.end() < len(fragment)
+                and fragment[m.start() - 1].isalnum()
+                and fragment[m.end()].isalnum()):
+            parts.append(' ')
+        prev_end = m.end()
+    parts.append(fragment[prev_end:])
+    return ''.join(parts)
 
 
 def html_to_text(doc: str) -> str:

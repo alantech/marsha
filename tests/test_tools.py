@@ -376,6 +376,13 @@ def test_view_web_page_truncates_long_pages() -> None:
     assert out.rstrip().endswith('[page truncated]')
 
 
+def test_strip_tags_is_linear_on_tag_dense_input() -> None:
+    # A tag-dense document must be stripped in a single pass: re-slicing the whole
+    # fragment per tag would be quadratic and stall the tool on a near-limit page.
+    assert tools._strip_tags('<div>x</div>' * 12_000) == 'x' * 12_000
+    assert tools._strip_tags('<b>a</b>. <i>b</i>c') == 'a. b c'
+
+
 def test_view_web_page_rejects_bad_urls() -> None:
     assert asyncio.run(tools.view_web_page([])).startswith('error:')
     assert asyncio.run(tools.view_web_page(['a', 'b'])).startswith('error:')
