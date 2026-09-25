@@ -1788,9 +1788,13 @@ def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
          'location': 'foo.py:3', 'desc': 'two'},
     ]
     posts: list[Any] = []
-    # The realistic shape of a GitHub 422 as `gh` reports it: a JSON error body on stdout (with a
-    # "status": "422" field) and a "... (HTTP 422)" line on stderr.
-    err422 = json.dumps({'message': 'Invalid request.', 'status': '422'})
+    # The realistic shape of an anchoring 422 as `gh` reports it: a JSON error body on stdout
+    # whose `errors` array names the comment's `line` field (plus a "status": "422"), and a
+    # "... (HTTP 422)" line on stderr.
+    err422 = json.dumps({
+        'message': 'Invalid request.', 'status': '422',
+        'errors': [{'resource': 'ReviewComment', 'field': 'line', 'code': 'invalid'}],
+    })
 
     async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
@@ -1822,6 +1826,69 @@ def test_post_review_demotes_inline_to_body_on_422(capsys: Any) -> None:
     assert '**[A1] MAJOR**' in second['body']
     assert '**[B1] MINOR**' in second['body']
     assert 'moved into the review body' in capsys.readouterr().out
+
+
+def test_post_review_no_demote_on_non_anchoring_422() -> None:
+    # A 422 whose validation error is NOT about a comment position (here: a bad `event`) must not
+    # demote the inline findings: demoting would strip inline placement and report a misleading
+    # anchoring reason for an unrelated validation failure. It is surfaced as a plain failure.
+    pr_files = json.dumps([
+        {'filename': 'foo.py',
+         'patch': '@@ -1,2 +1,3 @@\n ctx\n+ add\n ctx\n'},  # new-side lines 1,2,3
+    ])
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'one'},
+    ]
+    err422 = json.dumps({
+        'message': 'Invalid request.', 'status': '422',
+        'errors': [{'resource': 'Review', 'field': 'event', 'code': 'invalid'}],
+    })
+    posts: list[Any] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'pulls/123/files' in joined:
+            return (0, pr_files, '')
+        if '/reviews' in joined:
+            inp = k.get('input')
+            if inp is not None:
+                posts.append(inp)
+                return (1, err422, 'gh: Invalid request. (HTTP 422)')
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        with pytest.raises(Exception, match='Failed to post the review'):
+            asyncio.run(review.post_review(123, findings, ''))
+
+    # Exactly one post: no demoted body-only retry, and the inline comment was preserved.
+    assert len(posts) == 1
+    assert len(json.loads(posts[0])['comments']) == 1
+
+
+def test_is_review_anchoring_rejection() -> None:
+    # Only a 422 whose validation error names a comment-position field is an anchoring rejection.
+    line = json.dumps({'status': '422', 'errors': [
+        {'resource': 'ReviewComment', 'field': 'line', 'code': 'invalid'}]})
+    assert review._is_review_anchoring_rejection(line, 'gh: x (HTTP 422)') is True
+    # The position field also identifies an anchoring rejection.
+    pos = json.dumps({'status': '422', 'errors': [
+        {'resource': 'ReviewComment', 'field': 'position', 'code': 'invalid'}]})
+    assert review._is_review_anchoring_rejection(pos, 'gh: x (HTTP 422)') is True
+    # A 422 about a different field (not placement) is not an anchoring rejection.
+    event = json.dumps({'status': '422', 'errors': [
+        {'resource': 'Review', 'field': 'event', 'code': 'invalid'}]})
+    assert review._is_review_anchoring_rejection(event, 'gh: x (HTTP 422)') is False
+    # A non-422 failure is not an anchoring rejection, even if a line field is present.
+    five = json.dumps({'status': '500', 'errors': [
+        {'resource': 'ReviewComment', 'field': 'line', 'code': 'invalid'}]})
+    assert review._is_review_anchoring_rejection(five, 'gh: x (HTTP 500)') is False
+    # A 422 with an unparseable or field-less body is treated as not anchoring (safe default).
+    assert review._is_review_anchoring_rejection('not json', 'gh: x (HTTP 422)') is False
+    assert review._is_review_anchoring_rejection('{}', 'gh: x (HTTP 422)') is False
 
 
 def test_post_review_no_demote_on_non_422_failure() -> None:

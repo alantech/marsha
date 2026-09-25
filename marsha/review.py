@@ -1399,13 +1399,27 @@ async def _post_review_payload(repo: str, pr_num: int, payload: str, cwd: str | 
 
 
 def _is_review_anchoring_rejection(out: str, err: str) -> bool:
-    # Whether a failed review POST was rejected because an inline comment could not be anchored on
-    # the PR diff — GitHub's HTTP 422. `gh` reports it as "... (HTTP 422)" on stderr and/or a
-    # "status": "422" field in the JSON error body on stdout. Only this failure is worth demoting
-    # inline comments to the body: a transient or auth error is not (demoting would needlessly lose
-    # inline placement and report a misleading reason).
-    return ('HTTP 422' in err
-            or '"status": "422"' in out or '"status":"422"' in out)
+    # Whether a failed review POST was rejected specifically because an inline comment could not
+    # be anchored on the PR diff. GitHub reports that as an HTTP 422 whose validation error names
+    # a comment-position field (`line`/`position`) on the ReviewComment resource. A 422 for any
+    # other validation problem (a bad event, a malformed body, ...) must NOT be treated as
+    # anchoring: demoting inline findings for it would needlessly strip inline placement and
+    # report a misleading reason. When the body cannot be parsed or lacks that error, the safe
+    # default is "not anchoring" — surface the failure rather than guess.
+    if 'HTTP 422' not in err and '"status": "422"' not in out and '"status":"422"' not in out:
+        return False
+    try:
+        body = json.loads(out)
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    errors = body.get('errors')
+    if not isinstance(errors, list):
+        return False
+    return any(
+        isinstance(e, dict) and e.get('field') in ('line', 'position')
+        for e in errors)
 
 
 async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None) -> None:
