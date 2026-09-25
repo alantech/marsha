@@ -1457,14 +1457,14 @@ def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
     monkeypatch.setattr(sys, 'platform', 'win32')
     orig_open = os.open
 
-    def swapping(path: Any, flags: Any = 0, *a: Any, **k: Any) -> Any:
-        fd = orig_open(path, flags, *a, **k)
-        if str(path) == str(tree / 'd'):
-            # swap the path for an outside symlink after the open
+    def swapping(path: str) -> int:
+        # open the real directory, then swap the path for an outside symlink
+        fd = orig_open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        if path == str(tree / 'd'):
             os.replace(tree / 'd', tree / 'd.real')
             os.symlink(outside, tree / 'd')
         return fd
-    monkeypatch.setattr('os.open', swapping)
+    monkeypatch.setattr(tools, '_open_dir_fd', swapping)
     calls: list[int] = []
 
     def fake_scandir(fd: int, limit: int) -> Any:
@@ -1503,6 +1503,11 @@ def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
     # note in test_list_tree_windows_branch_reads_through_descriptor).
     asyncio.new_event_loop().close()
     monkeypatch.setattr(sys, 'platform', 'win32')
+    orig_open = os.open
+
+    def fake_open_dir(path: str) -> int:
+        return orig_open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    monkeypatch.setattr(tools, '_open_dir_fd', fake_open_dir)
 
     def fake_scandir(fd: int, limit: int) -> Any:
         raise OSError('NtQueryDirectoryFile failed')

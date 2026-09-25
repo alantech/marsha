@@ -101,8 +101,10 @@ LIST_TREE_MAX_DIRS = 10_000
 # directory: a directory with more entries than this is listed partially, and the listing says
 # so (without it, one enormous directory would cost unbounded time and memory).
 LIST_TREE_MAX_NAMES_PER_DIR = 10_000
-# O_DIRECTORY is Unix-only: open with O_RDONLY on other platforms (scandir on a
+# O_DIRECTORY is Unix-only: Unix opens directories with it (scandir on a
 # non-directory descriptor still fails, and the walk flags it as incomplete).
+# Windows opens directories via _open_dir_fd instead (CreateFileW needs
+# FILE_FLAG_BACKUP_SEMANTICS, which os.open never sets).
 _DIR_OPEN_FLAGS = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
 
 # calc sandbox: a hard subprocess timeout is the hang guard (kill), the heap
@@ -1171,6 +1173,41 @@ def _open_workdir_file(workdir: str, resolved: str) -> Any:
     return os.fdopen(fd, 'r', encoding='utf-8', errors='replace')
 
 
+def _open_dir_fd(dirpath: str) -> int:
+    # Open a directory by descriptor. On Windows, os.open cannot open a directory
+    # (CreateFile needs FILE_FLAG_BACKUP_SEMANTICS), so the handle is created
+    # directly and wrapped in a descriptor; the walk then treats both platforms
+    # uniformly through the fd.
+    if sys.platform == 'win32':
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        generic_read = 0x80000000
+        file_share_all = 0x7
+        open_existing = 3
+        file_attribute_normal = 0x80
+        file_flag_backup_semantics = 0x20000000
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.CreateFileW(
+            dirpath, generic_read, file_share_all, None, open_existing,
+            file_attribute_normal | file_flag_backup_semantics, None)
+        if handle is None or handle >= 0xFFFFFFFF:  # INVALID_HANDLE_VALUE
+            raise OSError('could not open the directory (CreateFileW)')
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        if fd == -1:
+            kernel32.CloseHandle(handle)
+            raise OSError(
+                'could not wrap the directory handle in a descriptor')
+        return fd
+    return os.open(dirpath, _DIR_OPEN_FLAGS)
+
+
 class _WindowsDirEntry:
     # One directory entry as reported by the descriptor-bound Windows enumeration
     # (NtQueryDirectoryFile): the name plus directory/symlink flags read from the
@@ -1395,7 +1432,7 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             # Open the directory by descriptor and re-verify containment on the descriptor
             # (check-then-open race: it may have been swapped for an outside-pointing
             # symlink since it was queued).
-            dir_fd = os.open(dirpath, _DIR_OPEN_FLAGS)
+            dir_fd = _open_dir_fd(dirpath)
             try:
                 target = _fd_target_path(dir_fd)
                 if target is None:
