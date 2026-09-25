@@ -1126,7 +1126,9 @@ def _resolve_in_workdir(workdir: str, requested: str) -> str | None:
 def _fd_target_path(fd: int) -> str | None:
     # The actual on-disk path of an open file, read AFTER the open (so a check-then-open
     # swap can no longer matter): /proc/self/fd on Linux, /dev/fd on macOS, the kernel
-    # handle name on Windows. None where no such facility exists.
+    # handle name on Windows. None where the target could not be determined (no such
+    # facility, or the lookup failed): the callers must then fail closed, because a
+    # skipped containment check is a hole, not a fallback.
     for prefix in ('/proc/self/fd', '/dev/fd'):
         try:
             return os.readlink(f'{prefix}/{fd}')
@@ -1155,13 +1157,15 @@ def _open_workdir_file(workdir: str, resolved: str) -> Any:
     # the check-then-open is a race: the file, or an ancestor directory, can be
     # swapped for an outside-pointing symlink in between, so containment is
     # checked on the descriptor after the open, when it is too late to swap.
-    # Where the OS exposes no descriptor->path facility, the pre-open check is
-    # the best available (the race window then stays open, as before this guard).
+    # Where the opened file's target cannot be determined the open is refused:
+    # failing open would let a swap slip past the containment check.
     root = os.path.realpath(workdir)
     fd = os.open(resolved, os.O_RDONLY)
     target = _fd_target_path(fd)
-    if (target is not None and target != root
-            and not target.startswith(root + os.sep)):
+    if target is None:
+        os.close(fd)
+        raise OSError('could not determine the target of the opened file')
+    if target != root and not target.startswith(root + os.sep):
         os.close(fd)
         raise OSError('swapped outside the working tree after the check')
     return os.fdopen(fd, 'r', encoding='utf-8', errors='replace')
@@ -1186,11 +1190,14 @@ class _WindowsDirEntry:
         return self._is_symlink
 
 
-def _scandir_dir_fd_windows(dir_fd: int) -> list[_WindowsDirEntry]:
+def _scandir_dir_fd_windows(dir_fd: int,
+                            limit: int) -> tuple[list[_WindowsDirEntry], bool]:
     # Windows has no fd-based scandir, so the directory is enumerated through its open
     # descriptor with ntdll's NtQueryDirectoryFile: the read is bound to the descriptor
     # whose containment was just verified on the fd, so a path swap installed after the
-    # open cannot redirect it. OSError where the enumeration is unavailable or fails.
+    # open cannot redirect it. The enumeration stops once `limit` entries are collected,
+    # and returns (entries, more), where `more` says a (limit+1)th entry exists, so a
+    # wide directory is never fully materialized. OSError where it is unavailable.
     if sys.platform == 'win32':
         import ctypes
         import msvcrt
@@ -1282,10 +1289,13 @@ def _scandir_dir_fd_windows(dir_fd: int) -> list[_WindowsDirEntry]:
                     name,
                     bool(attributes & file_attribute_directory),
                     bool(attributes & file_attribute_reparse_point)))
+                if len(entries) == limit + 1:
+                    # The budget is exceeded: stop collecting and report the excess.
+                    return entries[:limit], True
                 if header.next_entry_offset == 0:
                     break
                 offset += int(header.next_entry_offset)
-        return entries
+        return entries, False
     raise OSError('descriptor-bound enumeration is only available on Windows')
 
 
@@ -1388,19 +1398,29 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             dir_fd = os.open(dirpath, _DIR_OPEN_FLAGS)
             try:
                 target = _fd_target_path(dir_fd)
-                if (target is not None and target != root
-                        and not target.startswith(root + os.sep)):
+                if target is None:
+                    # The descriptor's target could not be determined: fail closed,
+                    # or a swap could slip past the containment check.
+                    dirs_truncated = True
+                    continue
+                if target != root and not target.startswith(root + os.sep):
                     dirs_truncated = True  # swapped out of the tree: not listed
                     continue
                 if sys.platform == 'win32':
                     # No fd-based scandir on Windows: enumerate through the open
                     # descriptor itself (NtQueryDirectoryFile), so the read is bound
                     # to the verified descriptor and a path swap after the open
-                    # cannot redirect it.
-                    scan = _scandir_dir_fd_windows(dir_fd)
+                    # cannot redirect it. The enumeration stops at the per-directory
+                    # budget (plus one probe entry), so a wide directory cannot cost
+                    # unbounded memory or time.
+                    scan, win_more = _scandir_dir_fd_windows(
+                        dir_fd, LIST_TREE_MAX_NAMES_PER_DIR)
                 else:
                     # Scan through the descriptor so the scan itself cannot follow a swap.
                     scan = os.scandir(dir_fd)
+                    win_more = False
+                if win_more:
+                    dirs_truncated = True  # more entries than the per-directory budget
                 for count, entry in enumerate(scan, 1):
                     if count > LIST_TREE_MAX_NAMES_PER_DIR:
                         dirs_truncated = True  # more entries than the per-directory budget

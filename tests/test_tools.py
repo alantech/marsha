@@ -1372,14 +1372,14 @@ def test_fd_target_path_reports_opened_file(tmp_path: Any) -> None:
     assert target is None or os.path.realpath(target) == os.path.realpath(str(p))
 
 
-def test_open_workdir_file_falls_back_without_fd_facility(tmp_path: Any,
-                                                          monkeypatch: Any) -> None:
-    # Where the OS exposes no descriptor->path facility, the open must still work:
-    # the pre-open containment check remains the guard (no spurious read errors).
+def test_open_workdir_file_rejects_unknown_target(tmp_path: Any,
+                                                   monkeypatch: Any) -> None:
+    # Where the opened file's target cannot be determined, the open is refused:
+    # failing open would let a swap slip past the post-open containment check.
     (tmp_path / 'f.txt').write_text('x')
     monkeypatch.setattr(tools, '_fd_target_path', lambda fd: None)
-    with tools._open_workdir_file(str(tmp_path), str(tmp_path / 'f.txt')) as f:
-        assert f.read() == 'x'
+    with pytest.raises(OSError):
+        tools._open_workdir_file(str(tmp_path), str(tmp_path / 'f.txt'))
 
 
 def test_open_workdir_file_rejects_outside_descriptor(tmp_path: Any,
@@ -1422,6 +1422,21 @@ def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) ->
     assert 'incomplete' in out
 
 
+def test_list_tree_refuses_directory_with_unknown_target(tmp_path: Any,
+                                                          monkeypatch: Any) -> None:
+    # A directory whose descriptor target cannot be determined is not listed:
+    # failing open would let a swapped path slip past the containment check.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: None)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'inner.txt' not in out
+    assert 'incomplete' in out
+
+
 def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
                                                            monkeypatch: Any) -> None:
     # The Windows branch has no fd-based scandir: it enumerates through the open
@@ -1452,15 +1467,18 @@ def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
     monkeypatch.setattr('os.open', swapping)
     calls: list[int] = []
 
-    def fake_scandir(fd: int) -> Any:
+    def fake_scandir(fd: int, limit: int) -> Any:
         calls.append(fd)
         if len(calls) == 1:
-            return [
-                tools._WindowsDirEntry('keep.txt', False, False),
-                tools._WindowsDirEntry('d', True, False),
-                tools._WindowsDirEntry('link', True, True),
-            ]
-        return [tools._WindowsDirEntry('inner.txt', False, False)]
+            return (
+                [
+                    tools._WindowsDirEntry('keep.txt', False, False),
+                    tools._WindowsDirEntry('d', True, False),
+                    tools._WindowsDirEntry('link', True, True),
+                ],
+                False,
+            )
+        return ([tools._WindowsDirEntry('inner.txt', False, False)], False)
     monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
     ctx = tools.ToolContext('review', workdir=str(tree))
     out = asyncio.run(tools.list_tree([], ctx))
@@ -1486,7 +1504,7 @@ def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
     asyncio.new_event_loop().close()
     monkeypatch.setattr(sys, 'platform', 'win32')
 
-    def fake_scandir(fd: int) -> Any:
+    def fake_scandir(fd: int, limit: int) -> Any:
         raise OSError('NtQueryDirectoryFile failed')
     monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
     ctx = tools.ToolContext('review', workdir=str(tree))
@@ -1550,11 +1568,76 @@ def test_windows_enumeration_stops_at_end_of_directory(monkeypatch: Any) -> None
         return fake_ntdll
     monkeypatch.setattr(ctypes, 'WinDLL', fake_windll, raising=False)
     monkeypatch.setattr(sys, 'platform', 'win32')
-    entries = tools._scandir_dir_fd_windows(3)
+    entries, more = tools._scandir_dir_fd_windows(3, 10)
     assert [e.name for e in entries] == ['file.txt']
     assert not entries[0].is_dir()
     assert not entries[0].is_symlink()
+    assert more is False  # no (limit+1)th entry exists
     assert state['calls'] == 2
+
+
+def test_windows_enumeration_stops_at_the_entry_limit(monkeypatch: Any) -> None:
+    # The enumeration is bounded by the caller's per-directory limit: a directory
+    # with more entries than the limit stops after the (limit+1)th and reports
+    # `more`, so a wide directory is never fully materialized.
+    import ctypes
+    from ctypes import wintypes
+    import types
+
+    def fake_get_osfhandle(fd: int) -> int:
+        return 0x1234
+    fake_msvcrt = types.SimpleNamespace(get_osfhandle=fake_get_osfhandle)
+    monkeypatch.setitem(sys.modules, 'msvcrt', fake_msvcrt)
+
+    class _hdr(ctypes.Structure):
+        _fields_ = [
+            ('next_entry_offset', wintypes.ULONG),
+            ('file_index', wintypes.ULONG),
+            ('creation_time', ctypes.c_int64),
+            ('last_access_time', ctypes.c_int64),
+            ('last_write_time', ctypes.c_int64),
+            ('change_time', ctypes.c_int64),
+            ('end_of_file', ctypes.c_int64),
+            ('allocation_size', ctypes.c_int64),
+            ('file_attributes', wintypes.ULONG),
+            ('file_name_length', wintypes.ULONG),
+        ]
+
+    header_size = ctypes.sizeof(_hdr)
+
+    def make_record(index: int, name: str) -> bytes:
+        raw_name = name.encode('utf-16-le')
+        header = _hdr()
+        header.file_index = index
+        header.file_attributes = 0x20  # a normal file
+        header.file_name_length = len(raw_name)
+        return ctypes.string_at(ctypes.addressof(header), header_size) + raw_name
+
+    records = [make_record(1, 'one.txt'), make_record(2, 'two.txt'),
+               make_record(3, 'three.txt')]
+    state = {'calls': 0}
+
+    def fake_ntqdf(handle: Any, event: Any, apc: Any, apc_ctx: Any,
+                   io_block: Any, buffer: Any, length: Any, info_class: Any,
+                   restart: Any, file_name: Any) -> int:
+        state['calls'] += 1
+        if state['calls'] <= len(records):
+            record = records[state['calls'] - 1]
+            io_block[0].information = len(record)
+            buffer[:len(record)] = record
+            return 0
+        return 0x80000006 - 0x100000000  # STATUS_NO_MORE_FILES, signed 32-bit
+
+    fake_ntdll = types.SimpleNamespace(NtQueryDirectoryFile=fake_ntqdf)
+
+    def fake_windll(*args: Any, **kwargs: Any) -> Any:
+        return fake_ntdll
+    monkeypatch.setattr(ctypes, 'WinDLL', fake_windll, raising=False)
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    entries, more = tools._scandir_dir_fd_windows(3, 2)
+    assert [e.name for e in entries] == ['one.txt', 'two.txt']
+    assert more is True  # a third entry exists beyond the limit
+    assert state['calls'] == 3  # stopped as soon as the third entry was seen
 
 
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
