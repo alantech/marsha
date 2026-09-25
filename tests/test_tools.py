@@ -1347,6 +1347,43 @@ def test_summarize_rejects_swapped_symlink(tmp_path: Any, monkeypatch: Any) -> N
     assert out.startswith('error:') and 'working tree' in out
 
 
+def test_fd_target_path_reports_opened_file(tmp_path: Any) -> None:
+    # The descriptor->path facility (where the OS provides one) must name the real
+    # file behind the descriptor, so the post-open containment check can compare it.
+    p = tmp_path / 'f.txt'
+    p.write_text('x')
+    fd = os.open(p, os.O_RDONLY)
+    try:
+        target = tools._fd_target_path(fd)
+    finally:
+        os.close(fd)
+    assert target is None or os.path.realpath(target) == os.path.realpath(str(p))
+
+
+def test_open_workdir_file_falls_back_without_fd_facility(tmp_path: Any,
+                                                          monkeypatch: Any) -> None:
+    # Where the OS exposes no descriptor->path facility, the open must still work:
+    # the pre-open containment check remains the guard (no spurious read errors).
+    (tmp_path / 'f.txt').write_text('x')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: None)
+    with tools._open_workdir_file(str(tmp_path), str(tmp_path / 'f.txt')) as f:
+        assert f.read() == 'x'
+
+
+def test_open_workdir_file_rejects_outside_descriptor(tmp_path: Any,
+                                                      monkeypatch: Any) -> None:
+    # When the facility reports the descriptor pointing outside the tree, the open
+    # is refused even though the pre-open check passed.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'f.txt').write_text('x')
+    outside = tmp_path / 'outside.md'
+    outside.write_text('secret')
+    monkeypatch.setattr(tools, '_fd_target_path', lambda fd: str(outside))
+    with pytest.raises(OSError):
+        tools._open_workdir_file(str(tree), str(tree / 'f.txt'))
+
+
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
                                                    monkeypatch: Any) -> None:
     # Same byte-vs-character rule as find-in-file: 21 two-byte characters are 42 bytes (more
@@ -1601,6 +1638,19 @@ def test_find_in_file_bounds_echoed_query(tmp_path: Any) -> None:
         out = asyncio.run(tools.find_in_file(['q' * 100_000, 'd.md'], ctx))
     assert len(out) <= tools.RESULT_CHAR_LIMIT
     assert 'query truncated' in out
+
+
+def test_read_tools_bound_echoed_paths(tmp_path: Any) -> None:
+    # A near-limit path argument is echoed only as a bounded prefix, in the
+    # escape error of both read tools alike.
+    long = '../' + 'a' * 100_000
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    out = asyncio.run(tools.summarize([long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'target truncated' in out
+    out = asyncio.run(tools.find_in_file(['q', long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
 
 
 def test_http_get_blocks_private_initial_url() -> None:

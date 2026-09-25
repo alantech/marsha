@@ -1114,19 +1114,45 @@ def _resolve_in_workdir(workdir: str, requested: str) -> str | None:
     return candidate
 
 
+def _fd_target_path(fd: int) -> str | None:
+    # The actual on-disk path of an open file, read AFTER the open (so a check-then-open
+    # swap can no longer matter): /proc/self/fd on Linux, /dev/fd on macOS, the kernel
+    # handle name on Windows. None where no such facility exists.
+    for prefix in ('/proc/self/fd', '/dev/fd'):
+        try:
+            return os.readlink(f'{prefix}/{fd}')
+        except OSError:
+            pass
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            import msvcrt
+            handle = msvcrt.get_osfhandle(fd)
+            buf = ctypes.create_unicode_buffer(32_768)
+            size = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
+                handle, buf, 32_768, 0)
+            if size > 0:
+                path = buf.value
+                if path.startswith('\\\\?\\'):
+                    path = path[4:]  # strip the extended-length prefix
+                return path
+        except Exception:
+            pass
+    return None
+
+
 def _open_workdir_file(workdir: str, resolved: str) -> Any:
     # Open a file checked to be inside the tree, and re-verify the opened file:
     # the check-then-open is a race: the file, or an ancestor directory, can be
     # swapped for an outside-pointing symlink in between, so containment is
     # checked on the descriptor after the open, when it is too late to swap.
+    # Where the OS exposes no descriptor->path facility, the pre-open check is
+    # the best available (the race window then stays open, as before this guard).
     root = os.path.realpath(workdir)
     fd = os.open(resolved, os.O_RDONLY)
-    try:
-        target = os.readlink(f'/proc/self/fd/{fd}')
-    except OSError:
-        os.close(fd)
-        raise
-    if target != root and not target.startswith(root + os.sep):
+    target = _fd_target_path(fd)
+    if (target is not None and target != root
+            and not target.startswith(root + os.sep)):
         os.close(fd)
         raise OSError('swapped outside the working tree after the check')
     return os.fdopen(fd, 'r', encoding='utf-8', errors='replace')
@@ -1370,9 +1396,9 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
             return 'error: summarize has no working directory (not run in a repository).'
         resolved = _resolve_in_workdir(workdir, target)
         if resolved is None:
-            return f'error: path `{target}` escapes the working tree and is not allowed.'
+            return f'error: path `{shown}` escapes the working tree and is not allowed.'
         if not os.path.isfile(resolved):
-            return f'error: `{target}` is not a file in the working tree.'
+            return f'error: `{shown}` is not a file in the working tree.'
         try:
             # Read one character past the cap so truncation is judged by the characters actually
             # read, not the byte size (a multibyte file can exceed the byte cap while its
@@ -1419,14 +1445,17 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     header = f'# Query\n{query}\n\n# File: {path}\n\n'
     if len(header) + 3 > READ_INPUT_CHAR_LIMIT:
         return 'error: the query and path are too large for the input cap.'
+    # The path is echoed into user-visible messages: echo only a bounded prefix, or a
+    # ~200k-char path would make the tool result far exceed the shared result budget.
+    shown_path = path if len(path) <= 200 else path[:197] + '…[path truncated]'
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: find-in-file has no working directory (not run in a repository).'
     resolved = _resolve_in_workdir(workdir, path)
     if resolved is None:
-        return f'error: path `{path}` escapes the working tree and is not allowed.'
+        return f'error: path `{shown_path}` escapes the working tree and is not allowed.'
     if not os.path.isfile(resolved):
-        return f'error: `{path}` is not a file in the working tree.'
+        return f'error: `{shown_path}` is not a file in the working tree.'
     try:
         # Read one character past the cap so truncation is judged by the characters actually
         # read, not the byte size (a multibyte file can exceed the byte cap while its character
@@ -1495,12 +1524,12 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
             # definitive — say so, or a reviewer may wrongly conclude the pattern is absent.
             # covered_chars (not the cap) is what was actually searched: for a newline-dense
             # file the numbered prompt can hit the cap before that many source characters.
-            return (f'No relevant content in the first {covered_chars} chars of {path} '
-                    f'for: {shown} — the rest of the file was not searched.')
-        return f'No content in {path} is relevant to: {shown}'
-    note = (f'\n[only the first {covered_chars} chars of {path} were searched]'
+            return (f'No relevant content in the first {covered_chars} chars of '
+                    f'{shown_path} for: {shown} — the rest of the file was not searched.')
+        return f'No content in {shown_path} is relevant to: {shown}'
+    note = (f'\n[only the first {covered_chars} chars of {shown_path} were searched]'
             if truncated else '')
-    return f'Relevant parts of {path} for: {shown}{note}\n\n{result}'
+    return f'Relevant parts of {shown_path} for: {shown}{note}\n\n{result}'
 
 
 # --- the command set: agnostic base, layered per target -------------------------
