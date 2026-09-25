@@ -1422,74 +1422,69 @@ def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) ->
     assert 'incomplete' in out
 
 
-def test_list_tree_windows_branch_discards_swapped_scan(tmp_path: Any,
-                                                        monkeypatch: Any) -> None:
-    # The Windows branch (no fd-based scandir) scans by path: a directory swapped
-    # for an outside symlink while the scan runs is detected by comparing the
-    # directory's identity against the pin taken on the descriptor, and what the
-    # scan read is discarded.
+def test_list_tree_windows_branch_reads_through_descriptor(tmp_path: Any,
+                                                           monkeypatch: Any) -> None:
+    # The Windows branch has no fd-based scandir: it enumerates through the open
+    # descriptor (NtQueryDirectoryFile), so a path swap installed after the open
+    # cannot redirect the read — the listing comes from the descriptor's contents,
+    # and a symlinked directory is not descended into.
     tree = tmp_path / 'tree'
     tree.mkdir()
     (tree / 'd').mkdir()
-    (tree / 'd' / 'inner.txt').write_text('x')
+    (tree / 'd' / 'real.txt').write_text('x')
     outside = tmp_path / 'outside'
     outside.mkdir()
     (outside / 'leak.txt').write_text('x')
     monkeypatch.setattr(sys, 'platform', 'win32')
-    orig_scandir = os.scandir
+    orig_open = os.open
 
-    def swapping(path: Any, *a: Any, **k: Any) -> Any:
-        # swap the directory for an outside symlink while the scan runs
+    def swapping(path: Any, flags: Any = 0, *a: Any, **k: Any) -> Any:
+        fd = orig_open(path, flags, *a, **k)
         if str(path) == str(tree / 'd'):
+            # swap the path for an outside symlink after the open
             os.replace(tree / 'd', tree / 'd.real')
             os.symlink(outside, tree / 'd')
-        return orig_scandir(path, *a, **k)
-    monkeypatch.setattr('os.scandir', swapping)
+        return fd
+    monkeypatch.setattr('os.open', swapping)
+    calls: list[int] = []
+
+    def fake_scandir(fd: int) -> Any:
+        calls.append(fd)
+        if len(calls) == 1:
+            return [
+                tools._WindowsDirEntry('keep.txt', False, False),
+                tools._WindowsDirEntry('d', True, False),
+                tools._WindowsDirEntry('link', True, True),
+            ]
+        return [tools._WindowsDirEntry('inner.txt', False, False)]
+    monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
     ctx = tools.ToolContext('review', workdir=str(tree))
     out = asyncio.run(tools.list_tree([], ctx))
-    assert 'leak.txt' not in out
-    assert 'incomplete' in out
+    assert 'keep.txt' in out
+    assert 'd/inner.txt' in out
+    assert 'link/inner.txt' not in out  # symlinked dir not descended
+    assert 'real.txt' not in out  # disk contents never read by path
+    assert 'leak.txt' not in out  # outside tree never enumerated
+    assert len(calls) == 2  # only the root and d were enumerated
+    assert 'incomplete' not in out
 
 
-def test_list_tree_windows_branch_catches_swap_and_revert(tmp_path: Any,
+def test_list_tree_windows_branch_flags_enumeration_error(tmp_path: Any,
                                                           monkeypatch: Any) -> None:
-    # A swap installed for the first scan and reverted before the identity check
-    # would match the pin again: the post-check re-scan then disagrees with the
-    # first scan, so what was read is discarded.
+    # When the descriptor-bound enumeration fails, the directory is not listed
+    # partially: the listing says it is incomplete.
     tree = tmp_path / 'tree'
     tree.mkdir()
     (tree / 'd').mkdir()
     (tree / 'd' / 'inner.txt').write_text('x')
-    outside = tmp_path / 'outside'
-    outside.mkdir()
-    (outside / 'leak.txt').write_text('x')
     monkeypatch.setattr(sys, 'platform', 'win32')
-    orig_scandir = os.scandir
-    phase = 0
 
-    def swapping(path: Any, *a: Any, **k: Any) -> Any:
-        # swap in for the first scan only (the revert happens at stat time below)
-        nonlocal phase
-        if str(path) == str(tree / 'd') and phase == 0:
-            phase = 1
-            os.replace(tree / 'd', tree / 'd.real')
-            os.symlink(outside, tree / 'd')
-        return orig_scandir(path, *a, **k)
-    monkeypatch.setattr('os.scandir', swapping)
-    orig_stat = os.stat
-
-    def reverting(path: Any, *a: Any, **k: Any) -> Any:
-        # restore the directory after the first scan, before the identity check
-        nonlocal phase
-        if phase == 1:
-            phase = 2
-            os.replace(tree / 'd', tree / 'd.symlink')
-            os.replace(tree / 'd.real', tree / 'd')
-        return orig_stat(path, *a, **k)
-    monkeypatch.setattr('os.stat', reverting)
+    def fake_scandir(fd: int) -> Any:
+        raise OSError('NtQueryDirectoryFile failed')
+    monkeypatch.setattr(tools, '_scandir_dir_fd_windows', fake_scandir)
     ctx = tools.ToolContext('review', workdir=str(tree))
     out = asyncio.run(tools.list_tree([], ctx))
-    assert 'leak.txt' not in out
+    assert 'inner.txt' not in out
     assert 'incomplete' in out
 
 

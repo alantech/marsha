@@ -1167,6 +1167,124 @@ def _open_workdir_file(workdir: str, resolved: str) -> Any:
     return os.fdopen(fd, 'r', encoding='utf-8', errors='replace')
 
 
+class _WindowsDirEntry:
+    # One directory entry as reported by the descriptor-bound Windows enumeration
+    # (NtQueryDirectoryFile): the name plus directory/symlink flags read from the
+    # entry's own attributes, so no per-entry path lookup (and its own race) is
+    # needed to classify it.
+    __slots__ = ('name', '_is_dir', '_is_symlink')
+
+    def __init__(self, name: str, is_dir: bool, is_symlink: bool) -> None:
+        self.name = name
+        self._is_dir = is_dir
+        self._is_symlink = is_symlink
+
+    def is_dir(self) -> bool:
+        return self._is_dir
+
+    def is_symlink(self) -> bool:
+        return self._is_symlink
+
+
+def _scandir_dir_fd_windows(dir_fd: int) -> list[_WindowsDirEntry]:
+    # Windows has no fd-based scandir, so the directory is enumerated through its open
+    # descriptor with ntdll's NtQueryDirectoryFile: the read is bound to the descriptor
+    # whose containment was just verified on the fd, so a path swap installed after the
+    # open cannot redirect it. OSError where the enumeration is unavailable or fails.
+    if sys.platform == 'win32':
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        status_no_more_files = 0x80000006
+        file_attribute_directory = 0x10
+        file_attribute_reparse_point = 0x400
+        file_directory_information = 1
+        buffer_size = 32_768
+
+        class _io_status_block(ctypes.Structure):
+            # Only `information` (the bytes written) is read; `status` shares its
+            # union slot in the real structure.
+            _fields_ = [
+                ('status', ctypes.c_long),
+                ('information', ctypes.c_size_t),
+            ]
+
+        class _entry_header(ctypes.Structure):
+            # The fixed part of a FILE_DIRECTORY_INFORMATION record; the UTF-16
+            # name follows it, `file_name_length` bytes long.
+            _fields_ = [
+                ('next_entry_offset', wintypes.ULONG),
+                ('file_index', wintypes.ULONG),
+                ('creation_time', ctypes.c_int64),
+                ('last_access_time', ctypes.c_int64),
+                ('last_write_time', ctypes.c_int64),
+                ('change_time', ctypes.c_int64),
+                ('end_of_file', ctypes.c_int64),
+                ('allocation_size', ctypes.c_int64),
+                ('file_attributes', wintypes.ULONG),
+                ('file_name_length', wintypes.ULONG),
+            ]
+
+        handle_value = msvcrt.get_osfhandle(dir_fd)
+        if handle_value == -1:
+            raise OSError('no Windows handle for the directory descriptor')
+        ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
+        ntdll.NtQueryDirectoryFile.argtypes = [
+            ctypes.c_void_p,  # FileHandle
+            ctypes.c_void_p,  # Event
+            ctypes.c_void_p,  # ApcRoutine
+            ctypes.c_void_p,  # ApcContext
+            ctypes.POINTER(_io_status_block),  # IoStatusBlock
+            ctypes.c_char_p,  # FileInformation
+            wintypes.ULONG,  # Length
+            wintypes.ULONG,  # FileInformationClass
+            wintypes.BOOL,  # RestartScan
+            ctypes.c_void_p,  # FileName
+        ]
+        ntdll.NtQueryDirectoryFile.restype = ctypes.c_long
+        handle = ctypes.c_void_p(handle_value)
+        status_block = _io_status_block()
+        buffer = ctypes.create_string_buffer(buffer_size)
+        base = ctypes.addressof(buffer)
+        header_size = ctypes.sizeof(_entry_header)
+        entries: list[_WindowsDirEntry] = []
+        restart = True
+        while True:
+            status = int(ntdll.NtQueryDirectoryFile(
+                handle, None, None, None, ctypes.byref(status_block), buffer,
+                buffer_size, file_directory_information, restart, None))
+            restart = False
+            if status == status_no_more_files:
+                break
+            if status != 0:
+                raise OSError(
+                    f'NtQueryDirectoryFile failed (status {status:#x})')
+            returned = int(status_block.information)
+            offset = 0
+            while offset < returned:
+                if offset + header_size > returned:
+                    raise OSError('NtQueryDirectoryFile record truncated')
+                header = _entry_header.from_buffer_copy(
+                    ctypes.string_at(base + offset, header_size))
+                name_length = int(header.file_name_length)
+                if offset + header_size + name_length > returned:
+                    raise OSError('NtQueryDirectoryFile record truncated')
+                name = ctypes.string_at(
+                    base + offset + header_size,
+                    name_length).decode('utf-16-le')
+                attributes = int(header.file_attributes)
+                entries.append(_WindowsDirEntry(
+                    name,
+                    bool(attributes & file_attribute_directory),
+                    bool(attributes & file_attribute_reparse_point)))
+                if header.next_entry_offset == 0:
+                    break
+                offset += int(header.next_entry_offset)
+        return entries
+    raise OSError('descriptor-bound enumeration is only available on Windows')
+
+
 def _parse_exts(value: str) -> set[str]:
     # A comma-separated extension filter (md,txt or .md,.txt) into a set of dotted, lowercase
     # extensions (`.md`, `.txt`) for comparison against os.path.splitext.
@@ -1264,26 +1382,21 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             # (check-then-open race: it may have been swapped for an outside-pointing
             # symlink since it was queued).
             dir_fd = os.open(dirpath, _DIR_OPEN_FLAGS)
-            target = _fd_target_path(dir_fd)
-            if (target is not None and target != root
-                    and not target.startswith(root + os.sep)):
-                os.close(dir_fd)
-                dirs_truncated = True  # swapped out of the tree: not listed
-                continue
-            pin: os.stat_result | None = None
-            if sys.platform == 'win32':
-                # No fd-based scandir on Windows: pin the directory's identity on the
-                # descriptor, scan the path, check the identity, and re-scan: a swap
-                # installed for the first scan must be reverted to pass the check, and
-                # then the re-scan (which runs after the check) disagrees with the
-                # first scan, so what was read is discarded either way.
-                pin = os.fstat(dir_fd)
-                scan = os.scandir(dirpath)
-            else:
-                # Scan through the descriptor so the scan itself cannot follow a swap.
-                scan = os.scandir(dir_fd)
-            seen_names: list[str] = []
             try:
+                target = _fd_target_path(dir_fd)
+                if (target is not None and target != root
+                        and not target.startswith(root + os.sep)):
+                    dirs_truncated = True  # swapped out of the tree: not listed
+                    continue
+                if sys.platform == 'win32':
+                    # No fd-based scandir on Windows: enumerate through the open
+                    # descriptor itself (NtQueryDirectoryFile), so the read is bound
+                    # to the verified descriptor and a path swap after the open
+                    # cannot redirect it.
+                    scan = _scandir_dir_fd_windows(dir_fd)
+                else:
+                    # Scan through the descriptor so the scan itself cannot follow a swap.
+                    scan = os.scandir(dir_fd)
                 for count, entry in enumerate(scan, 1):
                     if count > LIST_TREE_MAX_NAMES_PER_DIR:
                         dirs_truncated = True  # more entries than the per-directory budget
@@ -1296,7 +1409,6 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                         dirs_truncated = True
                         continue
                     name = entry.name
-                    seen_names.append(name)
                     if is_dir:
                         if not entry.is_symlink() and name not in LIST_TREE_SKIP_DIRS:
                             sub_names.append(name)
@@ -1304,33 +1416,6 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
                         file_names.append(name)
             finally:
                 os.close(dir_fd)
-            if pin is not None:
-                # The scan read the PATH, which may have been swapped mid-scan: a
-                # directory whose identity no longer matches the pin may have listed
-                # outside the tree, so discard what it read.
-                try:
-                    now = os.stat(dirpath)
-                except OSError:
-                    now = None
-                if now is None or (now.st_dev, now.st_ino) != (
-                        pin.st_dev, pin.st_ino):
-                    sub_names.clear()
-                    file_names.clear()
-                    dirs_truncated = True
-                    continue
-                # A swap reverted before the identity check leaves the identity
-                # matching again: the re-scan (after the check) must then disagree
-                # with the first scan, which is discarded too.
-                rescan: list[str] = []
-                for e2 in os.scandir(dirpath):
-                    if len(rescan) >= len(seen_names):
-                        break
-                    rescan.append(e2.name)
-                if rescan != seen_names:
-                    sub_names.clear()
-                    file_names.clear()
-                    dirs_truncated = True
-                    continue
         except OSError:
             # A failed scan (an unreadable directory, or an error while walking its entries)
             # leaves this directory partially or not listed at all: mark the listing incomplete
