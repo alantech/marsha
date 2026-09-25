@@ -1916,6 +1916,22 @@ def test_read_tools_bound_echoed_paths(tmp_path: Any) -> None:
     out = asyncio.run(tools.list_tree(['e' + ('/./' * 50_000)], ctx))
     assert 'no files under' in out and len(out) <= tools.RESULT_CHAR_LIMIT
     assert 'path truncated' in out
+    # a read failure echoes the bounded path too (the raw argument is not in the error)
+    if os.geteuid() != 0:  # as root, the permission trick below cannot fail the read
+        deep = tmp_path
+        for _ in range(60):
+            deep = deep / ('d' * 60)
+            deep.mkdir()
+        victim = deep / 'f.txt'
+        victim.write_text('x')
+        os.chmod(victim, 0)
+        try:
+            rel = os.path.relpath(str(victim), str(tmp_path))
+            out = asyncio.run(tools.find_in_file(['q', rel], ctx))
+            assert out.startswith('error:') and 'could not read' in out
+            assert 'path truncated' in out and len(out) <= tools.RESULT_CHAR_LIMIT
+        finally:
+            os.chmod(victim, 0o644)
 
 
 def test_http_get_blocks_private_initial_url() -> None:

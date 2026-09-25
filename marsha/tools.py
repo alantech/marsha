@@ -1642,7 +1642,7 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
         if truncated:
             text = text[:READ_INPUT_CHAR_LIMIT]
     except Exception as e:
-        return f'error: could not read {path}: {e}'
+        return f'error: could not read {shown_path}: {e}'
     # The numbered form (not the raw read) is what is sent to the helper model, and its per-line
     # prefixes can grow a newline-dense file well past READ_INPUT_CHAR_LIMIT: trim the tail so
     # the numbered prompt itself stays within the cap (truncated is set, so the result says so).
