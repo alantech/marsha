@@ -1206,14 +1206,17 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
             path = a
             i += 1
     has_ext = bool(exts)
+    # The path is echoed into user-visible errors: echo only a bounded prefix, or a
+    # ~200k-char path would make the tool result far exceed the shared result budget.
+    shown = path if len(path) <= 200 else path[:197] + '…[path truncated]'
     workdir = ctx.workdir if ctx is not None else None
     if not workdir or not os.path.isdir(workdir):
         return 'error: list-tree has no working directory (not run in a repository).'
     start = _resolve_in_workdir(workdir, path)
     if start is None:
-        return f'error: path `{path}` escapes the working tree and is not allowed.'
+        return f'error: path `{shown}` escapes the working tree and is not allowed.'
     if not os.path.isdir(start):
-        return f'error: `{path}` is not a directory in the working tree.'
+        return f'error: `{shown}` is not a directory in the working tree.'
     root = os.path.realpath(workdir)
     entries: list[str] = []
     listing_len = 0  # sum of len(entry) + 1 per entry (the joining newlines)
@@ -1248,23 +1251,37 @@ async def list_tree(args: list[str], ctx: ToolContext | None = None) -> str:
         sub_names: list[str] = []
         file_names: list[str] = []
         try:
-            for count, entry in enumerate(os.scandir(dirpath), 1):
-                if count > LIST_TREE_MAX_NAMES_PER_DIR:
-                    dirs_truncated = True  # more entries than the per-directory budget
-                    break
-                try:
-                    is_dir = entry.is_dir()
-                except OSError:
-                    # per-entry stat error: entry skipped, but the
-                    # listing must say it is incomplete, not look complete.
-                    dirs_truncated = True
-                    continue
-                name = entry.name
-                if is_dir:
-                    if not entry.is_symlink() and name not in LIST_TREE_SKIP_DIRS:
-                        sub_names.append(name)
-                elif not has_ext or _matches_ext(name, exts):
-                    file_names.append(name)
+            # Open the directory by descriptor and re-verify containment on the descriptor
+            # (check-then-open race: it may have been swapped for an outside-pointing
+            # symlink since it was queued), then scan through that descriptor so the scan
+            # itself cannot follow a swap either.
+            dir_fd = os.open(dirpath, os.O_RDONLY | os.O_DIRECTORY)
+            target = _fd_target_path(dir_fd)
+            if (target is not None and target != root
+                    and not target.startswith(root + os.sep)):
+                os.close(dir_fd)
+                dirs_truncated = True  # swapped out of the tree: not listed
+                continue
+            try:
+                for count, entry in enumerate(os.scandir(dir_fd), 1):
+                    if count > LIST_TREE_MAX_NAMES_PER_DIR:
+                        dirs_truncated = True  # more entries than the per-directory budget
+                        break
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        # per-entry stat error: entry skipped, but the
+                        # listing must say it is incomplete, not look complete.
+                        dirs_truncated = True
+                        continue
+                    name = entry.name
+                    if is_dir:
+                        if not entry.is_symlink() and name not in LIST_TREE_SKIP_DIRS:
+                            sub_names.append(name)
+                    elif not has_ext or _matches_ext(name, exts):
+                        file_names.append(name)
+            finally:
+                os.close(dir_fd)
         except OSError:
             # A failed scan (an unreadable directory, or an error while walking its entries)
             # leaves this directory partially or not listed at all: mark the listing incomplete

@@ -1174,6 +1174,10 @@ def test_list_tree_flags_unreadable_directory(tmp_path: Any, monkeypatch: Any) -
     orig_scandir = os.scandir
 
     def flaky(path: Any, *a: Any, **k: Any) -> Any:
+        # The walk scans by directory descriptor; translate it back to a path so the
+        # fake can still target the 'secret' directory by name.
+        if isinstance(path, int):
+            path = os.readlink(f'/proc/self/fd/{path}')
         if str(path).endswith('secret'):
             raise PermissionError('unreadable')
         return orig_scandir(path, *a, **k)
@@ -1382,6 +1386,32 @@ def test_open_workdir_file_rejects_outside_descriptor(tmp_path: Any,
     monkeypatch.setattr(tools, '_fd_target_path', lambda fd: str(outside))
     with pytest.raises(OSError):
         tools._open_workdir_file(str(tree), str(tree / 'f.txt'))
+
+
+def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) -> None:
+    # A directory queued for the walk can be swapped for an outside-pointing symlink
+    # before it is scanned: the scan opens it by descriptor and re-verifies containment
+    # on that descriptor, so the outside tree is never listed, and the listing says it
+    # is incomplete.
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'd').mkdir()
+    (tree / 'd' / 'inner.txt').write_text('x')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'leak.txt').write_text('x')
+    orig_open = os.open
+
+    def swapping(path: Any, flags: Any = 0, *a: Any, **k: Any) -> Any:
+        if str(path) == str(tree / 'd') and not (tree / 'd').is_symlink():
+            os.replace(tree / 'd', tree / 'd.real')
+            os.symlink(outside, tree / 'd')
+        return orig_open(path, flags, *a, **k)
+    monkeypatch.setattr('os.open', swapping)
+    ctx = tools.ToolContext('review', workdir=str(tree))
+    out = asyncio.run(tools.list_tree([], ctx))
+    assert 'leak.txt' not in out
+    assert 'incomplete' in out
 
 
 def test_summarize_multibyte_not_falsely_truncated(tmp_path: Any,
@@ -1649,6 +1679,9 @@ def test_read_tools_bound_echoed_paths(tmp_path: Any) -> None:
     assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
     assert 'target truncated' in out
     out = asyncio.run(tools.find_in_file(['q', long], ctx))
+    assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
+    assert 'path truncated' in out
+    out = asyncio.run(tools.list_tree([long], ctx))
     assert out.startswith('error:') and len(out) <= tools.RESULT_CHAR_LIMIT
     assert 'path truncated' in out
 
