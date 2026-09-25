@@ -151,6 +151,7 @@ PHASE_CATEGORIES = {
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
+    'refine': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_WEB},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`

@@ -16,10 +16,21 @@ TRACE_FULL = 3
 
 _level: int = TRACE_OFF
 
+# The per-LLM-call progress heartbeat ("Chat query took …"). On by default: for the long
+# non-interactive runs (compile, review) it is the only live signal that a stage is still
+# working between its stage banners. The interactive refine chat turns it off so it does not
+# clobber the transcript; --trace always shows it.
+_progress: bool = True
+
 
 def set_level(level: int) -> None:
     global _level
     _level = int(level) if level else TRACE_OFF
+
+
+def set_progress(enabled: bool) -> None:
+    global _progress
+    _progress = bool(enabled)
 
 
 def set_enabled(value: bool) -> None:
@@ -34,13 +45,26 @@ def _timestamp() -> str:
     return f'{hours:d}:{minutes:02d}:{seconds:02d}'
 
 
+def _emit(message: str) -> None:
+    # Write a timestamped line to stderr and flush immediately. stderr is unbuffered and
+    # survives the block-buffering that hides stdout when it is piped to a file, so this is the
+    # reliable channel for watching a run in real time.
+    print(f'marsha[+{_timestamp()}] {message}', file=sys.stderr, flush=True)
+
+
 def log(message: str) -> None:
-    # Write a timestamped progress line to stderr and flush immediately. stderr is unbuffered
-    # and survives the block-buffering that hides stdout when it is piped to a file, so this is
-    # the reliable channel for watching a run in real time. No-op unless a trace level is set.
+    # A trace/debug line. No-op unless a trace level is set (--trace / --trace-full).
     if _level < TRACE_SUMMARY:
         return
-    print(f'marsha[+{_timestamp()}] {message}', file=sys.stderr, flush=True)
+    _emit(message)
+
+
+def progress(message: str) -> None:
+    # A per-LLM-call progress line (see _progress). On by default for the non-interactive runs;
+    # suppressed in interactive modes unless --trace is on.
+    if not (_progress or _level >= TRACE_SUMMARY):
+        return
+    _emit(message)
 
 
 def dump(title: str, content: object) -> None:
