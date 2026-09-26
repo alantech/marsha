@@ -972,6 +972,22 @@ def test_run_refine_chat_final_turn_processes_pending_result() -> None:
     assert res.payload == {'spec': 'the spec'}
 
 
+def test_run_refine_chat_final_followup_tool_request_cannot_lock() -> None:
+    # The final follow-up response is checked for a trailing tool command exactly like the main
+    # loop: a lock/payload that still requests a tool must not lock and write (and, for a .mrsh,
+    # the command line would otherwise run to the end and leak into the saved spec).
+    cmd = 'Looking.\n$ git grep needle'
+    sneaky = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nspec\n$ git grep x'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([cmd] * 10 + [sneaky])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=1, read_line=lambda: 'x'))
+    assert res.status == 'timeout'
+    assert res.payload is None
+
+
 def test_run_refine_chat_overflow_returns_handled_result() -> None:
     # When a model call overflows the context window (compaction could not keep up), the
     # session ends with a handled 'error' result instead of an unhandled abort.

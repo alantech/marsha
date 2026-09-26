@@ -521,13 +521,19 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 # The final turn has no next turn to continue into: let the assistant
                 # process the pending result now (one extra call, outside the per-turn
                 # cap) so it can still inform the outcome — it may lock or bail, or the
-                # session ends as a timeout.
+                # session ends as a timeout. The follow-up is checked for a trailing tool
+                # command exactly like the main loop: a tool request is in-progress by
+                # protocol, so it cannot lock (which would also leak its command line into
+                # a .mrsh saved to the end of the response).
                 print('This was the final turn, so it is processing that result now.')
                 messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
                 print(f'\nmarsha>\n{text}\n')
-                pending = None
+                if tools.extract_pending_command(text) is not None:
+                    return ChatResult('timeout', None,
+                                      'The final turn ended on an unprocessed tool request; '
+                                      'the source was not modified.')
             if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                 payload = parse_locked_output(text, kind)
                 if payload is not None:
