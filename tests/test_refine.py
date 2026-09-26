@@ -497,6 +497,15 @@ def test_run_refine_check_analyzes_full_oversized_source(
     assert 'open ambiguity' in capsys.readouterr().out
 
 
+def test_run_refine_missing_mrsh_reports_error(tmp_path: Any, capsys: Any) -> None:
+    # A missing .mrsh path is a normal error (no traceback): the byte-size pre-check skips a
+    # file it cannot stat, and the load reports the failure.
+    p = str(tmp_path / 'nope.mrsh')
+    rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'error' in capsys.readouterr().err
+
+
 def test_run_refine_refuses_huge_mrsh_before_reading(
         tmp_path: Any, capsys: Any) -> None:
     # A file whose byte count alone proves it is oversized (UTF-8: at most 4 bytes per char) is

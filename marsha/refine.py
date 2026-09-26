@@ -620,15 +620,20 @@ async def run_refine(args: Any) -> int:
         print(f'error: {e}', file=sys.stderr)
         return 1
     check_only = bool(getattr(args, 'check', False))
-    if (source.kind == 'mrsh' and not check_only
-            and os.path.getsize(cast(str, source.path)) > REFINE_SPEC_LIMIT * 4):
+    if source.kind == 'mrsh' and not check_only:
         # A file whose byte count alone exceeds 4x the char ceiling is definitely oversized
         # (UTF-8 is at most 4 bytes per char): refuse it before reading it at all, so a huge
-        # file cannot exhaust memory before the (exact) character check below.
-        print(f'error: the source is over the {REFINE_SPEC_LIMIT}-char limit for an '
-              'interactive rewrite. Split the spec, or use --check to analyze it.',
-              file=sys.stderr)
-        return 1
+        # file cannot exhaust memory before the (exact) character check below. A file that
+        # cannot be stat'd (e.g. missing) is skipped here and reported by the load below.
+        try:
+            source_bytes = os.path.getsize(cast(str, source.path))
+        except OSError:
+            source_bytes = None
+        if source_bytes is not None and source_bytes > REFINE_SPEC_LIMIT * 4:
+            print(f'error: the source is over the {REFINE_SPEC_LIMIT}-char limit for an '
+                  'interactive rewrite. Split the spec, or use --check to analyze it.',
+                  file=sys.stderr)
+            return 1
     try:
         spec_text = await load_spec(source, cwd)
     except Exception as e:
