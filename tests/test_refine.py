@@ -361,13 +361,22 @@ def test_parse_locked_output_body_before_title_is_rejected() -> None:
     assert refine.parse_locked_output(text, 'linear') is None
 
 
-def test_parse_locked_output_with_bail_line_is_rejected() -> None:
-    # The lock and bail outcomes are mutually exclusive: a response carrying both is
-    # self-contradictory and must not lock (which would overwrite the source).
-    text = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec\n[[DESIGN:BAIL]]\nstopped'
+def test_parse_locked_output_bail_before_payload_is_rejected() -> None:
+    # A bail signal line before the payload makes the response self-contradictory: it must not
+    # lock (which would overwrite the source).
+    text = '[[DESIGN:BAIL]]\n[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
     assert refine.parse_locked_output(text, 'mrsh') is None
-    text2 = '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT\n[[NEW:BODY]]\nB\n[[DESIGN:BAIL]]'
+    text2 = ('[[DESIGN:LOCKED]]\n[[DESIGN:BAIL]]\n[[NEW:TITLE]]\nT\n'
+             '[[NEW:BODY]]\nB')
     assert refine.parse_locked_output(text2, 'issue') is None
+
+
+def test_parse_locked_output_bail_line_inside_payload_is_content() -> None:
+    # A [[DESIGN:BAIL]] line inside the rewritten spec is payload content (a spec may document
+    # the protocol itself), not a contradictory bail signal: the spec is saved verbatim.
+    text = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nline one\n[[DESIGN:BAIL]]\nline two'
+    assert refine.parse_locked_output(text, 'mrsh') == {
+        'spec': 'line one\n[[DESIGN:BAIL]]\nline two'}
 
 
 def test_parse_locked_output_issue_empty_body_is_rejected() -> None:
@@ -703,9 +712,9 @@ def test_run_refine_chat_retries_a_malformed_lock() -> None:
 
 
 def test_run_refine_chat_lock_and_bail_together_retries() -> None:
-    # A response carrying both the lock and the bail lines is self-contradictory: it does not
+    # A response carrying a bail signal before the payload is self-contradictory: it does not
     # lock (no overwrite), the assistant is asked to re-emit, and a clean follow-up locks.
-    contradictory = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nspec\n[[DESIGN:BAIL]]'
+    contradictory = '[[DESIGN:LOCKED]]\n[[DESIGN:BAIL]]\n[[NEW:SPEC]]\nspec'
     good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([contradictory, good])):
@@ -715,6 +724,20 @@ def test_run_refine_chat_lock_and_bail_together_retries() -> None:
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
+
+
+def test_run_refine_chat_bail_line_inside_payload_locks() -> None:
+    # A bail line inside the rewritten spec is content, not a signal: the chat locks and saves
+    # the spec verbatim instead of retrying or bailing.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nline one\n[[DESIGN:BAIL]]\nline two'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'line one\n[[DESIGN:BAIL]]\nline two'}
 
 
 def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:

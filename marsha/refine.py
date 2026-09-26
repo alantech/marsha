@@ -247,21 +247,29 @@ def _section_to(lines: list[str], start_marker: str, end_marker: str) -> str | N
     return '\n'.join(out)
 
 
-def _has_exact_line(text: str, marker: str) -> bool:
-    """Whether `text` contains a line that is exactly `marker` (ignoring surrounding whitespace).
-
-    The protocol is line-based: a marker counts only as its own line, so a marker that is merely
-    quoted or discussed in prose (e.g. "do not emit [[DESIGN:BAIL]] yet") does not trigger it.
-    """
-    return any(ln.strip() == marker for ln in text.split('\n'))
-
-
 def _first_exact_line_index(lines: list[str], marker: str) -> int | None:
     """The index of the first line that is exactly `marker` (ignoring surrounding whitespace)."""
     for i, ln in enumerate(lines):
         if ln.strip() == marker:
             return i
     return None
+
+
+# The first payload marker for each source kind: everything from that line on is the rewritten
+# source, and marker-like lines in it are content, not protocol.
+_FIRST_PAYLOAD_MARKER = {'mrsh': '[[NEW:SPEC]]', 'issue': '[[NEW:TITLE]]',
+                         'linear': '[[NEW:TITLE]]'}
+
+
+def _signal_before_payload(lines: list[str], marker: str, kind: str) -> bool:
+    """Whether `marker` acts as a protocol signal in `lines`: an exact marker line that sits
+    before the payload. A marker line inside the rewritten source is content (a spec may
+    document the protocol itself), not a signal."""
+    i = _first_exact_line_index(lines, marker)
+    if i is None:
+        return False
+    payload_i = _first_exact_line_index(lines, _FIRST_PAYLOAD_MARKER[kind])
+    return payload_i is None or i < payload_i
 
 
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
@@ -271,19 +279,21 @@ def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     line of its own (not quoted in prose) and must precede the payload — a marker that appears
     only inside the rewritten source (after the payload markers) is content, not the signal, so
     it cannot lock by itself. For an issue/ticket the title marker must precede the body marker,
-    in the order the protocol requests. A response that also carries a `[[DESIGN:BAIL]]` line is
-    self-contradictory and is rejected. Each section runs to its named terminator (or the end of
-    the text), so a marker-like line in the content is preserved rather than silently truncating
-    what is later written back.
+    in the order the protocol requests. A bail signal line before the payload makes the response
+    self-contradictory and it is rejected (a bail line inside the payload is content, not a
+    signal). Each section runs to its named terminator (or the end of the text), so a
+    marker-like line in the content is preserved rather than silently truncating what is later
+    written back.
     """
     lines = text.split('\n')
     lock_i = _first_exact_line_index(lines, '[[DESIGN:LOCKED]]')
     if lock_i is None:
         return None
-    # The lock and bail outcomes are mutually exclusive by protocol: a response carrying both
-    # is self-contradictory and must not lock (which would overwrite the source) — it is
-    # malformed, so the caller's re-emit correction takes over.
-    if _has_exact_line(text, '[[DESIGN:BAIL]]'):
+    # The lock and bail outcomes are mutually exclusive by protocol: a bail signal line before
+    # the payload makes the response self-contradictory and it must not lock (which would
+    # overwrite the source) — it is malformed, so the caller's re-emit correction takes over.
+    # A bail line inside the payload is content, not a signal.
+    if _signal_before_payload(lines, '[[DESIGN:BAIL]]', kind):
         return None
     if kind == 'mrsh':
         spec_i = _first_exact_line_index(lines, '[[NEW:SPEC]]')
@@ -487,7 +497,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # .mrsh, the command line would run to the end and leak into the saved spec).
             print('Note: the assistant used its tool budget this turn and has not yet '
                   'processed the last tool result; it will continue from that result next.')
-        elif _has_exact_line(text, '[[DESIGN:LOCKED]]'):
+        elif _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
             payload = parse_locked_output(text, kind)
             if payload is not None:
                 return ChatResult('locked', payload, text)
@@ -500,7 +510,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 'bail outcomes are mutually exclusive). Re-emit the locked design using '
                 'the exact format requested.')})
             continue
-        elif _has_exact_line(text, '[[DESIGN:BAIL]]'):
+        elif _signal_before_payload(text.split('\n'), '[[DESIGN:BAIL]]', kind):
             return ChatResult('bail', None, text)
         else:
             line = read_line()
