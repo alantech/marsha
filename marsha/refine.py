@@ -194,6 +194,27 @@ async def gh_issue_context(num: int, cwd: str | None = None) -> str:
     return '\n\n'.join(parts)
 
 
+async def gh_issue_fields(num: int, cwd: str | None = None) -> tuple[str, str]:
+    """The (title, body) of the GitHub issue — the only fields refine rewrites."""
+    rc, out, err = await _gh('issue', 'view', str(num), '--json', 'title,body', cwd=cwd)
+    if rc != 0:
+        raise Exception(f'`gh issue view {num}` failed: {err or out}')
+    data = json.loads(out)
+    return data.get('title', ''), data.get('body') or ''
+
+
+async def linear_fields(ticket: str, cwd: str | None = None) -> tuple[str, str]:
+    """The (title, description) of the Linear ticket — the only fields refine rewrites."""
+    rc, out, err = await _run('linear', 'issue', 'view', ticket, '--json',
+                              '--no-pager', cwd=cwd)
+    if rc != 0:
+        raise Exception(f'`linear issue view {ticket}` failed: {err or out}')
+    data = json.loads(out)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return data.get('title', ''), data.get('description') or ''
+
+
 async def load_spec(source: SpecSource, cwd: str | None) -> str:
     """The raw spec text to analyze and refine (a `.mrsh` read verbatim, an issue, a ticket)."""
     if source.kind == 'mrsh':
@@ -201,6 +222,13 @@ async def load_spec(source: SpecSource, cwd: str | None) -> str:
     if source.kind == 'issue':
         return await gh_issue_context(cast(int, source.num), cwd=cwd)
     return await linear_context(cast(str, source.name), cwd=cwd)
+
+
+async def _source_fields(source: SpecSource, cwd: str) -> tuple[str, str]:
+    """The (title, body) refine would rewrite, for a non-file source (an issue or a ticket)."""
+    if source.kind == 'issue':
+        return await gh_issue_fields(cast(int, source.num), cwd)
+    return await linear_fields(cast(str, source.name), cwd)
 
 
 def _locked_format_note(kind: str) -> str:
@@ -690,8 +718,15 @@ async def run_refine(args: Any) -> int:
         print(f'Loading issue #{source.num}{where}...', file=sys.stderr)
     else:
         print(f'Loading Linear ticket {source.name}...', file=sys.stderr)
+    original_fields: tuple[str, str] | None = None
     try:
         spec_text = await load_spec(source, cwd)
+        if source.kind != 'mrsh':
+            # The fields refine would rewrite (title, body/description), captured now so the
+            # apply can verify they were not edited elsewhere while the conversation ran. The
+            # full rendered context (comments, status, ...) still seeds the chat; only the
+            # rewritten fields gate the apply.
+            original_fields = await _source_fields(source, cwd)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1
@@ -761,18 +796,29 @@ async def run_refine(args: Any) -> int:
         if answer not in ('y', 'yes'):
             print('Not applied; the source was not modified.')
             return 1
-        # The conversation can run for minutes, during which the source (an issue body, a
-        # ticket description, a file) may be edited elsewhere. The rewrite was built from the
-        # version loaded when refine started, so applying it now would silently clobber the
-        # newer content: re-read and compare at the last moment before writing, and fail
-        # closed if the source cannot be verified.
-        try:
-            current_text = await load_spec(source, cwd)
-        except Exception as e:
-            print(
-                f'error: could not verify the source is unchanged: {e}', file=sys.stderr)
-            return 1
-        if current_text != spec_text:
+        # The conversation can run for minutes, during which the source may be edited
+        # elsewhere; applying a rewrite built from the older version would silently clobber
+        # newer content. Re-read at the last moment before writing and compare: the whole
+        # file for a .mrsh (it is exactly what is overwritten), or just the title and body
+        # for an issue/ticket (the only fields refine rewrites — a comment or status change
+        # does not block the apply). Failing to re-read fails closed.
+        if source.kind == 'mrsh':
+            try:
+                current_text = await load_spec(source, cwd)
+            except Exception as e:
+                print(f'error: could not verify the source is unchanged: {e}',
+                      file=sys.stderr)
+                return 1
+            changed = current_text != spec_text
+        else:
+            try:
+                current_fields = await _source_fields(source, cwd)
+            except Exception as e:
+                print(f'error: could not verify the source is unchanged: {e}',
+                      file=sys.stderr)
+                return 1
+            changed = current_fields != original_fields
+        if changed:
             print('The source changed while the conversation was running; the rewrite was '
                   'built from the older version. Re-run refine to restart from the current '
                   'source.', file=sys.stderr)

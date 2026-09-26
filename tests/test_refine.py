@@ -768,6 +768,98 @@ def test_run_refine_refuses_apply_when_source_changed_during_chat(
         in capsys.readouterr().err
 
 
+def test_run_refine_issue_comment_only_change_allows_apply(capsys: Any) -> None:
+    # Only the title/body gate the apply: a comment added to the issue while the conversation
+    # ran changes the rendered context (and the chat input) but not the rewritten fields.
+    fields = iter([('Title', 'Body') for _ in range(2)])
+
+    async def fake_source_fields(source: Any, cwd: Any) -> Any:
+        return next(fields)
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        return 'ISSUE TEXT'
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': [], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        return refine.ChatResult('locked', {'title': 'T2', 'body': 'B2'}, 'x')
+
+    applied: list[Any] = []
+
+    async def fake_apply(source: Any, payload: Any, cwd: Any) -> None:
+        applied.append(payload)
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)), \
+         patch.object(refine, '_repo_gate', new=AsyncMock(return_value='acme/widget')), \
+         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, '_source_fields', new=fake_source_fields), \
+         patch.object(refine, '_apply', new=fake_apply), \
+         patch.object(refine, '_read_line', new=lambda: 'y'):
+        rc = asyncio.run(refine.run_refine(_args(issue='218')))
+    assert rc == 0
+    assert applied == [{'title': 'T2', 'body': 'B2'}]
+
+
+def test_run_refine_issue_title_change_refuses_apply(capsys: Any) -> None:
+    fields = iter([('Title', 'Body'), ('Edited Title', 'Body')])
+
+    async def fake_source_fields(source: Any, cwd: Any) -> Any:
+        return next(fields)
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        return 'ISSUE TEXT'
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': [], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        return refine.ChatResult('locked', {'title': 'T2', 'body': 'B2'}, 'x')
+
+    applied: list[Any] = []
+
+    async def fake_apply(source: Any, payload: Any, cwd: Any) -> None:
+        applied.append(payload)
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)), \
+         patch.object(refine, '_repo_gate', new=AsyncMock(return_value='acme/widget')), \
+         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, '_source_fields', new=fake_source_fields), \
+         patch.object(refine, '_apply', new=fake_apply), \
+         patch.object(refine, '_read_line', new=lambda: 'y'):
+        rc = asyncio.run(refine.run_refine(_args(issue='218')))
+    assert rc == 1
+    assert applied == []  # a changed rewritten field is never applied
+    assert 'changed while the conversation was running' \
+        in capsys.readouterr().err
+
+
+def test_gh_issue_fields_extract_title_and_body() -> None:
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        return 0, '{"title": "T", "body": null}', ''
+
+    with patch.object(refine, '_gh', new=fake_gh):
+        assert asyncio.run(refine.gh_issue_fields(218)) == ('T', '')
+
+
+def test_linear_fields_extract_title_and_description() -> None:
+    async def fake_run(*a: Any, **k: Any) -> Any:
+        return 0, '{"title": "T", "description": "D"}', ''
+
+    with patch.object(refine, '_run', new=fake_run):
+        assert asyncio.run(refine.linear_fields('ENG-5')) == ('T', 'D')
+
+    async def fake_run_list(*a: Any, **k: Any) -> Any:
+        return 0, '[{"title": "T2", "description": null}]', ''
+
+    with patch.object(refine, '_run', new=fake_run_list):
+        assert asyncio.run(refine.linear_fields('ENG-5')) == ('T2', '')
+
+
 def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
