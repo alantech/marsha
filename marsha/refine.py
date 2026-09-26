@@ -283,6 +283,8 @@ Work through the open ambiguities listed for the specification. In your FIRST me
 
 Track the decisions the person has given and never re-ask a question that a prior answer already settles, including in a rephrased form: if your next question is implied by an earlier answer, apply that answer and move on. Raise a sub-case only when it is genuinely new, not a rephrasing of something already decided.
 
+When a decision needs a concrete value — an exact string, message, number, format, or name — do not ask the person to invent it: propose 1-3 concrete, reasonable options (saying which one you recommend and why), for them to pick from; they may instead type their own value. Keep every question answerable with a short answer or a choice, not an essay.
+
 You may be asked a question back — to weigh options, clarify your question, or answer something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
 
 When (and only when) every open ambiguity is resolved, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
@@ -593,7 +595,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 if payload is not None:
                     _print_lock_turn(text, kind, payload)
                     return ChatResult('locked', payload, text)
-            print(f'\nmarsha>\n{text}\n')
+            _print_turn(text)
             if pending is not None:
                 # The turn's tool-round budget ran out with the last tool result still
                 # unprocessed: the assistant has not seen that result yet. Say so, rather
@@ -620,7 +622,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
                 if tools.extract_pending_command(text) is not None:
-                    print(f'\nmarsha>\n{text}\n')
+                    _print_turn(text)
                     return ChatResult('timeout', None,
                                       'The final turn ended on an unprocessed tool request; '
                                       'the source was not modified.')
@@ -629,7 +631,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     if payload is not None:
                         _print_lock_turn(text, kind, payload)
                         return ChatResult('locked', payload, text)
-                print(f'\nmarsha>\n{text}\n')
+                _print_turn(text)
             if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                 # A well-formed lock was handled (and printed) above; this is a malformed
                 # one: the raw text is already on screen, so nudge the assistant to fix it.
@@ -728,18 +730,29 @@ def _preamble_before_lock(text: str) -> str:
     return ''
 
 
+def _render_markdown(text: str) -> None:
+    # The assistant's text is markdown: render it (headings, lists, bold, code) so turns are
+    # legible instead of a raw wall of markup. A rendering failure must never hide the text:
+    # fall back to the plain version.
+    try:
+        Console().print(Markdown(text))
+    except Exception:
+        print(text)
+
+
+def _print_turn(text: str) -> None:
+    print('\nmarsha>')
+    _render_markdown(text)
+
+
 def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
-    # The locked design is often a long document: render it as markdown (headings, lists,
-    # code blocks) instead of a raw wall of text. A rendering failure must never hide the
-    # proposal: fall back to the plain text.
+    # The locked design is often a long document: rendered as markdown (headings, lists,
+    # code blocks) via _render_markdown.
     if kind == 'mrsh':
         content = payload['spec']
     else:
         content = f"# {payload['title']}\n\n{payload['body']}"
-    try:
-        Console().print(Markdown(content))
-    except Exception:
-        print(content)
+    _render_markdown(content)
 
 
 def _print_lock_turn(text: str, kind: str, payload: dict[str, str]) -> None:
@@ -749,7 +762,7 @@ def _print_lock_turn(text: str, kind: str, payload: dict[str, str]) -> None:
     appears exactly once."""
     preamble = _preamble_before_lock(text).strip()
     if preamble:
-        print(f'\nmarsha>\n{preamble}\n')
+        _print_turn(preamble)
     print('\nThe design is locked. The updated source:')
     _render_lock_payload(kind, payload)
 

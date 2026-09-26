@@ -1143,6 +1143,24 @@ def test_run_refine_chat_standalone_mrsh_gets_repo_independent_tools() -> None:
     assert '$ git ' not in captured['system']  # but not the repo-bound git tool
 
 
+def test_run_refine_chat_turns_are_rendered_as_markdown(capsys: Any) -> None:
+    # Every assistant turn is rendered as markdown (headings, bold, lists consumed into the
+    # rendering), not dumped as raw markup.
+    reply = '# Heading\n\n**bold** text'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda system, **k: _scripted_mapper([reply])), \
+         patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=2,
+            read_line=lambda: '!bail'))
+    assert res.status == 'bail'
+    out = capsys.readouterr().out
+    assert 'marsha>' in out
+    assert 'Heading' in out and 'bold' in out
+    assert '**bold**' not in out  # the markup is rendered, not shown raw
+
+
 def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
     # A lock turn is shown once, as a clean rendered proposal: the preamble is kept, the raw
     # protocol markers are never shown, and the payload is not repeated (the confirmation

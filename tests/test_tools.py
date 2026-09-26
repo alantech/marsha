@@ -127,6 +127,17 @@ def test_execute_unknown_command_lists_available() -> None:
     assert '$ web-search' in out
 
 
+def test_extract_pending_command_strips_enclosing_backticks() -> None:
+    # Models sometimes wrap the command line in backticks, which would make it start with a
+    # backtick and be silently ignored: one enclosing pair is stripped so the command still
+    # runs. Backticks inside the line are arguments, not wrapping.
+    cmd = tools.extract_pending_command('doing some work\n`$ calc "1+1"`')
+    assert cmd is not None
+    assert cmd.name == 'calc' and cmd.args == ['1+1'] and not cmd.malformed
+    inner = tools.extract_pending_command('$ calc "1`2"')
+    assert inner is not None and inner.args == ['1`2']
+
+
 def test_build_commands_honors_a_categories_override() -> None:
     # A caller that needs a narrower or repo-independent tool set (e.g. a refine chat outside
     # a git working tree) passes the set explicitly instead of the phase's default.

@@ -1864,7 +1864,7 @@ def tool_instructions(ctx: ToolContext | None = None) -> str:
     commands = build_commands(ctx)
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
-        'When you need information that is not in the assignment — for example the exact API of a third-party library the code must use — use the fake terminal below. To issue a command, end your response with a single line beginning with `$` followed by the command name and its arguments. Only the final line of your response is read as a command; everything above it is kept as your in-progress reasoning.',
+        'When you need information that is not in the assignment — for example the exact API of a third-party library the code must use — use the fake terminal below. To issue a command, end your response with a single line beginning with `$` followed by the command name and its arguments. Only the final line of your response is read as a command; everything above it is kept as your in-progress reasoning. The command line must start with a bare `$` at the beginning of the line: do not wrap it in backticks or any other markdown, and do not embed it mid-sentence — a wrapped or embedded line is not a command and will not run.',
         'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation.',
         'Available commands:',
     ]
@@ -1902,7 +1902,14 @@ def extract_pending_command(text: Any) -> PendingCommand | None:
     for line in text.splitlines():
         if line.strip():
             last = line.strip()
-    if last is None or not last.startswith('$'):
+    if last is None:
+        return None
+    # Models sometimes wrap the command line in backticks (`` `$ calc "1+1"` ``), which would
+    # make it start with a backtick and be silently ignored: strip one enclosing pair (the
+    # user's protocol line must begin with `$`) so a backticked command still runs.
+    if len(last) >= 2 and last.startswith('`') and last.endswith('`'):
+        last = last[1:-1]
+    if not last.startswith('$'):
         return None
     pm = _PAGE_COMMAND_RE.match(last)
     if pm is not None:
