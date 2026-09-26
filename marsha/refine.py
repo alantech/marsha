@@ -490,6 +490,9 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             text = ''
             pending = None
             for _round in range(REFINE_MAX_TOOL_ROUNDS):
+                # Each model call (and any compaction inside it) is a blocking stretch with no
+                # other output: say we are alive, so a slow turn does not look like a hang.
+                print('Thinking...', file=sys.stderr)
                 messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
@@ -676,6 +679,13 @@ async def run_refine(args: Any) -> int:
                   'interactive rewrite. Split the spec, or use --check to analyze it.',
                   file=sys.stderr)
             return 1
+    if source.kind == 'mrsh':
+        print(f'Reading {source.path}...', file=sys.stderr)
+    elif source.kind == 'issue':
+        where = f' from {source.repo}' if source.repo else ''
+        print(f'Loading issue #{source.num}{where}...', file=sys.stderr)
+    else:
+        print(f'Loading Linear ticket {source.name}...', file=sys.stderr)
     try:
         spec_text = await load_spec(source, cwd)
     except Exception as e:
@@ -710,6 +720,7 @@ async def run_refine(args: Any) -> int:
                   'with a larger context, or use --check to analyze it.',
                   file=sys.stderr)
             return 1
+    print('Analyzing the spec for open ambiguities...', file=sys.stderr)
     try:
         check = await analyze_spec(spec_text, tool_ctx=tool_ctx, debug=debug)
     except Exception as e:

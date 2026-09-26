@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 import sys
 import tempfile
 import time
 import traceback
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
@@ -229,6 +230,21 @@ def print_help(topic: str | None) -> None:
     else:
         print(f'Unknown command: {topic}', file=sys.stderr)
         print(overview)
+
+
+def _sigint_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+def install_sigint_handler() -> None:
+    # Restore the classic raise-on-Ctrl+C behavior for the whole run. asyncio's Runner would
+    # otherwise install its own handler whose first Ctrl+C only *cancels* the main task and
+    # returns without raising; while a main thread is blocked in a synchronous read (the
+    # refine chat's input()), the event loop can never process that cancellation, so the
+    # interrupt is silently swallowed and the process appears to ignore Ctrl+C. The Runner
+    # installs its handler only when SIGINT is still the default handler, so installing this
+    # one first opts the process out.
+    signal.signal(signal.SIGINT, _sigint_handler)
 
 
 def run(argv: list[str] | None = None) -> int:

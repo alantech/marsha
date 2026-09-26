@@ -585,7 +585,12 @@ def test_run_refine_check_mrsh_locked(tmp_path: Any, capsys: Any) -> None:
     with patch.object(refine, 'analyze_spec', new=fake_analyze):
         rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
     assert rc == 0
-    assert 'Spec is locked' in capsys.readouterr().out
+    cap = capsys.readouterr()
+    assert 'Spec is locked' in cap.out
+    # The load and analyze phases announce themselves on stderr (stdout stays
+    # clean for the gate) so a slow run does not look like a hang.
+    assert f'Reading {p}...' in cap.err
+    assert 'Analyzing the spec for open ambiguities...' in cap.err
 
 
 def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
@@ -605,7 +610,32 @@ def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
                       new=AsyncMock(return_value=200000)):
         rc = asyncio.run(refine.run_refine(_args(issue='218', check=True)))
     assert rc == 1
-    assert 'open ambiguity' in capsys.readouterr().out
+    cap = capsys.readouterr()
+    assert 'open ambiguity' in cap.out
+    assert 'Loading issue #218...' in cap.err
+    assert 'Analyzing the spec for open ambiguities...' in cap.err
+
+
+def test_run_refine_check_linear_announces_load_and_analyze(capsys: Any) -> None:
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_gate(source: Any, cwd: Any) -> str:
+        return 'acme/widget'
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        return 'TICKET TEXT'
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, '_repo_gate', new=fake_gate), \
+         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, '_resolve_window',
+                      new=AsyncMock(return_value=200000)):
+        rc = asyncio.run(refine.run_refine(_args(linear='ENG-5', check=True)))
+    assert rc == 1
+    cap = capsys.readouterr()
+    assert 'Loading Linear ticket ENG-5...' in cap.err
+    assert 'Analyzing the spec for open ambiguities...' in cap.err
 
 
 def test_run_refine_locks_and_writes_mrsh(tmp_path: Any, capsys: Any) -> None:
