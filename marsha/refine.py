@@ -267,28 +267,33 @@ def _first_exact_line_index(lines: list[str], marker: str) -> int | None:
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     """Extract the updated source from a locked response, or None if it is malformed.
 
-    The lock counts only when `[[DESIGN:LOCKED]]` is a line of its own (not quoted in prose) and
-    it precedes the payload: a marker that appears only inside the rewritten spec (after
-    `[[NEW:SPEC]]` / `[[NEW:TITLE]]`) is content, not the signal, so it cannot lock by itself.
-    Each section runs to its named terminator (or the end of the text), so a marker-like line in
-    the content is preserved rather than silently truncating what is later written back.
+    The protocol is line-based and ordered: `[[DESIGN:LOCKED]]` must be a line of its own (not
+    quoted in prose) and must precede the payload — a marker that appears only inside the
+    rewritten source (after the payload markers) is content, not the signal, so it cannot lock
+    by itself. For an issue/ticket the title marker must precede the body marker, in the order
+    the protocol requests. Each section runs to its named terminator (or the end of the text),
+    so a marker-like line in the content is preserved rather than silently truncating what is
+    later written back.
     """
     lines = text.split('\n')
     lock_i = _first_exact_line_index(lines, '[[DESIGN:LOCKED]]')
     if lock_i is None:
         return None
-    first_payload = '[[NEW:SPEC]]' if kind == 'mrsh' else '[[NEW:TITLE]]'
-    payload_i = _first_exact_line_index(lines, first_payload)
-    if payload_i is not None and payload_i < lock_i:
-        return None
     if kind == 'mrsh':
+        spec_i = _first_exact_line_index(lines, '[[NEW:SPEC]]')
+        if spec_i is None or spec_i < lock_i:
+            return None
         # A .mrsh has a single payload section, so it runs to the end of the response.
         spec = _section_to_end(lines, '[[NEW:SPEC]]')
         if not spec or not spec.strip():
             return None
         return {'spec': spec}
-    # An issue/ticket has a title followed by a body: the title stops at the body marker, and the
-    # body (the last section) runs to the end.
+    # An issue/ticket has a title followed by a body, in that order: the title stops at the body
+    # marker, and the body (the last section) runs to the end.
+    title_i = _first_exact_line_index(lines, '[[NEW:TITLE]]')
+    body_i = _first_exact_line_index(lines, '[[NEW:BODY]]')
+    if title_i is None or body_i is None or not lock_i < title_i < body_i:
+        return None
     title = _section_to(lines, '[[NEW:TITLE]]', '[[NEW:BODY]]')
     body = _section_to_end(lines, '[[NEW:BODY]]')
     if not title or not title.strip() or body is None:
@@ -577,21 +582,24 @@ async def run_refine(args: Any) -> int:
         tool_ctx = tools.ToolContext(
             phase='refine', workdir=cwd, require_evidence=False,
             context_window=await _resolve_window(getattr(args, 'model', None)))
+    check_only = bool(getattr(args, 'check', False))
+    if not check_only and len(spec_text) > REFINE_SPEC_LIMIT:
+        # The interactive rewrite is built from what the assistant sees, so it must see the whole
+        # source. Refuse (rather than truncate) so the source is never overwritten with a partial
+        # view — and refuse before the analysis, so an oversized source is never sent to the
+        # model at all (where it would fail, and be retried, at cost). --check never writes back,
+        # so it skips the guard and analyzes the full source.
+        print(f'error: the source is {len(spec_text)} chars, over the {REFINE_SPEC_LIMIT}-char '
+              'limit for an interactive rewrite. Split the spec, or use --check to analyze it.',
+              file=sys.stderr)
+        return 1
     try:
         check = await analyze_spec(spec_text, tool_ctx=tool_ctx, debug=debug)
     except Exception as e:
         print(f'error: spec analysis failed: {e}', file=sys.stderr)
         return 1
-    if getattr(args, 'check', False):
+    if check_only:
         return _run_check(check)
-    if len(spec_text) > REFINE_SPEC_LIMIT:
-        # The interactive rewrite is built from what the assistant sees, so it must see the whole
-        # source. Refuse (rather than truncate) so the source is never overwritten with a partial
-        # view; --check already ran above and analyzes the full spec, since it never writes back.
-        print(f'error: the source is {len(spec_text)} chars, over the {REFINE_SPEC_LIMIT}-char '
-              'limit for an interactive rewrite. Split the spec, or use --check to analyze it.',
-              file=sys.stderr)
-        return 1
     # Whether the chat gets the read-only codebase tools: a git working tree (any source kind),
     # even one whose origin remote is missing or unparseable (the gate already guaranteed this
     # for issue/linear; for a .mrsh it decides whether the file sits in a repo worth inspecting).

@@ -342,6 +342,15 @@ def test_parse_locked_output_lock_marker_in_prose_is_ignored() -> None:
     assert refine.parse_locked_output(text, 'mrsh') is None
 
 
+def test_parse_locked_output_body_before_title_is_rejected() -> None:
+    # The protocol is title then body: a body marker before the title is a malformed ordering
+    # and must not be written back as the issue/ticket body.
+    text = ('[[DESIGN:LOCKED]]\n[[NEW:BODY]]\nbody content\n'
+            '[[NEW:TITLE]]\nMy Title')
+    assert refine.parse_locked_output(text, 'issue') is None
+    assert refine.parse_locked_output(text, 'linear') is None
+
+
 def test_parse_locked_output_lock_only_inside_payload_is_ignored() -> None:
     # A [[DESIGN:LOCKED]] line that appears only inside the rewritten spec (after the payload
     # marker) is content, not the signal: it cannot lock by itself.
@@ -400,13 +409,14 @@ def test_run_refine_usage_error_with_no_source() -> None:
 def test_run_refine_refuses_oversized_source_for_rewrite(
         tmp_path: Any, capsys: Any) -> None:
     # A source over the chat limit must not be rewritten from a truncated view: the interactive
-    # path refuses rather than letting _apply overwrite it with a partial spec.
+    # path refuses before the analysis, so the oversized source is never even sent to a model.
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
         f.write('x' * (refine.REFINE_SPEC_LIMIT + 1))
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
-        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+        raise AssertionError(
+            'an oversized source must be refused before it is sent to the analysis model')
 
     async def fake_chat(**k: Any) -> Any:
         raise AssertionError('the chat must not run on a source it could not see in full')
