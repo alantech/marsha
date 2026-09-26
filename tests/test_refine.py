@@ -735,6 +735,7 @@ def test_run_refine_declined_confirmation_does_not_write(
     # confirmation: the chat is faked here, so the payload must not appear at all.
     assert 'NEW SPEC' not in cap.out
     assert 'Apply the locked design shown above' in cap.out  # explicit question, default no
+    assert '╔' in cap.out  # boxed, so it stands out from the proposal it follows
     assert 'Not applied' in cap.out
 
 
@@ -1180,6 +1181,16 @@ def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
     assert '[[NEW:SPEC]]' not in out
     assert 'All settled' in out  # the preamble is kept
     assert out.count('the full spec body') == 1  # the proposal appears exactly once
+
+
+def test_print_apply_prompt_is_separated_and_boxed(capsys: Any) -> None:
+    # The confirmation follows directly after the (long) proposal, where a bare line would read
+    # as part of the document: it must be separated by a blank line and set in a box.
+    refine._print_apply_prompt('the .mrsh file')
+    out = capsys.readouterr().out
+    assert out.startswith('\n')  # a blank line of separation from the proposal above
+    assert 'Apply the locked design shown above' in out
+    assert '╔' in out and '╚' in out  # the double-line (flower) box
 
 
 def test_run_refine_chat_repo_without_origin_name_still_gets_tools() -> None:

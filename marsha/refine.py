@@ -18,8 +18,10 @@ import sys
 import tempfile
 from typing import Any, Callable, cast
 
+from rich.box import DOUBLE
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 
 from marsha import tools
 from marsha.context import (
@@ -281,13 +283,13 @@ REFINE_SYSTEM_PROMPT = '''You are a senior software engineer helping a person lo
 
 Work through the open ambiguities listed for the specification. In your FIRST message, ask every open question you can formulate now — a single numbered list covering each ambiguity and the concrete decisions it implies (defaults, formats, error handling, edge cases) — so the person can answer them all at once. Later rounds should only resolve what the person's answers raise. The conversation should end in a few rounds, not many.
 
-Track the decisions the person has given and never re-ask a question that a prior answer already settles, including in a rephrased form: if your next question is implied by an earlier answer, apply that answer and move on. Raise a sub-case only when it is genuinely new, not a rephrasing of something already decided.
+Track the decisions the person has given and never re-ask a question that a prior answer already settles, including in a rephrased form: if your next question is implied by an earlier answer, apply that answer and move on. Raise a sub-case only when it is genuinely new, not a rephrasing of something already decided. When you present a new round of questions, do not restate or re-confirm decisions that are already settled — a round lists only what is genuinely still open. The one exception: if the person's latest answer contradicts an earlier decision, point out that specific conflict exactly once and ask which one stands.
 
 When a decision needs a concrete value — an exact string, message, number, format, or name — do not ask the person to invent it: propose 1-3 concrete, reasonable options (saying which one you recommend and why), for them to pick from; they may instead type their own value. Keep every question answerable with a short answer or a choice, not an essay.
 
 You may be asked a question back — to weigh options, clarify your question, or answer something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
 
-When (and only when) every open ambiguity is resolved, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
+When every open ambiguity is resolved, check whether the person's latest message already amounts to a go-ahead (for example, asking to see the specification). If not, end your turn with an explicit question asking whether they are ready for you to propose the updated specification — a question, not a statement of readiness — and wait for their answer. Only once they have signalled a go-ahead, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
 '''
 
 
@@ -755,6 +757,16 @@ def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
     _render_markdown(content)
 
 
+def _print_apply_prompt(label: str) -> None:
+    # The confirmation follows directly after a long proposal, where a bare line reads as part
+    # of the document: separate it with a blank line and set it in a bold double-line box so
+    # the question is unmissable.
+    print()
+    Console().print(Panel(
+        f'[bold]Apply the locked design shown above to {label}? (y/N)[/bold]',
+        box=DOUBLE, style='bold', expand=False))
+
+
 def _print_lock_turn(text: str, kind: str, payload: dict[str, str]) -> None:
     """Print a lock turn once, as a clean proposal: the preamble as a normal turn, then the
     updated source rendered with rich. The raw protocol text is never shown, and the
@@ -895,7 +907,7 @@ async def run_refine(args: Any) -> int:
         # anything else (including EOF) leaves the source untouched.
         label = {'mrsh': 'the .mrsh file', 'issue': 'the GitHub issue',
                  'linear': 'the Linear ticket'}[source.kind]
-        print(f'Apply the locked design shown above to {label}? (y/N)')
+        _print_apply_prompt(label)
         answer = _read_line().strip().lower()
         if answer not in ('y', 'yes'):
             print('Not applied; the source was not modified.')
