@@ -19,7 +19,8 @@ import tempfile
 from typing import Any, Callable, cast
 
 from marsha import tools
-from marsha.context import resolve_context_window
+from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
 from marsha.review import (
@@ -333,6 +334,52 @@ async def _resolve_window(model: str | None) -> int | None:
         return None
 
 
+# Compaction for a refine conversation that would outgrow the context budget. The summary keeps
+# the ambiguity resolutions and the person's decisions but never the specification itself: the
+# caller re-attaches the spec verbatim, so the eventual rewrite is built from the full source.
+REFINE_COMPACT_PROMPT = '''You are compacting a specification-refinement conversation so it fits a smaller context budget. The conversation is an assistant and a person working through the open ambiguities of a specification, with the assistant inspecting the codebase using read-only commands. Summarize it into a short state that preserves: (1) each open ambiguity and its current status (still open, or resolved and how), (2) every decision or answer the person has given, in their own words, (3) the concrete codebase facts discovered (files, line numbers, behavior). Do not reproduce the specification text itself; it is re-provided separately. Add nothing that is not in the conversation. Output only the summary, with no preamble.
+'''
+
+
+async def _maybe_compact_chat(messages: list[dict[str, str]], mapper: Any, kind: str,
+                              spec_text: str, debug: bool = False
+                              ) -> list[dict[str, str]]:
+    # If the accumulated conversation (tool results plus turns) would exceed the context budget,
+    # summarize it with an LLM pass and re-attach the specification verbatim, so a long
+    # tool-assisted session keeps running instead of aborting on a context overflow. Returns the
+    # (possibly shorter) messages; unchanged when the budget cannot be determined, so the
+    # provider's own overflow handling applies.
+    system = getattr(mapper, 'system', '') or ''
+    prompt_text = system + '\n' + '\n'.join(m['content'] for m in messages)
+    try:
+        window = await resolve_context_window(model=getattr(mapper, 'model', None),
+                                              client=get_client())
+    except Exception:
+        return messages
+    if fits(prompt_text, window):
+        return messages
+    if debug:
+        print(f'[refine] prompt ~{estimate_tokens(prompt_text)} tokens exceeds budget '
+              f'{budget_tokens(window)}; compacting the conversation')
+    log(f'refine: prompt ~{estimate_tokens(prompt_text)} tokens exceeds budget '
+        f'{budget_tokens(window)}; compacting the conversation')
+    transcript = '\n'.join(f"[{m['role']}]\n{m['content']}" for m in messages)
+    gpt = get_mapper(REFINE_COMPACT_PROMPT, n_results=1,
+                     model=getattr(mapper, 'model', None), label='refine:compact')
+    try:
+        summary = await gpt.run(f'# Conversation so far\n{transcript}')
+    except Exception as e:
+        log(f'refine: compaction failed: {e}')
+        return messages
+    content = (f'# Summary of the refinement conversation so far\n{summary.strip()}\n\n'
+               '# The specification being refined (unchanged)\n\n'
+               + tools.wrap_untrusted(kind, spec_text) + '\n\n'
+               'Continue the conversation from where it left off: ask the person the next '
+               'focused question, or if every open ambiguity is now resolved, emit the lock '
+               'line and the updated source in the exact format requested.')
+    return [{'role': 'user', 'content': content}]
+
+
 async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                           errors: list[str], current_repo: str, in_repo: bool, cwd: str,
                           model: str | None, max_turns: int,
@@ -341,7 +388,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     """Drive the multi-turn conversation until the design is locked, bailed, or turns run out.
 
     Each turn the assistant may first use the read-only tools to investigate, then speaks to the
-    user. The user may answer, ask back, or bail. Returns the outcome.
+    user. The user may answer, ask back, or bail. If the accumulated conversation would outgrow
+    the model's context budget it is compacted (summarized, with the specification re-attached
+    verbatim) before each model call, so a long session cannot abort on a context overflow.
+    Returns the outcome.
     """
     # The read-only codebase tools are available whenever we are inside a git working tree (any
     # source kind), independent of whether its origin remote names a repo: a checkout without an
@@ -364,6 +414,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     for _turn in range(max_turns):
         text = ''
         for _round in range(REFINE_MAX_TOOL_ROUNDS):
+            messages = await _maybe_compact_chat(messages, mapper, kind, spec_text,
+                                                 debug=debug)
             text = await mapper.run(messages)
             pending = tools.extract_pending_command(text)
             if pending is None:

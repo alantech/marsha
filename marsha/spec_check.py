@@ -69,6 +69,11 @@ def parse_spec_check(text: str) -> dict[str, Any]:
         raise Exception(f'Invalid spec check response: {text[:200]}')
     if not isinstance(errors, list) or not all(isinstance(e, str) for e in errors):
         raise Exception(f'Invalid spec check response: {text[:200]}')
+    # `errors` appears only for a not-implementable spec (per the response contract above): a
+    # compilable response carrying errors is self-contradictory and malformed, so the retry path
+    # runs instead of `refine --check` reading it as a locked spec.
+    if obj['compilable'] and errors:
+        raise Exception(f'Invalid spec check response: {text[:200]}')
     if not obj['compilable'] and len(errors) == 0:
         raise Exception(f'Not implementable without errors: {text[:200]}')
     return {'compilable': obj['compilable'],

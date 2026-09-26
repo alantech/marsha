@@ -30,6 +30,15 @@ def _fresh_rich_console() -> Generator[None, None, None]:
     term._stderr_console = None
 
 
+@pytest.fixture(autouse=True)
+def _fixed_context_window() -> Generator[None, None, None]:
+    # The chat compacts against the model's context budget; in tests the window is fixed so no
+    # API probing happens and compaction stays off for the small scripted conversations.
+    with patch.object(refine, 'resolve_context_window',
+                      new=AsyncMock(return_value=200_000)):
+        yield
+
+
 def _args(**kw: Any) -> Any:
     base = dict(source=None, issue=None, linear=None, check=False,
                 max_turns=40, dry_run=False, target='python',
@@ -760,3 +769,52 @@ def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
             read_line=read_line))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
+
+
+def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
+    # A conversation that would outgrow the context budget is summarized before the next model
+    # call, with the specification re-attached verbatim, so the chat keeps running to the lock
+    # instead of aborting on a context overflow.
+    chat_calls: list[Any] = []
+
+    class _Chat:
+        def __init__(self) -> None:
+            self.i = 0
+
+        async def run(self, messages: Any) -> str:
+            self.i += 1
+            chat_calls.append(messages)
+            if self.i == 1:
+                return 'What should happen on a tie?'
+            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+
+    class _Compact:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, messages: Any) -> str:
+            self.calls += 1
+            assert 'Conversation so far' in str(messages)
+            return 'ambiguity a: resolved, the person chose X'
+
+    compact = _Compact()
+
+    def get_mapper(system: str, **k: Any) -> Any:
+        if k.get('label') == 'refine:compact':
+            return compact
+        return _Chat()
+
+    with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'answer one'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'the spec'}
+    assert compact.calls >= 1
+    # After a compaction the model sees a single message: the summary plus the spec verbatim.
+    assert len(chat_calls[1]) == 1
+    reattached = chat_calls[1][0]['content']
+    assert 'Summary of the refinement conversation' in reattached
+    assert 'SPEC TEXT' in reattached

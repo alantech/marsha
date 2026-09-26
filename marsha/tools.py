@@ -312,8 +312,14 @@ def _git_page_result(result: str, sub: str, rest: list[str], page: int | None = 
 
 def wrap_untrusted(name: str, content: str) -> str:
     # Present a tool result as explicitly-untrusted reference data, identical
-    # across OpenAI / Claude / local backends (not a native `tool` role).
-    return f'[tool:{name}]\n{content}\n[/tool:{name}]'
+    # across OpenAI / Claude / local backends (not a native `tool` role). Marker-like
+    # sequences inside the content are neutralized (a space after the bracket) so untrusted
+    # text cannot close the wrapper early and escape it, injecting instructions into the
+    # surrounding prompt.
+    closing = f'[/tool:{name}]'
+    content = content.replace(closing, '[/ tool:' + name + ']')
+    content = content.replace(f'[tool:{name}]', '[ tool:' + name + ']')
+    return f'[tool:{name}]\n{content}\n{closing}'
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

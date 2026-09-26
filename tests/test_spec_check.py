@@ -88,6 +88,14 @@ def test_parse_spec_check_not_compilable_without_errors_raises() -> None:
         spec_check.parse_spec_check('{"compilable": false, "ambiguities": []}')
 
 
+def test_parse_spec_check_compilable_with_errors_raises() -> None:
+    # `errors` belongs only to a not-implementable response: a compilable response carrying
+    # errors is self-contradictory and must be rejected (retry) rather than read as locked.
+    with pytest.raises(Exception):
+        spec_check.parse_spec_check(
+            '{"compilable": true, "ambiguities": [], "errors": ["e"]}')
+
+
 def test_parse_spec_check_bad_ambiguity_type_raises() -> None:
     with pytest.raises(Exception):
         spec_check.parse_spec_check('{"compilable": true, "ambiguities": [1]}')
