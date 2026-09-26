@@ -106,6 +106,15 @@ def test_parse_issue_ref_invalid() -> None:
             refine.parse_issue_ref(bad)
 
 
+def test_parse_issue_ref_rejects_zero() -> None:
+    # GitHub numbers issues from 1: 0 (bare, qualified, or URL) is a malformed reference, not
+    # an issue to load — it must not reach the issue load path.
+    for bad in ('0', 'acme/widget#0',
+                'https://github.com/acme/widget/issues/0'):
+        with pytest.raises(Exception, match='issue numbers start at 1'):
+            refine.parse_issue_ref(bad)
+
+
 # --- resolve_source -----------------------------------------------------------
 
 

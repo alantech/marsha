@@ -82,19 +82,27 @@ def parse_issue_ref(ref: str) -> tuple[int, str | None]:
     ref = ref.strip()
     m = _ISSUE_URL_RE.search(ref)
     if m is not None:
-        return (int(m.group(3)), f'{m.group(1)}/{m.group(2)}')
-    m = _ISSUE_QUALIFIED_RE.match(ref)
-    if m is not None:
-        return (int(m.group(2)), m.group(1))
-    if _ISSUE_BARE_RE.match(ref) is not None:
-        return (int(ref), None)
-    if '/pull/' in ref:
-        raise Exception(
-            f'{ref!r} is a pull-request URL; refine works on issues, not pull requests. '
-            'Use an issue number or issue URL.')
-    raise Exception(
-        f'Invalid --issue reference {ref!r}: use a number (218), '
-        f'owner/repo#218, or a GitHub issue URL.')
+        num, repo = int(m.group(3)), f'{m.group(1)}/{m.group(2)}'
+    else:
+        m = _ISSUE_QUALIFIED_RE.match(ref)
+        if m is not None:
+            num, repo = int(m.group(2)), m.group(1)
+        elif _ISSUE_BARE_RE.match(ref) is not None:
+            num, repo = int(ref), None
+        elif '/pull/' in ref:
+            raise Exception(
+                f'{ref!r} is a pull-request URL; refine works on issues, not pull '
+                'requests. Use an issue number or issue URL.')
+        else:
+            raise Exception(
+                f'Invalid --issue reference {ref!r}: use a number (218), '
+                f'owner/repo#218, or a GitHub issue URL.')
+    # GitHub numbers issues from 1: 0 (bare or qualified) is a malformed reference, not an
+    # issue to load.
+    if num < 1:
+        raise Exception(f'{ref!r} is not a GitHub issue reference: '
+                        'issue numbers start at 1.')
+    return num, repo
 
 
 def resolve_source(args: Any) -> SpecSource:
