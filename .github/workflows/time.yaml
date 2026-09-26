@@ -91,7 +91,7 @@ jobs:
           elif ${{ github.event.inputs.test != '' }}; then
             make attempts=${{github.event.inputs.attempts}} test=${{github.event.inputs.test}} stats=True n_parallel_executions=${{github.event.inputs.parallel_runs}} n_jobs=${{github.event.inputs.n_jobs || 5}} provider=anthropic runs=10 time
           else
-            make attempts=1 test=examples/general-purpose/sort_modules.mrsh stats=True n_parallel_executions=3 n_jobs=5 provider=anthropic runs=10 time
+            make attempts=1 test=examples/general-purpose/fibonacci.mrsh stats=True n_parallel_executions=1 n_jobs=5 provider=anthropic runs=1 time
           fi
           results=$(echo $(cat results.md) | tr '\n' ' ' | sed "s/# Test results //")
           echo "results=$results" >> $GITHUB_OUTPUT
@@ -136,5 +136,5 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: '**Branch:** `${{ github.ref_name }}` **Test file:** `examples/general-purpose/sort_modules.mrsh` **Parallelism:** `3` **OpenAI:** ${{ needs.run-openai.outputs.results }} **Claude:** ${{ needs.run-claude.outputs.results }}'
+          description: '**Branch:** `${{ github.ref_name }}` **Test file:** `examples/general-purpose/fibonacci.mrsh` **Parallelism:** `1` **OpenAI:** ${{ needs.run-openai.outputs.results }} **Claude:** ${{ needs.run-claude.outputs.results }}'
           include-details: false
