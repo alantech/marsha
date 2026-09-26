@@ -151,6 +151,7 @@ PHASE_CATEGORIES = {
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
+    'refine': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_WEB},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
@@ -208,6 +209,11 @@ class ToolContext:
     # whole-file read guard (a file over half the window is refused rather than buffered). None
     # when it cannot be resolved, in which case the guard is skipped.
     context_window: int | None = None
+    # Override for the phase's category set (PHASE_CATEGORIES): a caller that needs a
+    # narrower or repo-independent tool set sets this explicitly — e.g. a refine chat
+    # outside a git working tree, which still gets the web and local read tools. None (the
+    # default) means the phase's standard set.
+    categories: set[str] | None = None
 
 
 @dataclasses.dataclass
@@ -311,8 +317,14 @@ def _git_page_result(result: str, sub: str, rest: list[str], page: int | None = 
 
 def wrap_untrusted(name: str, content: str) -> str:
     # Present a tool result as explicitly-untrusted reference data, identical
-    # across OpenAI / Claude / local backends (not a native `tool` role).
-    return f'[tool:{name}]\n{content}\n[/tool:{name}]'
+    # across OpenAI / Claude / local backends (not a native `tool` role). Marker-like
+    # sequences inside the content are neutralized (a space after the bracket) so untrusted
+    # text cannot close the wrapper early and escape it, injecting instructions into the
+    # surrounding prompt.
+    closing = f'[/tool:{name}]'
+    content = content.replace(closing, '[/ tool:' + name + ']')
+    content = content.replace(f'[tool:{name}]', '[ tool:' + name + ']')
+    return f'[tool:{name}]\n{content}\n{closing}'
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -1832,7 +1844,8 @@ def build_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
     else:
         commands = agnostic_tool_commands(ctx)
         env_ok = False
-    allowed = PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES)
+    allowed = (ctx.categories if ctx.categories is not None
+               else PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES))
     out = {}
     for name, cmd in commands.items():
         if cmd.category not in allowed:

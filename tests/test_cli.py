@@ -6,7 +6,10 @@ need an LLM or network I/O (the compile path's runtime setup and main are
 mocked where a dispatch is asserted).
 """
 
+import signal
 from typing import Any
+
+import pytest
 
 import marsha.base as base
 
@@ -92,3 +95,17 @@ def test_run_bare_alias_warns_and_still_compiles(monkeypatch: Any, capsys: Any) 
     assert base.run(['x.mrsh', '-t', 'python']) == 0
     assert 'deprecated' in capsys.readouterr().err
     assert calls == ['setup', ('main', 'x.mrsh')]
+
+
+def test_sigint_handler_raises_keyboard_interrupt() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        base._sigint_handler(signal.SIGINT, None)
+
+
+def test_install_sigint_handler_sets_handler() -> None:
+    old = signal.getsignal(signal.SIGINT)
+    try:
+        base.install_sigint_handler()
+        assert signal.getsignal(signal.SIGINT) is base._sigint_handler
+    finally:
+        signal.signal(signal.SIGINT, old)

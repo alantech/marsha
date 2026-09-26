@@ -86,10 +86,6 @@ class LanguageBackend:
 
     # --- generation / review prompts (full templates, per backend) -----------
 
-    def spec_check_prompt(self) -> str:
-        """System prompt for the spec sanity check (compilable? warnings/errors?)."""
-        raise NotImplementedError
-
     def oracle_prompt(self, meta: MarshaMeta) -> str:
         """System prompt generating the oracle (the test suite) from the assignment."""
         raise NotImplementedError

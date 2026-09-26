@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 import sys
 import tempfile
 import time
 import traceback
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
@@ -18,6 +19,7 @@ from marsha import log
 from marsha.llm import generate_code, review_and_fix
 from marsha.llm_client import create_client, set_client
 from marsha.meta import MarshaMeta
+from marsha.refine import run_refine
 from marsha.review import run_review
 from marsha.stats import stats
 from marsha.utils import read_file, copy_file, copy_tree, prettify_time_delta, write_composed
@@ -142,13 +144,51 @@ review_parser.add_argument('--model',
                            help='Model to use for the review.')
 review_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
+refine_parser = sub.add_parser(
+    'refine',
+    help='Interactively resolve the ambiguities in a spec (.mrsh, GitHub issue, or Linear ticket) and lock it down before implementation.')
+refine_parser.add_argument('source', nargs='?', default=None,
+                           help='A *.mrsh file to refine. Mutually exclusive with '
+                                '--issue and --linear.')
+refine_parser.add_argument('--issue', default=None,
+                           help='A GitHub issue to refine: a number (218), owner/repo#218, or '
+                                'an issue URL (needs the gh CLI; run inside its repository). '
+                                'Mutually exclusive with the positional path and --linear.')
+refine_parser.add_argument('--linear', default=None,
+                           help='A Linear ticket to refine by name (needs the linear CLI; run '
+                                'inside a git repository). Mutually exclusive with the '
+                                'positional path and --issue.')
+refine_parser.add_argument('--check', action='store_true',
+                           help='Headless: analyze and report the open ambiguities, exiting '
+                                'non-zero if any remain. Never modifies the source.')
+refine_parser.add_argument('--max-turns', type=int, default=40,
+                           help='Safety cap on the number of conversation turns (default: 40).')
+refine_parser.add_argument('--dry-run', action='store_true',
+                           help='Show the updated source without writing it back.')
+refine_parser.add_argument('--target', default='python',
+                           help='Target language (for runtime setup; refine is '
+                                'language-agnostic). Default: python.')
+refine_parser.add_argument('--target-version', default=None,
+                           help='Target language version (for runtime setup).')
+refine_parser.add_argument('-d', '--debug', action='store_true',
+                           help='Turn on debug logging')
+refine_parser.add_argument('--trace', action='store_true',
+                           help='Live progress trace to stderr. Implies -d.')
+refine_parser.add_argument('--trace-full', action='store_true',
+                           help='As --trace, but also dump full prompts/responses.')
+refine_parser.add_argument('--model',
+                           help='Model to use for the analysis and conversation.')
+refine_parser.add_argument('--provider', choices=['openai', 'anthropic'],
+                           help='LLM provider: openai (default) or anthropic (Claude).')
+refine_parser.add_argument('--api-base',
+                           help='OpenAI-compatible API base URL for the LLM.')
 
 
 def _normalize_argv(argv: list[str]) -> tuple[list[str], bool]:
     # The deprecated bare form `marsha <source> [flags]` maps onto
     # `marsha compile <source> [flags]`. `compile`/`help` are real
     # subcommands; a top-level -h/--help shows the subcommand overview.
-    if not argv or argv[0] in ('compile', 'help', 'review', '-h', '--help'):
+    if not argv or argv[0] in ('compile', 'help', 'review', 'refine', '-h', '--help'):
         return argv, False
     return ['compile'] + argv, True
 
@@ -169,6 +209,11 @@ def print_help(topic: str | None) -> None:
         '            review personas. Example: marsha review --pr 123\n'
         '            Key flags: --pr, --linear, --post-review, --personas.\n'
         '\n'
+        '  refine    Interactively resolve the ambiguities in a spec (.mrsh, GitHub\n'
+        '            issue, or Linear ticket) and lock it down before implementation.\n'
+        '            Example: marsha refine spec.mrsh or marsha refine --issue 218\n'
+        '            Key flags: --issue, --linear, --check, --dry-run.\n'
+        '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'
         '\n'
@@ -178,13 +223,28 @@ def print_help(topic: str | None) -> None:
     )
     if topic is None:
         print(overview)
-    elif topic in ('compile', 'help', 'review'):
+    elif topic in ('compile', 'help', 'review', 'refine'):
         submap = {'compile': compile_parser, 'help': help_parser,
-                  'review': review_parser}
+                  'review': review_parser, 'refine': refine_parser}
         print(submap[topic].format_help())
     else:
         print(f'Unknown command: {topic}', file=sys.stderr)
         print(overview)
+
+
+def _sigint_handler(signum: int, frame: Any) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+def install_sigint_handler() -> None:
+    # Restore the classic raise-on-Ctrl+C behavior for the whole run. asyncio's Runner would
+    # otherwise install its own handler whose first Ctrl+C only *cancels* the main task and
+    # returns without raising; while a main thread is blocked in a synchronous read (the
+    # refine chat's input()), the event loop can never process that cancellation, so the
+    # interrupt is silently swallowed and the process appears to ignore Ctrl+C. The Runner
+    # installs its handler only when SIGINT is still the default handler, so installing this
+    # one first opts the process out.
+    signal.signal(signal.SIGINT, _sigint_handler)
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -202,6 +262,13 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == 'review':
         _setup_runtime(args, require_toolchain=False)
         return asyncio.run(run_review(args))
+    if args.command == 'refine':
+        # The interactive chat drives a live transcript; the per-call progress heartbeat would
+        # clobber it, so it is off by default there (still available via --trace). Headless
+        # `refine --check` (like compile and review) keeps it on.
+        log.set_progress(args.check)
+        _setup_runtime(args, require_toolchain=False)
+        return asyncio.run(run_refine(args))
     if args.command != 'compile':
         parser.print_help(sys.stderr)
         return 2
