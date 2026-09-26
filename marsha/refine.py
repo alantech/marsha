@@ -172,13 +172,17 @@ async def _repo_gate(source: SpecSource, cwd: str | None) -> str:
     return await _git_repo_name(cwd)
 
 
-async def gh_issue_context(num: int, cwd: str | None = None) -> str:
-    """The GitHub issue (title, body, comments) as a rendered spec, via the gh CLI."""
-    fields = 'number,title,body,comments'
-    rc, out, err = await _gh('issue', 'view', str(num), '--json', fields, cwd=cwd)
+async def gh_issue_view(num: int, cwd: str | None = None) -> dict[str, Any]:
+    """The GitHub issue (number, title, body, comments) as JSON, via the gh CLI."""
+    rc, out, err = await _gh('issue', 'view', str(num), '--json',
+                             'number,title,body,comments', cwd=cwd)
     if rc != 0:
         raise Exception(f'`gh issue view {num}` failed: {err or out}')
-    data = json.loads(out)
+    return cast(dict[str, Any], json.loads(out))
+
+
+def render_gh_issue(data: dict[str, Any], num: int) -> str:
+    """A fetched GitHub issue (title, body, comments) as a rendered spec."""
     parts = [f"Issue #{num}: {data.get('title', '')}"]
     body = data.get('body') or ''
     if body.strip():
@@ -192,6 +196,11 @@ async def gh_issue_context(num: int, cwd: str | None = None) -> str:
             cparts.append(f'{author}: {c.get("body", "")}')
         parts.append('\n'.join(cparts))
     return '\n\n'.join(parts)
+
+
+async def gh_issue_context(num: int, cwd: str | None = None) -> str:
+    """The GitHub issue (title, body, comments) as a rendered spec, via the gh CLI."""
+    return render_gh_issue(await gh_issue_view(num, cwd=cwd), num)
 
 
 async def gh_issue_fields(num: int, cwd: str | None = None) -> tuple[str, str]:
@@ -222,6 +231,26 @@ async def load_spec(source: SpecSource, cwd: str | None) -> str:
     if source.kind == 'issue':
         return await gh_issue_context(cast(int, source.num), cwd=cwd)
     return await linear_context(cast(str, source.name), cwd=cwd)
+
+
+async def load_spec_with_fields(source: SpecSource, cwd: str | None) -> \
+        tuple[str, tuple[str, str] | None]:
+    """The spec text to analyze and refine, plus — for a non-file source — the (title, body)
+    it was read from. Both come from a single source read: the text that seeds the chat and the
+    baseline the apply-time staleness check compares against must describe the same version of
+    the source, or an edit landing between two reads would shift the baseline and pass the check
+    while the rewrite was still built from the older content."""
+    if source.kind == 'mrsh':
+        return await load_spec(source, cwd), None
+    if source.kind == 'issue':
+        data = await gh_issue_view(cast(int, source.num), cwd)
+        return render_gh_issue(data, cast(int, source.num)), \
+            (data.get('title', ''), data.get('body') or '')
+    out = await linear_context(cast(str, source.name), cwd=cwd)
+    data = json.loads(out)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    return out, (data.get('title', ''), data.get('description') or '')
 
 
 async def _source_fields(source: SpecSource, cwd: str) -> tuple[str, str]:
@@ -718,15 +747,12 @@ async def run_refine(args: Any) -> int:
         print(f'Loading issue #{source.num}{where}...', file=sys.stderr)
     else:
         print(f'Loading Linear ticket {source.name}...', file=sys.stderr)
-    original_fields: tuple[str, str] | None = None
     try:
-        spec_text = await load_spec(source, cwd)
-        if source.kind != 'mrsh':
-            # The fields refine would rewrite (title, body/description), captured now so the
-            # apply can verify they were not edited elsewhere while the conversation ran. The
-            # full rendered context (comments, status, ...) still seeds the chat; only the
-            # rewritten fields gate the apply.
-            original_fields = await _source_fields(source, cwd)
+        # The spec text and — for a non-file source — the (title, body) it was read from, in
+        # one read (see load_spec_with_fields). The full rendered context (comments, status,
+        # ...) seeds the chat; only the rewritten fields gate the apply, and they must come
+        # from the same version of the source as the chat input.
+        spec_text, original_fields = await load_spec_with_fields(source, cwd)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1

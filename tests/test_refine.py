@@ -600,12 +600,12 @@ def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
     async def fake_gate(source: Any, cwd: Any) -> str:
         return 'acme/widget'
 
-    async def fake_load(source: Any, cwd: Any) -> str:
-        return 'ISSUE TEXT'
+    async def fake_load(source: Any, cwd: Any) -> Any:
+        return 'ISSUE TEXT', ('T', 'B')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
          patch.object(refine, '_repo_gate', new=fake_gate), \
-         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, 'load_spec_with_fields', new=fake_load), \
          patch.object(refine, '_resolve_window',
                       new=AsyncMock(return_value=200000)):
         rc = asyncio.run(refine.run_refine(_args(issue='218', check=True)))
@@ -623,12 +623,12 @@ def test_run_refine_check_linear_announces_load_and_analyze(capsys: Any) -> None
     async def fake_gate(source: Any, cwd: Any) -> str:
         return 'acme/widget'
 
-    async def fake_load(source: Any, cwd: Any) -> str:
-        return 'TICKET TEXT'
+    async def fake_load(source: Any, cwd: Any) -> Any:
+        return 'TICKET TEXT', ('T', 'B')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
          patch.object(refine, '_repo_gate', new=fake_gate), \
-         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, 'load_spec_with_fields', new=fake_load), \
          patch.object(refine, '_resolve_window',
                       new=AsyncMock(return_value=200000)):
         rc = asyncio.run(refine.run_refine(_args(linear='ENG-5', check=True)))
@@ -770,14 +770,15 @@ def test_run_refine_refuses_apply_when_source_changed_during_chat(
 
 def test_run_refine_issue_comment_only_change_allows_apply(capsys: Any) -> None:
     # Only the title/body gate the apply: a comment added to the issue while the conversation
-    # ran changes the rendered context (and the chat input) but not the rewritten fields.
-    fields = iter([('Title', 'Body') for _ in range(2)])
+    # ran changes the rendered context (and the chat input) but not the rewritten fields, so
+    # the apply-time re-read still matches the baseline and the apply proceeds.
+    fields = iter([('Title', 'Body')])
 
     async def fake_source_fields(source: Any, cwd: Any) -> Any:
         return next(fields)
 
-    async def fake_load(source: Any, cwd: Any) -> str:
-        return 'ISSUE TEXT'
+    async def fake_load(source: Any, cwd: Any) -> Any:
+        return 'ISSUE TEXT', ('Title', 'Body')
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': [], 'errors': []}
@@ -794,7 +795,7 @@ def test_run_refine_issue_comment_only_change_allows_apply(capsys: Any) -> None:
          patch.object(refine, 'run_refine_chat', new=fake_chat), \
          patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)), \
          patch.object(refine, '_repo_gate', new=AsyncMock(return_value='acme/widget')), \
-         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, 'load_spec_with_fields', new=fake_load), \
          patch.object(refine, '_source_fields', new=fake_source_fields), \
          patch.object(refine, '_apply', new=fake_apply), \
          patch.object(refine, '_read_line', new=lambda: 'y'):
@@ -804,13 +805,15 @@ def test_run_refine_issue_comment_only_change_allows_apply(capsys: Any) -> None:
 
 
 def test_run_refine_issue_title_change_refuses_apply(capsys: Any) -> None:
-    fields = iter([('Title', 'Body'), ('Edited Title', 'Body')])
+    # The baseline comes from load_spec_with_fields (('Title', 'Body') below); the single
+    # apply-time re-read (via _source_fields) returns the edited title.
+    fields = iter([('Edited Title', 'Body')])
 
     async def fake_source_fields(source: Any, cwd: Any) -> Any:
         return next(fields)
 
-    async def fake_load(source: Any, cwd: Any) -> str:
-        return 'ISSUE TEXT'
+    async def fake_load(source: Any, cwd: Any) -> Any:
+        return 'ISSUE TEXT', ('Title', 'Body')
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': [], 'errors': []}
@@ -827,7 +830,7 @@ def test_run_refine_issue_title_change_refuses_apply(capsys: Any) -> None:
          patch.object(refine, 'run_refine_chat', new=fake_chat), \
          patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)), \
          patch.object(refine, '_repo_gate', new=AsyncMock(return_value='acme/widget')), \
-         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, 'load_spec_with_fields', new=fake_load), \
          patch.object(refine, '_source_fields', new=fake_source_fields), \
          patch.object(refine, '_apply', new=fake_apply), \
          patch.object(refine, '_read_line', new=lambda: 'y'):
@@ -858,6 +861,40 @@ def test_linear_fields_extract_title_and_description() -> None:
 
     with patch.object(refine, '_run', new=fake_run_list):
         assert asyncio.run(refine.linear_fields('ENG-5')) == ('T2', '')
+
+
+def test_load_spec_with_fields_reads_the_issue_once() -> None:
+    # The chat text and the rewrite baseline must come from the same fetch: an edit landing
+    # between two reads would shift the baseline while the chat still sees the older content.
+    views: list[Any] = []
+
+    async def fake_gh_issue_view(num: Any, cwd: Any = None) -> Any:
+        views.append(num)
+        return {'title': 'T', 'body': 'B', 'comments': []}
+
+    source = refine.resolve_source(types.SimpleNamespace(
+        source=None, issue='218', linear=None))
+    with patch.object(refine, 'gh_issue_view', new=fake_gh_issue_view):
+        text, fields = asyncio.run(refine.load_spec_with_fields(source, '/tmp'))
+    assert views == [218]  # exactly one fetch
+    assert fields == ('T', 'B')
+    assert text.startswith('Issue #218: T')
+
+
+def test_load_spec_with_fields_reads_the_ticket_once() -> None:
+    reads: list[Any] = []
+
+    async def fake_linear_context(ticket: Any, cwd: Any = None) -> str:
+        reads.append(ticket)
+        return '{"title": "T", "description": "D"}'
+
+    source = refine.resolve_source(types.SimpleNamespace(
+        source=None, issue=None, linear='ENG-5'))
+    with patch.object(refine, 'linear_context', new=fake_linear_context):
+        text, fields = asyncio.run(refine.load_spec_with_fields(source, '/tmp'))
+    assert reads == ['ENG-5']  # exactly one fetch
+    assert fields == ('T', 'D')
+    assert 'description' in text
 
 
 def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:

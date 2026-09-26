@@ -136,5 +136,5 @@ jobs:
           github-token: ${{ secrets.github_token }}
           discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: '${{ github.workflow }}: {{STATUS}}'
-          description: '**Branch:** `${{ github.ref_name }}` **Test file:** `examples/general-purpose/fibonacci.mrsh` **Parallelism:** `1` **OpenAI:** ${{ needs.run-openai.outputs.results }} **Claude:** ${{ needs.run-claude.outputs.results }}'
+          description: '**Branch:** `${{ github.ref_name }}` **OpenAI:** `sort_modules.mrsh`, 3 parallel - ${{ needs.run-openai.outputs.results }} **Claude:** `fibonacci.mrsh` smoke test, 1 run - ${{ needs.run-claude.outputs.results }}'
           include-details: false
