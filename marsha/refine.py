@@ -19,7 +19,8 @@ import tempfile
 from typing import Any, Callable, cast
 
 from marsha import tools
-from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
+from marsha.context import (
+    CHARS_PER_TOKEN, budget_tokens, estimate_tokens, fits, resolve_context_window)
 from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
@@ -30,10 +31,15 @@ from marsha.spec_check import analyze_spec, SPEC_CHECK_GROUNDED_NOTE
 from marsha.term import print_diagnostic
 from marsha.utils import read_file, write_file
 
-# The largest source the interactive rewrite will work on. The rewrite is built from what the
-# assistant sees, so the chat is fed the whole source; a source larger than this is refused
-# (rather than truncated) so it is never overwritten with a partial view.
+# The largest source the interactive rewrite will work on, and the ceiling on the model-derived
+# limit in run_refine: the rewrite is built from what the assistant sees, so the chat is fed the
+# whole source; a source larger than the limit is refused (rather than truncated) so it is never
+# overwritten with a partial view.
 REFINE_SPEC_LIMIT = 48_000
+# Tokens reserved in the refine chat prompt for everything around the source (the system prompt,
+# tool instructions, and message framing): the chat is fed the whole source, and compaction
+# re-attaches it in full, so the source alone must fit the model's budget with this reserved.
+REFINE_PROMPT_RESERVE_TOKENS = 2_000
 # Cap the read-only tool loop within a single assistant turn.
 REFINE_MAX_TOOL_ROUNDS = 10
 
@@ -613,6 +619,16 @@ async def run_refine(args: Any) -> int:
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1
+    check_only = bool(getattr(args, 'check', False))
+    if (source.kind == 'mrsh' and not check_only
+            and os.path.getsize(cast(str, source.path)) > REFINE_SPEC_LIMIT * 4):
+        # A file whose byte count alone exceeds 4x the char ceiling is definitely oversized
+        # (UTF-8 is at most 4 bytes per char): refuse it before reading it at all, so a huge
+        # file cannot exhaust memory before the (exact) character check below.
+        print(f'error: the source is over the {REFINE_SPEC_LIMIT}-char limit for an '
+              'interactive rewrite. Split the spec, or use --check to analyze it.',
+              file=sys.stderr)
+        return 1
     try:
         spec_text = await load_spec(source, cwd)
     except Exception as e:
@@ -621,22 +637,32 @@ async def run_refine(args: Any) -> int:
     debug = bool(getattr(args, 'debug', False)
                  or getattr(args, 'trace', False)
                  or getattr(args, 'trace_full', False))
+    window = await _resolve_window(getattr(args, 'model', None))
     tool_ctx = None
     if source.kind != 'mrsh':
         tool_ctx = tools.ToolContext(
             phase='refine', workdir=cwd, require_evidence=False,
-            context_window=await _resolve_window(getattr(args, 'model', None)))
-    check_only = bool(getattr(args, 'check', False))
-    if not check_only and len(spec_text) > REFINE_SPEC_LIMIT:
+            context_window=window)
+    if not check_only:
         # The interactive rewrite is built from what the assistant sees, so it must see the whole
-        # source. Refuse (rather than truncate) so the source is never overwritten with a partial
-        # view — and refuse before the analysis, so an oversized source is never sent to the
-        # model at all (where it would fail, and be retried, at cost). --check never writes back,
-        # so it skips the guard and analyzes the full source.
-        print(f'error: the source is {len(spec_text)} chars, over the {REFINE_SPEC_LIMIT}-char '
-              'limit for an interactive rewrite. Split the spec, or use --check to analyze it.',
-              file=sys.stderr)
-        return 1
+        # source: refuse (rather than truncate) so the source is never overwritten with a partial
+        # view, and refuse before the analysis, so an oversized source is never sent to the model
+        # at all (where it would fail, and be retried, at cost). The limit also tracks the
+        # selected model's prompt budget (the source must fit it on its own, alongside the
+        # reserved framing), so a small-context model gets a clear refusal instead of a context
+        # overflow mid-chat. --check never writes back, so it skips the guard and analyzes the
+        # full source.
+        limit = REFINE_SPEC_LIMIT
+        if window is not None:
+            limit = min(
+                limit, max(0, (budget_tokens(window) - REFINE_PROMPT_RESERVE_TOKENS)
+                           * CHARS_PER_TOKEN))
+        if len(spec_text) > limit:
+            print(f'error: the source is {len(spec_text)} chars, over the {limit}-char limit '
+                  'for an interactive rewrite with this model. Split the spec, use a model '
+                  'with a larger context, or use --check to analyze it.',
+                  file=sys.stderr)
+            return 1
     try:
         check = await analyze_spec(spec_text, tool_ctx=tool_ctx, debug=debug)
     except Exception as e:

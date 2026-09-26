@@ -497,6 +497,44 @@ def test_run_refine_check_analyzes_full_oversized_source(
     assert 'open ambiguity' in capsys.readouterr().out
 
 
+def test_run_refine_refuses_huge_mrsh_before_reading(
+        tmp_path: Any, capsys: Any) -> None:
+    # A file whose byte count alone proves it is oversized (UTF-8: at most 4 bytes per char) is
+    # refused before it is read, so a huge file cannot exhaust memory before the refusal.
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('x' * (refine.REFINE_SPEC_LIMIT * 4 + 1))
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        raise AssertionError('an obviously oversized file must be refused before it is read')
+
+    with patch.object(refine, 'load_spec', new=fake_load):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'limit' in capsys.readouterr().err
+
+
+def test_run_refine_limit_tracks_the_model_context(
+        tmp_path: Any, capsys: Any) -> None:
+    # The interactive limit tracks the selected model's prompt budget: with a 16k-token context
+    # the 48k-char ceiling drops, and a source in between is refused with a clear message
+    # (rather than sent to a model that cannot hold it and failing mid-chat).
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('x' * 30_000)
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        raise AssertionError(
+            'an oversized-for-the-model source must be refused before the analysis')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'resolve_context_window',
+                      new=AsyncMock(return_value=16_000)):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'over the' in capsys.readouterr().err
+
+
 def test_run_refine_check_mrsh_reports_and_never_mutates(
         tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
