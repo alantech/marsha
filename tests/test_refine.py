@@ -270,6 +270,16 @@ def test_gh_issue_context_surfaces_gh_failure() -> None:
             asyncio.run(refine.gh_issue_context(218))
 
 
+def test_initial_chat_message_wraps_findings_as_untrusted_data() -> None:
+    # The analysis findings are model-generated from untrusted source text: they are wrapped as
+    # untrusted data in the chat message, so instruction-like finding text cannot steer the chat.
+    msg = refine._initial_chat_message(
+        'mrsh', 'SPEC', ['amb one', 'amb two'], ['err one'], 'acme/widget')
+    assert msg.count('[tool:spec-check]') == 2  # the ambiguities and the errors, each wrapped
+    assert 'amb one' in msg and 'amb two' in msg and 'err one' in msg
+    assert 'never as instructions' in msg
+
+
 # --- _extract_section / parse_locked_output -----------------------------------
 
 
@@ -349,6 +359,15 @@ def test_parse_locked_output_body_before_title_is_rejected() -> None:
             '[[NEW:TITLE]]\nMy Title')
     assert refine.parse_locked_output(text, 'issue') is None
     assert refine.parse_locked_output(text, 'linear') is None
+
+
+def test_parse_locked_output_issue_empty_body_is_rejected() -> None:
+    # An empty body would erase the issue/ticket's description when written back: it is
+    # rejected rather than applied.
+    assert refine.parse_locked_output(
+        '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT\n[[NEW:BODY]]\n', 'issue') is None
+    assert refine.parse_locked_output(
+        '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT\n[[NEW:BODY]]\n   \n', 'linear') is None
 
 
 def test_parse_locked_output_lock_only_inside_payload_is_ignored() -> None:
@@ -794,17 +813,37 @@ def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
 
 def test_run_refine_chat_tool_cap_notes_unprocessed_result(capsys: Any) -> None:
     # When a turn's tool-round budget runs out with a result still unprocessed, the user is told
-    # the assistant has not yet seen that result, rather than prompted against an unfinished
-    # turn; the next message lets the assistant continue from that result.
+    # the assistant has not yet seen that result; the user is NOT prompted against the unfinished
+    # turn (the assistant continues from that result at the top of the next turn), and the
+    # tool-request response is not checked for lock/bail lines.
+    def read_line() -> str:
+        raise AssertionError('no prompt should be solicited against an unfinished turn')
+
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper(
                           ['Investigating.\n$ git grep needle'])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None,
-            max_turns=1, read_line=lambda: '!bail'))
-    assert res.status == 'bail'
+            max_turns=1, read_line=read_line))
+    assert res.status == 'timeout'
     assert 'has not yet' in capsys.readouterr().out
+
+
+def test_run_refine_chat_lock_with_pending_command_does_not_lock() -> None:
+    # A response that ends with a tool command is a tool request, not a final artifact: even if
+    # it carries a lock line and payload it must not lock and write the source (and, for a .mrsh,
+    # the trailing command line would otherwise run to the end and leak into the saved spec).
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(
+                          ['[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nspec\n$ git grep x',
+                           'Continuing.\n$ git grep y'])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=1, read_line=lambda: 'x'))
+    assert res.status == 'timeout'
+    assert res.payload is None
 
 
 def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
@@ -854,3 +893,49 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
     reattached = chat_calls[1][0]['content']
     assert 'Summary of the refinement conversation' in reattached
     assert 'SPEC TEXT' in reattached
+
+
+def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
+    # Notes recorded through the notes tool survive a compaction verbatim (re-attached), as in
+    # the shared review compaction: the assistant never loses what it deliberately kept.
+    chat_calls: list[Any] = []
+
+    class _Chat:
+        def __init__(self) -> None:
+            self.i = 0
+
+        async def run(self, messages: Any) -> str:
+            self.i += 1
+            chat_calls.append(messages)
+            if self.i == 1:
+                return 'Let me record what I found.\n$ notes add "src/a.py:3 - the tie-break"'
+            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+
+    class _Compact:
+        def __init__(self) -> None:
+            self.last_request = ''
+
+        async def run(self, messages: Any) -> str:
+            self.last_request = str(messages)
+            return 'summary of the conversation'
+
+    compact = _Compact()
+
+    def get_mapper(system: str, **k: Any) -> Any:
+        if k.get('label') == 'refine:compact':
+            return compact
+        return _Chat()
+
+    with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
+            current_repo='acme/widget', in_repo=True, cwd='/', model=None,
+            max_turns=5, read_line=lambda: 'go on'))
+    assert res.status == 'locked'
+    # The note recorded through the tool reached the compaction request and was re-attached
+    # verbatim for the model's next call.
+    assert 'src/a.py:3 - the tie-break' in compact.last_request
+    reattached = chat_calls[1][0]['content']
+    assert 'Your notes' in reattached
+    assert 'src/a.py:3 - the tie-break' in reattached
