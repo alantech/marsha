@@ -24,6 +24,7 @@ from marsha.context import (
 from marsha.llm_client import get_client
 from marsha.log import log
 from marsha.mappers import get_mapper
+from marsha.mappers.base import ContextOverflowError
 from marsha.review import (
     _run, _gh, _repo_name, linear_context, gh_available, linear_available,
 )
@@ -65,7 +66,7 @@ class SpecSource:
 @dataclasses.dataclass
 class ChatResult:
     """The outcome of the interactive loop: locked (with the new source payload) or not."""
-    status: str  # 'locked' | 'bail' | 'timeout'
+    status: str  # 'locked' | 'bail' | 'timeout' | 'error'
     payload: dict[str, str] | None
     detail: str
 
@@ -455,8 +456,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     Each turn the assistant may first use the read-only tools to investigate, then speaks to the
     user. The user may answer, ask back, or bail. If the accumulated conversation would outgrow
     the model's context budget it is compacted (summarized, with the specification re-attached
-    verbatim) before each model call, so a long session cannot abort on a context overflow.
-    Returns the outcome.
+    verbatim) before each model call; if a model call still overflows (compaction failed), the
+    session ends with a handled 'error' result instead of an unhandled abort. If the tool-round
+    budget runs out on the final turn, the assistant gets one extra call to process the pending
+    tool result, so it can still lock. Returns the outcome.
     """
     # The read-only codebase tools are available whenever we are inside a git working tree (any
     # source kind), independent of whether its origin remote names a repo: a checkout without an
@@ -476,60 +479,87 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                        _initial_chat_message(
                                            kind, spec_text, ambiguities, errors,
                                            current_repo)}]
-    for _turn in range(max_turns):
-        text = ''
-        pending = None
-        for _round in range(REFINE_MAX_TOOL_ROUNDS):
-            messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
-                                                 spec_text, debug=debug)
-            text = await mapper.run(messages)
-            pending = tools.extract_pending_command(text)
-            if pending is None:
-                break
-            if debug:
-                print(f'[refine] tool: {pending.name}')
-            log(f'refine tool: {pending.name}')
-            result = await tools.execute_command(
-                commands, pending.name, pending.args, page=pending.page)
-            block = (tools.wrap_untrusted(pending.name, result)
-                     + '\n\nIf you still need information, end your next response with another '
-                       '`$` command line. Otherwise continue the conversation now.')
-            messages.extend([
-                {'role': 'assistant', 'content': text},
-                {'role': 'user', 'content': block},
-            ])
-        print(f'\nmarsha>\n{text}\n')
-        if pending is not None:
-            # The turn's tool-round budget ran out with the last tool result still unprocessed:
-            # the assistant has not seen that result yet. Say so and let the assistant continue
-            # from that result at the top of the next turn, rather than prompting the user
-            # against an unfinished turn. A tool-request response is in-progress by protocol, so
-            # it is also not checked for the lock/bail lines (which would let a response lock
-            # and write the source before its own trailing command was processed — and, for a
-            # .mrsh, the command line would run to the end and leak into the saved spec).
-            print('Note: the assistant used its tool budget this turn and has not yet '
-                  'processed the last tool result; it will continue from that result next.')
-        elif _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
-            payload = parse_locked_output(text, kind)
-            if payload is not None:
-                return ChatResult('locked', payload, text)
-            messages.append({'role': 'assistant', 'content': text})
-            messages.append({'role': 'user', 'content': (
-                'That lock was malformed: it must carry the required '
-                + ('[[NEW:SPEC]]' if kind == 'mrsh'
-                   else '[[NEW:TITLE]] and [[NEW:BODY]]')
-                + ' section(s), and it must carry no [[DESIGN:BAIL]] line (the lock and '
-                'bail outcomes are mutually exclusive). Re-emit the locked design using '
-                'the exact format requested.')})
-            continue
-        elif _signal_before_payload(text.split('\n'), '[[DESIGN:BAIL]]', kind):
-            return ChatResult('bail', None, text)
-        else:
-            line = read_line()
-            if _is_bail_token(line):
-                return ChatResult('bail', None, line)
-            messages.append({'role': 'assistant', 'content': text})
-            messages.append({'role': 'user', 'content': line})
+    try:
+        for turn in range(max_turns):
+            text = ''
+            pending = None
+            for _round in range(REFINE_MAX_TOOL_ROUNDS):
+                messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
+                                                     spec_text, debug=debug)
+                text = await mapper.run(messages)
+                pending = tools.extract_pending_command(text)
+                if pending is None:
+                    break
+                if debug:
+                    print(f'[refine] tool: {pending.name}')
+                log(f'refine tool: {pending.name}')
+                result = await tools.execute_command(
+                    commands, pending.name, pending.args, page=pending.page)
+                block = (tools.wrap_untrusted(pending.name, result)
+                         + '\n\nIf you still need information, end your next response '
+                           'with another `$` command line. Otherwise continue the '
+                           'conversation now.')
+                messages.extend([
+                    {'role': 'assistant', 'content': text},
+                    {'role': 'user', 'content': block},
+                ])
+            print(f'\nmarsha>\n{text}\n')
+            if pending is not None:
+                # The turn's tool-round budget ran out with the last tool result still
+                # unprocessed: the assistant has not seen that result yet. Say so, rather
+                # than prompting the user against an unfinished turn. A tool-request
+                # response is in-progress by protocol, so it is also not checked for the
+                # lock/bail lines (which would let a response lock and write the source
+                # before its own trailing command was processed — and, for a .mrsh, the
+                # command line would run to the end and leak into the saved spec).
+                print('Note: the assistant used its tool budget this turn and has not yet '
+                      'processed the last tool result.')
+                if turn < max_turns - 1:
+                    # It continues from that result at the top of the next turn.
+                    print('It will continue from that result on the next turn.')
+                    continue
+                # The final turn has no next turn to continue into: let the assistant
+                # process the pending result now (one extra call, outside the per-turn
+                # cap) so it can still inform the outcome — it may lock or bail, or the
+                # session ends as a timeout.
+                print('This was the final turn, so it is processing that result now.')
+                messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
+                                                     spec_text, debug=debug)
+                text = await mapper.run(messages)
+                print(f'\nmarsha>\n{text}\n')
+                pending = None
+            if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+                payload = parse_locked_output(text, kind)
+                if payload is not None:
+                    return ChatResult('locked', payload, text)
+                messages.append({'role': 'assistant', 'content': text})
+                messages.append({'role': 'user', 'content': (
+                    'That lock was malformed: it must carry the required '
+                    + ('[[NEW:SPEC]]' if kind == 'mrsh'
+                       else '[[NEW:TITLE]] and [[NEW:BODY]]')
+                    + ' section(s), and it must carry no [[DESIGN:BAIL]] line (the lock '
+                    'and bail outcomes are mutually exclusive). Re-emit the locked design '
+                    'using the exact format requested.')})
+                continue
+            elif _signal_before_payload(text.split('\n'), '[[DESIGN:BAIL]]', kind):
+                return ChatResult('bail', None, text)
+            else:
+                if turn == max_turns - 1:
+                    break
+                line = read_line()
+                if _is_bail_token(line):
+                    return ChatResult('bail', None, line)
+                messages.append({'role': 'assistant', 'content': text})
+                messages.append({'role': 'user', 'content': line})
+    except ContextOverflowError as e:
+        # The prompt outgrew the model's context and compaction could not keep up (or
+        # failed): end the session with a handled result instead of an unhandled abort.
+        # The chat never modifies the source; the user can re-run with a
+        # larger-context model.
+        return ChatResult('error', None,
+                          f'The conversation outgrew the model\'s context window ({e}); '
+                          'the source was not modified. Re-run with a model with a '
+                          'larger context window.')
     return ChatResult('timeout', None,
                       'Reached the maximum number of turns without locking the design; '
                       'the source was not modified.')

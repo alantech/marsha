@@ -17,6 +17,7 @@ import pytest
 
 from marsha import refine
 from marsha import term
+from marsha.mappers.base import ContextOverflowError
 from marsha.spec_check import SPEC_CHECK_GROUNDED_NOTE
 
 
@@ -679,6 +680,28 @@ def test_run_refine_timeout_reports_detail(tmp_path: Any, capsys: Any) -> None:
     assert 'maximum number of turns' in capsys.readouterr().out
 
 
+def test_run_refine_chat_error_is_handled_and_never_writes(
+        tmp_path: Any, capsys: Any) -> None:
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('original')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        return refine.ChatResult('error', None, 'context overflow detail')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'context overflow detail' in capsys.readouterr().out
+    with open(p) as f:
+        assert f.read() == 'original'
+
+
 def test_run_refine_apply_failure_reports_error(tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
@@ -931,6 +954,39 @@ def test_run_refine_chat_tool_cap_notes_unprocessed_result(capsys: Any) -> None:
             max_turns=1, read_line=read_line))
     assert res.status == 'timeout'
     assert 'has not yet' in capsys.readouterr().out
+
+
+def test_run_refine_chat_final_turn_processes_pending_result() -> None:
+    # When the tool-round budget runs out on the final turn, the assistant gets one extra
+    # call to process the pending tool result, so the result can still inform the outcome
+    # (here, a lock) instead of the session timing out without ever seeing it.
+    cmd = 'Looking.\n$ git grep needle'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([cmd] * 10 + [locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=1, read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'the spec'}
+
+
+def test_run_refine_chat_overflow_returns_handled_result() -> None:
+    # When a model call overflows the context window (compaction could not keep up), the
+    # session ends with a handled 'error' result instead of an unhandled abort.
+    class _Overflowing:
+        async def run(self, messages: Any) -> str:
+            raise ContextOverflowError('prompt exceeds context window: boom')
+
+    with patch.object(refine, 'get_mapper', new=lambda *a, **k: _Overflowing()):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'error'
+    assert res.payload is None
+    assert 'context window' in res.detail
 
 
 def test_run_refine_chat_lock_with_pending_command_does_not_lock() -> None:
