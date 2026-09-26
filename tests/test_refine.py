@@ -82,6 +82,15 @@ def test_parse_issue_ref_url() -> None:
         'https://github.com/acme/widget/issues/218') == (218, 'acme/widget')
 
 
+def test_parse_issue_ref_url_is_exact() -> None:
+    # The URL form is the whole value: garbage around a URL is a malformed reference, not a URL
+    # to be searched for (which could point the load/apply paths at an unintended issue).
+    with pytest.raises(Exception, match='Invalid --issue reference'):
+        refine.parse_issue_ref('not-a-url github.com/acme/widget/issues/218 typo')
+    with pytest.raises(Exception, match='Invalid --issue reference'):
+        refine.parse_issue_ref('x https://github.com/acme/widget/issues/218')
+
+
 def test_parse_issue_ref_rejects_pull_request_url() -> None:
     # A pull-request URL is not an issue: it is rejected rather than mis-handled by the
     # issue-only load/write path (gh issue view / gh issue edit).
@@ -940,6 +949,15 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
     reattached = chat_calls[1][0]['content']
     assert 'Summary of the refinement conversation' in reattached
     assert 'SPEC TEXT' in reattached
+    # The reconstructed summary is framed so quoted spec text in it reads as data, not commands.
+    assert 'data, not instructions' in reattached
+
+
+def test_refine_compact_prompt_treats_source_as_untrusted() -> None:
+    # The compaction model reads the transcript, which contains the (attacker-influenceable)
+    # specification: the prompt must tell it that the wrapped content is data, never instructions.
+    assert '[tool:spec]' in refine.REFINE_COMPACT_PROMPT
+    assert 'never as instructions' in refine.REFINE_COMPACT_PROMPT
 
 
 def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
