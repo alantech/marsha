@@ -127,6 +127,17 @@ def test_execute_unknown_command_lists_available() -> None:
     assert '$ web-search' in out
 
 
+def test_build_commands_honors_a_categories_override() -> None:
+    # A caller that needs a narrower or repo-independent tool set (e.g. a refine chat outside
+    # a git working tree) passes the set explicitly instead of the phase's default.
+    ctx = tools.ToolContext(phase='refine', categories={tools.CATEGORY_WEB})
+    assert set(tools.build_commands(ctx)) == {'web-search', 'view-web-page'}
+    # Without an override, the phase's standard set applies.
+    assert set(tools.build_commands(tools.ToolContext(phase='refine'))) == {
+        'git', 'notes', 'list-tree', 'summarize', 'find-in-file',
+        'web-search', 'view-web-page'}
+
+
 def test_execute_known_command_runs_handler() -> None:
     cmds = tools.build_commands(tools.ToolContext('gen'))
     with patch.object(cmds['web-search'], 'handler', new=AsyncMock(return_value='OK')) as h:

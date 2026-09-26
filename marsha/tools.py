@@ -209,6 +209,11 @@ class ToolContext:
     # whole-file read guard (a file over half the window is refused rather than buffered). None
     # when it cannot be resolved, in which case the guard is skipped.
     context_window: int | None = None
+    # Override for the phase's category set (PHASE_CATEGORIES): a caller that needs a
+    # narrower or repo-independent tool set sets this explicitly — e.g. a refine chat
+    # outside a git working tree, which still gets the web and local read tools. None (the
+    # default) means the phase's standard set.
+    categories: set[str] | None = None
 
 
 @dataclasses.dataclass
@@ -1839,7 +1844,8 @@ def build_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
     else:
         commands = agnostic_tool_commands(ctx)
         env_ok = False
-    allowed = PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES)
+    allowed = (ctx.categories if ctx.categories is not None
+               else PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES))
     out = {}
     for name, cmd in commands.items():
         if cmd.category not in allowed:

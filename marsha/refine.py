@@ -18,6 +18,9 @@ import sys
 import tempfile
 from typing import Any, Callable, cast
 
+from rich.console import Console
+from rich.markdown import Markdown
+
 from marsha import tools
 from marsha.context import (
     CHARS_PER_TOKEN, budget_tokens, estimate_tokens, fits, resolve_context_window)
@@ -276,7 +279,11 @@ def _locked_format_note(kind: str) -> str:
 
 REFINE_SYSTEM_PROMPT = '''You are a senior software engineer helping a person lock down a specification before any code is written. The goal is a design-locked spec: no open ambiguities, ready to implement.
 
-Work through the open ambiguities listed for the specification. Ask the person focused questions, one or a few at a time, about the points that are genuinely underspecified. You may be asked a question back — to weigh options, clarify your question, or check something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
+Work through the open ambiguities listed for the specification. In your FIRST message, ask every open question you can formulate now — a single numbered list covering each ambiguity and the concrete decisions it implies (defaults, formats, error handling, edge cases) — so the person can answer them all at once. Later rounds should only resolve what the person's answers raise. The conversation should end in a few rounds, not many.
+
+Track the decisions the person has given and never re-ask a question that a prior answer already settles, including in a rephrased form: if your next question is implied by an earlier answer, apply that answer and move on. Raise a sub-case only when it is genuinely new, not a rephrasing of something already decided.
+
+You may be asked a question back — to weigh options, clarify your question, or answer something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
 
 When (and only when) every open ambiguity is resolved, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
 '''
@@ -427,9 +434,12 @@ def _initial_chat_message(kind: str, spec_text: str, ambiguities: list[str],
                      f'The source belongs to the repository `{current_repo}`, which you may '
                      'inspect with your read-only tools.')
     parts.append('# Your task\n\n'
-                 'Begin the conversation by asking the person your first focused question(s) '
-                 'about the most important open ambiguities. You may be asked questions back; '
-                 'answer them, then continue.')
+                 'Begin by asking, in a single numbered list, every open question you can '
+                 'formulate now: each open ambiguity plus the concrete decisions it implies '
+                 '(defaults, formats, error handling, edge cases), so the person can answer '
+                 'them all at once. Later rounds resolve only what the answers raise; never '
+                 're-ask a question a prior answer already settles. You may be asked '
+                 'questions back; answer them, then continue.')
     return '\n\n'.join(parts)
 
 
@@ -524,20 +534,25 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     budget runs out on the final turn, the assistant gets one extra call to process the pending
     tool result, so it can still lock. Returns the outcome.
     """
-    # The read-only codebase tools are available whenever we are inside a git working tree (any
-    # source kind), independent of whether its origin remote names a repo: a checkout without an
-    # origin still has a codebase to inspect. `current_repo` is display context only (the
-    # "Codebase context" note in the first message); `in_repo` gates the tools. A standalone .mrsh
-    # (no repo) has nothing to inspect, so it runs without tools.
-    tool_ctx = None if not in_repo else tools.ToolContext(
+    # The read-only tools: inside a git working tree (any source kind), the full refine set —
+    # a checkout without an origin still has a codebase to inspect, so the tools are gated on
+    # being in a repo, not on a parseable repo name. Outside a repo there is no codebase, but
+    # the repo-independent tools (web, local reads, notes) are still available: the assistant
+    # can fetch a documentation page the person links instead of asking them to paste it.
+    # `current_repo` is display context only (the "Codebase context" note in the first message).
+    tool_ctx = tools.ToolContext(
         phase='refine', workdir=cwd, require_evidence=False,
-        context_window=await _resolve_window(model))
+        context_window=await _resolve_window(model),
+        categories=None if in_repo else {tools.CATEGORY_READ, tools.CATEGORY_NOTES,
+                                         tools.CATEGORY_WEB})
     system = REFINE_SYSTEM_PROMPT + _locked_format_note(kind)
-    if tool_ctx is not None:
+    if in_repo:
+        # The grounded note claims the spec belongs to an inspectable codebase — true only in
+        # a repo; a standalone source has no codebase to settle terms against.
         system += SPEC_CHECK_GROUNDED_NOTE
-        system += tools.tool_instructions(tool_ctx)
+    system += tools.tool_instructions(tool_ctx)
     mapper = get_mapper(system, n_results=1, model=model, label='refine:chat')
-    commands = tools.build_commands(tool_ctx) if tool_ctx is not None else {}
+    commands = tools.build_commands(tool_ctx)
     messages: list[dict[str, str]] = [{'role': 'user', 'content':
                                        _initial_chat_message(
                                            kind, spec_text, ambiguities, errors,
@@ -569,6 +584,15 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     {'role': 'assistant', 'content': text},
                     {'role': 'user', 'content': block},
                 ])
+            # A well-formed lock is printed exactly once, as a clean rendered proposal (the
+            # raw protocol text — markers plus payload — is never shown), and the
+            # confirmation step after the chat does not repeat the payload.
+            if pending is None and _signal_before_payload(
+                    text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+                payload = parse_locked_output(text, kind)
+                if payload is not None:
+                    _print_lock_turn(text, kind, payload)
+                    return ChatResult('locked', payload, text)
             print(f'\nmarsha>\n{text}\n')
             if pending is not None:
                 # The turn's tool-round budget ran out with the last tool result still
@@ -595,15 +619,20 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
-                print(f'\nmarsha>\n{text}\n')
                 if tools.extract_pending_command(text) is not None:
+                    print(f'\nmarsha>\n{text}\n')
                     return ChatResult('timeout', None,
                                       'The final turn ended on an unprocessed tool request; '
                                       'the source was not modified.')
+                if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+                    payload = parse_locked_output(text, kind)
+                    if payload is not None:
+                        _print_lock_turn(text, kind, payload)
+                        return ChatResult('locked', payload, text)
+                print(f'\nmarsha>\n{text}\n')
             if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
-                payload = parse_locked_output(text, kind)
-                if payload is not None:
-                    return ChatResult('locked', payload, text)
+                # A well-formed lock was handled (and printed) above; this is a malformed
+                # one: the raw text is already on screen, so nudge the assistant to fix it.
                 messages.append({'role': 'assistant', 'content': text})
                 messages.append({'role': 'user', 'content': (
                     'That lock was malformed: it must carry the required '
@@ -688,6 +717,41 @@ def _print_payload(kind: str, payload: dict[str, str]) -> None:
 def _print_dry_run(kind: str, payload: dict[str, str]) -> None:
     print('--- dry run: the source would be updated as follows ---')
     _print_payload(kind, payload)
+
+
+def _preamble_before_lock(text: str) -> str:
+    """The assistant's preamble in a lock turn: the text before the [[DESIGN:LOCKED]] line."""
+    lines = text.split('\n')
+    for i, ln in enumerate(lines):
+        if ln.strip() == '[[DESIGN:LOCKED]]':
+            return '\n'.join(lines[:i])
+    return ''
+
+
+def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
+    # The locked design is often a long document: render it as markdown (headings, lists,
+    # code blocks) instead of a raw wall of text. A rendering failure must never hide the
+    # proposal: fall back to the plain text.
+    if kind == 'mrsh':
+        content = payload['spec']
+    else:
+        content = f"# {payload['title']}\n\n{payload['body']}"
+    try:
+        Console().print(Markdown(content))
+    except Exception:
+        print(content)
+
+
+def _print_lock_turn(text: str, kind: str, payload: dict[str, str]) -> None:
+    """Print a lock turn once, as a clean proposal: the preamble as a normal turn, then the
+    updated source rendered with rich. The raw protocol text is never shown, and the
+    confirmation step after the chat does not repeat the payload — so a long proposal
+    appears exactly once."""
+    preamble = _preamble_before_lock(text).strip()
+    if preamble:
+        print(f'\nmarsha>\n{preamble}\n')
+    print('\nThe design is locked. The updated source:')
+    _render_lock_payload(kind, payload)
 
 
 def _print_summary(kind: str) -> None:
@@ -812,12 +876,13 @@ async def run_refine(args: Any) -> int:
         if getattr(args, 'dry_run', False):
             _print_dry_run(source.kind, result.payload)
             return 0
-        # An issue body or a ticket description is an external, often-public artifact, so the
-        # rewrite is shown in full before it touches the source: only an explicit yes applies
-        # it, and anything else (including EOF) leaves the source untouched.
-        print('The source would be updated as follows:')
-        _print_payload(source.kind, result.payload)
-        print('Apply this update? (y/N)')
+        # The locked design was just shown as the assistant's lock turn (rendered, not raw):
+        # confirm the write without repeating it — an issue body or a ticket description is
+        # an external, often-public artifact, so only an explicit yes applies it, and
+        # anything else (including EOF) leaves the source untouched.
+        label = {'mrsh': 'the .mrsh file', 'issue': 'the GitHub issue',
+                 'linear': 'the Linear ticket'}[source.kind]
+        print(f'Apply the locked design shown above to {label}? (y/N)')
         answer = _read_line().strip().lower()
         if answer not in ('y', 'yes'):
             print('Not applied; the source was not modified.')

@@ -731,8 +731,10 @@ def test_run_refine_declined_confirmation_does_not_write(
     with open(p) as f:
         assert f.read() == 'original'  # a declined confirmation never writes
     cap = capsys.readouterr()
-    assert 'NEW SPEC' in cap.out  # the rewrite is shown so the person can decide
-    assert 'Apply this update? (y/N)' in cap.out  # explicit question, default no
+    # The proposal is shown once (the assistant's lock turn), never repeated at the
+    # confirmation: the chat is faked here, so the payload must not appear at all.
+    assert 'NEW SPEC' not in cap.out
+    assert 'Apply the locked design shown above' in cap.out  # explicit question, default no
     assert 'Not applied' in cap.out
 
 
@@ -1117,9 +1119,11 @@ def test_run_refine_chat_mrsh_in_repo_gets_readonly_tools() -> None:
     assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
 
 
-def test_run_refine_chat_standalone_mrsh_has_no_tools() -> None:
-    # A .mrsh with no repository has nothing to inspect, so it runs without the codebase tools
-    # (no grounded note, and no context-window lookup).
+def test_run_refine_chat_standalone_mrsh_gets_repo_independent_tools() -> None:
+    # A .mrsh outside a git working tree has no codebase to inspect (no grounded note, no git
+    # tool), but the repo-independent tools (web, local reads, notes) are still available, so
+    # the assistant can e.g. fetch a documentation page the person links instead of asking
+    # them to paste it.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
     captured: dict[str, str] = {}
 
@@ -1127,13 +1131,37 @@ def test_run_refine_chat_standalone_mrsh_has_no_tools() -> None:
         captured['system'] = system
         return _scripted_mapper([locked])
 
-    with patch.object(refine, 'get_mapper', new=get_mapper):
+    with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE not in captured['system']
+    assert 'web-search' in captured['system']  # the web tools are offered
+    assert '$ git ' not in captured['system']  # but not the repo-bound git tool
+
+
+def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
+    # A lock turn is shown once, as a clean rendered proposal: the preamble is kept, the raw
+    # protocol markers are never shown, and the payload is not repeated (the confirmation
+    # after the chat refers to it instead).
+    locked = ('All settled — here is the locked design.\n'
+              '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\n\nthe full spec body')
+    with patch.object(refine, 'get_mapper',
+                      new=lambda system, **k: _scripted_mapper([locked])), \
+         patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    out = capsys.readouterr().out
+    assert '[[DESIGN:LOCKED]]' not in out  # the raw protocol text is never shown
+    assert '[[NEW:SPEC]]' not in out
+    assert 'All settled' in out  # the preamble is kept
+    assert out.count('the full spec body') == 1  # the proposal appears exactly once
 
 
 def test_run_refine_chat_repo_without_origin_name_still_gets_tools() -> None:
