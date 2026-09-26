@@ -290,7 +290,7 @@ When a decision needs a concrete value — an exact string, message, number, for
 
 You may be asked a question back — to weigh options, clarify your question, or answer something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
 
-When every open ambiguity is resolved, check whether the person's latest message already amounts to a go-ahead (for example, asking to see the specification). If not, end your turn with an explicit question asking whether they are ready for you to propose the updated specification — a question, not a statement of readiness — and wait for their answer. Only once they have signalled a go-ahead, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
+When every open ambiguity is resolved, check whether the person's latest message already amounts to a go-ahead (for example, asking to see the specification). If not, end your turn with an explicit question asking whether they are ready for you to propose the updated specification — a question, not a statement of readiness — and wait for their answer. Once they have signalled a go-ahead, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. The session confirms directly with the person before showing the proposal: if they are not ready, their objection arrives as the next message — resolve it, and emit the lock again once everything is settled. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
 '''
 
 
@@ -589,20 +589,24 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     {'role': 'assistant', 'content': text},
                     {'role': 'user', 'content': block},
                 ])
-            # A well-formed lock is printed exactly once, as a clean rendered proposal (the
-            # raw protocol text — markers plus payload — is never shown), and the
-            # confirmation step after the chat does not repeat the payload. A lock is valid
-            # only once the user has had a turn to give the go-ahead the protocol requires:
-            # the first assistant message precedes any user reply, where the readiness
-            # question is asked instead of locking. A premature lock is shown as an ordinary
-            # turn and the conversation continues, so the user can then give (or withhold)
-            # the go-ahead and the model re-locks on a later turn.
+            # A well-formed lock is shown at most once, as a clean rendered proposal (the raw
+            # protocol text — markers plus payload — is never shown), and the confirmation
+            # step after the chat does not repeat the payload. A lock is valid only once the
+            # user has had a turn: the first assistant message precedes any user reply, where
+            # the readiness question is asked instead of locking (a premature lock is shown
+            # as an ordinary turn and the conversation continues). And the model's readiness
+            # is not the user's: the proposal is shown only after the person accepts it
+            # directly (_propose_or_continue), so a lock following a non-affirmative reply
+            # cannot present a rewrite the person did not ask to see.
             if (pending is None and turn > 0 and _signal_before_payload(
                     text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                 payload = parse_locked_output(text, kind)
                 if payload is not None:
-                    _print_lock_turn(text, kind, payload)
-                    return ChatResult('locked', payload, text)
+                    outcome = _propose_or_continue(text, kind, payload, messages,
+                                                   read_line)
+                    if outcome is not None:
+                        return outcome
+                    continue
             _print_turn(text)
             if pending is not None:
                 # The turn's tool-round budget ran out with the last tool result still
@@ -638,8 +642,11 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                     payload = parse_locked_output(text, kind)
                     if payload is not None:
-                        _print_lock_turn(text, kind, payload)
-                        return ChatResult('locked', payload, text)
+                        outcome = _propose_or_continue(text, kind, payload,
+                                                       messages, read_line)
+                        if outcome is not None:
+                            return outcome
+                        continue
                 _print_turn(text)
             locked_signal = _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind)
@@ -767,6 +774,36 @@ def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
     _render_markdown(content)
 
 
+def _propose_or_continue(text: str, kind: str, payload: dict[str, str],
+                         messages: list[dict[str, str]],
+                         read_line: Callable[[], str]) -> ChatResult | None:
+    # The model's "we are done" is not the user's: a lock means the model believes the
+    # specification is ready to propose, and a proposal can lead to a write — so before it is
+    # shown, the person is asked directly. An explicit yes shows the rendered proposal and
+    # ends the chat locked; a bail token ends the chat; anything else continues the
+    # conversation with the person's objection (the un-accepted lock stays in the transcript,
+    # so the model can address the objection and re-lock once it is resolved).
+    preamble = _preamble_before_lock(text).strip()
+    if preamble:
+        _print_turn(preamble)
+    print('\nThe assistant is ready to propose the updated specification. '
+          'Show the proposal now? (y/N)')
+    answer = read_line()
+    if _is_bail_token(answer):
+        return ChatResult('bail', None, answer)
+    if answer.strip().lower() not in ('y', 'yes'):
+        more = read_line()
+        if _is_bail_token(more):
+            return ChatResult('bail', None, more)
+        messages.append({'role': 'assistant', 'content': text})
+        messages.append({'role': 'user', 'content':
+                         'Not yet — resolve this first: ' + more})
+        return None
+    print('\nThe design is locked. The updated source:')
+    _render_lock_payload(kind, payload)
+    return ChatResult('locked', payload, text)
+
+
 def _print_apply_prompt(label: str) -> None:
     # The confirmation follows directly after a long proposal, where a bare line reads as part
     # of the document: separate it with a blank line and set it in a bold double-line box so
@@ -775,18 +812,6 @@ def _print_apply_prompt(label: str) -> None:
     Console().print(Panel(
         f'[bold]Apply the locked design shown above to {label}? (y/N)[/bold]',
         box=DOUBLE, style='bold', expand=False))
-
-
-def _print_lock_turn(text: str, kind: str, payload: dict[str, str]) -> None:
-    """Print a lock turn once, as a clean proposal: the preamble as a normal turn, then the
-    updated source rendered with rich. The raw protocol text is never shown, and the
-    confirmation step after the chat does not repeat the payload — so a long proposal
-    appears exactly once."""
-    preamble = _preamble_before_lock(text).strip()
-    if preamble:
-        _print_turn(preamble)
-    print('\nThe design is locked. The updated source:')
-    _render_lock_payload(kind, payload)
 
 
 def _print_summary(kind: str) -> None:

@@ -1036,16 +1036,18 @@ def test_run_refine_apply_failure_reports_error(tmp_path: Any, capsys: Any) -> N
 
 
 def test_run_refine_chat_rejects_a_lock_before_any_user_reply() -> None:
-    # The protocol asks the readiness question in the first message and locks only after the
-    # user's go-ahead: a lock on the very first turn (before any user reply) is not
-    # accepted — it is shown as an ordinary turn and the conversation continues until the
-    # user has replied, when the model may re-lock.
+    # A lock on the very first turn (before any user reply) is not accepted — it is shown
+    # as an ordinary turn and the conversation continues; once the user has replied and the
+    # model re-locks, the proposal is shown only after the user accepts it directly.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\nthe full spec'
     reads: list[str] = []
 
     def read() -> str:
-        reads.append('go ahead')
-        return 'go ahead'
+        # A normal reply to the premature lock, then the user's acceptance of the proposal
+        # when the model re-locks on the second turn.
+        value = 'go ahead' if not reads else 'y'
+        reads.append(value)
+        return value
 
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([locked, locked])):
@@ -1055,7 +1057,7 @@ def test_run_refine_chat_rejects_a_lock_before_any_user_reply() -> None:
             read_line=read))
     assert res.status == 'locked'
     assert res.payload == {'spec': '# Locked spec\nthe full spec'}
-    assert reads  # a user reply happened before the lock was accepted
+    assert reads == ['go ahead', 'y']  # a reply and an acceptance before the lock
 
 
 def test_run_refine_chat_bails_on_user_token() -> None:
@@ -1100,7 +1102,7 @@ def test_run_refine_chat_retries_a_malformed_lock() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'fixed spec'}
 
@@ -1115,7 +1117,7 @@ def test_run_refine_chat_lock_and_bail_together_retries() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
 
@@ -1129,7 +1131,7 @@ def test_run_refine_chat_bail_line_inside_payload_locks() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'line one\n[[DESIGN:BAIL]]\nline two'}
 
@@ -1147,7 +1149,7 @@ def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='issue', spec_text='ISSUE SPEC', ambiguities=['a'], errors=[],
             current_repo='acme/widget', in_repo=True, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'title': 'Updated Issue Title',
                            'body': 'Updated body text'}
@@ -1168,7 +1170,7 @@ def test_run_refine_chat_mrsh_in_repo_gets_readonly_tools() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='acme/widget', in_repo=True, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
 
@@ -1190,7 +1192,7 @@ def test_run_refine_chat_standalone_mrsh_gets_repo_independent_tools() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE not in captured['system']
     assert 'web-search' in captured['system']  # the web tools are offered
@@ -1229,13 +1231,39 @@ def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     out = capsys.readouterr().out
     assert '[[DESIGN:LOCKED]]' not in out  # the raw protocol text is never shown
     assert '[[NEW:SPEC]]' not in out
     assert 'All settled' in out  # the preamble is kept
     assert out.count('the full spec body') == 1  # the proposal appears exactly once
+
+
+def test_run_refine_chat_declined_proposal_keeps_refining(capsys: Any) -> None:
+    # The model's lock is not the user's: when the user declines the proposal, the rewrite is
+    # not shown and the conversation continues with their objection; a later lock is accepted
+    # only once the user accepts the proposal.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    # Replies, in order: to the premature first-turn lock, to the next turn, the declined
+    # proposal, the objection behind the decline, and the accepted proposal.
+    lines = iter(['x', 'x', 'n', 'make the error message friendlier', 'y'])
+
+    def read_line() -> str:
+        return next(lines)
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(
+                          [locked, 'Working on the error message.', locked, locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=read_line))
+    assert res.status == 'locked'
+    out = capsys.readouterr().out
+    assert 'Show the proposal now? (y/N)' in out
+    # The rendered proposal appears exactly once: at the acceptance, not at the decline.
+    assert out.count('The design is locked. The updated source:') == 1
 
 
 def test_print_apply_prompt_is_separated_and_boxed(capsys: Any) -> None:
@@ -1263,7 +1291,7 @@ def test_run_refine_chat_repo_without_origin_name_still_gets_tools() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=True, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'x'))
+            read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
 
@@ -1273,7 +1301,7 @@ def test_run_refine_chat_bail_marker_in_prose_does_not_bail() -> None:
     # prompted and the next turn can still lock.
     prose = "If this is hopeless I would emit [[DESIGN:BAIL]] - but let's try one more thing?"
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
-    lines = iter(['go on'])
+    lines = iter(['go on', 'y'])
 
     def read_line() -> str:
         return next(lines, '!bail')
@@ -1293,7 +1321,7 @@ def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
     # attempted, the user is prompted, and a later exact line still locks.
     prose = 'Once we settle the last point I will emit [[DESIGN:LOCKED]] and the new spec.'
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
-    lines = iter(['sure'])
+    lines = iter(['sure', 'y'])
 
     def read_line() -> str:
         return next(lines, '!bail')
@@ -1342,7 +1370,7 @@ def test_run_refine_chat_final_turn_processes_pending_result() -> None:
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None,
-            max_turns=2, read_line=lambda: 'x'))
+            max_turns=2, read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
 
@@ -1429,12 +1457,13 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
             return compact
         return _Chat()
 
+    lines = iter(['answer one', 'y'])
     with patch.object(refine, 'get_mapper', new=get_mapper), \
          patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'answer one'))
+            read_line=lambda: next(lines, 'y')))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
     assert compact.calls >= 1
@@ -1489,12 +1518,13 @@ def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
             return compact
         return _Chat()
 
+    lines = iter(['go on', 'y'])
     with patch.object(refine, 'get_mapper', new=get_mapper), \
          patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
             current_repo='acme/widget', in_repo=True, cwd='/', model=None,
-            max_turns=5, read_line=lambda: 'go on'))
+            max_turns=5, read_line=lambda: next(lines, 'y')))
     assert res.status == 'locked'
     # The note recorded through the tool reached the compaction request and was re-attached
     # verbatim for the model's next call.
