@@ -163,6 +163,18 @@ def test_repo_gate_mrsh_without_repo_reports_empty() -> None:
         assert asyncio.run(refine._repo_gate(s, '/x')) == ''
 
 
+def test_repo_gate_mrsh_repo_detection_failure_is_standalone() -> None:
+    # A .mrsh file is standalone: if the repo cannot be detected (e.g. git not installed), the
+    # gate reports no repo rather than failing, so the file still refines (without tools).
+    s = refine.resolve_source(_args(source='spec.mrsh'))
+
+    async def no_git(*a: Any, **k: Any) -> Any:
+        raise Exception('`git` is not installed or not on PATH.')
+
+    with patch.object(refine, '_git_repo_name', new=no_git):
+        assert asyncio.run(refine._repo_gate(s, '/x')) == ''
+
+
 def test_git_repo_name_parses_remote() -> None:
     for url, want in (
             ('git@github.com:acme/widget.git', 'acme/widget'),
@@ -637,6 +649,33 @@ def test_run_refine_dry_run_does_not_write(tmp_path: Any, capsys: Any) -> None:
         assert f.read() == 'original'  # dry run leaves the file untouched
     out = capsys.readouterr().out
     assert 'dry run' in out and 'NEW SPEC' in out
+
+
+def test_run_refine_mrsh_without_git_still_refines(tmp_path: Any) -> None:
+    # A standalone .mrsh refines without git installed: the repo lookup and the in-repo check
+    # are best-effort, and the chat simply runs without the codebase tools.
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('original')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        assert k.get('in_repo') is False
+        return refine.ChatResult('locked', {'spec': 'LOCKED SPEC'}, 'detail')
+
+    async def no_git(*a: Any, **k: Any) -> Any:
+        raise Exception('`git` is not installed or not on PATH.')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=no_git), \
+         patch.object(refine, '_git_repo_name', new=no_git):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 0
+    with open(p) as f:
+        assert f.read() == 'LOCKED SPEC'
 
 
 def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:

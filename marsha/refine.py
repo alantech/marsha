@@ -143,7 +143,13 @@ async def _repo_gate(source: SpecSource, cwd: str | None) -> str:
     ticket-to-repo mapping, so the current repo is assumed).
     """
     if source.kind == 'mrsh':
-        return await _git_repo_name(cwd)
+        # A .mrsh is standalone: no gate. The current repo is reported best-effort so the chat
+        # can use the read-only codebase tools when there is one, but failing to detect it (for
+        # example, git not installed) must not block refining a standalone file.
+        try:
+            return await _git_repo_name(cwd)
+        except Exception:
+            return ''
     if source.kind == 'issue':
         if not gh_available():
             raise Exception('--issue requires the `gh` CLI to be on PATH.')
@@ -714,7 +720,12 @@ async def run_refine(args: Any) -> int:
     # Whether the chat gets the read-only codebase tools: a git working tree (any source kind),
     # even one whose origin remote is missing or unparseable (the gate already guaranteed this
     # for issue/linear; for a .mrsh it decides whether the file sits in a repo worth inspecting).
-    in_repo = await _is_git_repo(cwd)
+    # A detection failure (e.g. git not installed) means no tools: a standalone .mrsh still
+    # refines.
+    try:
+        in_repo = await _is_git_repo(cwd)
+    except Exception:
+        in_repo = False
     result = await run_refine_chat(
         kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
         errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
