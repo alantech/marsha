@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from typing import Any, Callable, cast
@@ -815,20 +816,29 @@ async def run_refine(args: Any) -> int:
         print(f'error: {e}', file=sys.stderr)
         return 1
     check_only = bool(getattr(args, 'check', False))
-    if source.kind == 'mrsh' and not check_only:
-        # A file whose byte count alone exceeds 4x the char ceiling is definitely oversized
-        # (UTF-8 is at most 4 bytes per char): refuse it before reading it at all, so a huge
-        # file cannot exhaust memory before the (exact) character check below. A file that
-        # cannot be stat'd (e.g. missing) is skipped here and reported by the load below.
+    if source.kind == 'mrsh':
+        # Refuse a source that is not a regular file before reading anything: a FIFO or device
+        # can report size zero (which would bypass the byte guard below) yet yield an unbounded
+        # stream, and a named pipe can block the read indefinitely. A path that cannot be
+        # stat'd (e.g. missing) is skipped here and reported by the load below.
         try:
-            source_bytes = os.path.getsize(cast(str, source.path))
+            source_stat = os.stat(cast(str, source.path))
         except OSError:
-            source_bytes = None
-        if source_bytes is not None and source_bytes > REFINE_SPEC_LIMIT * 4:
-            print(f'error: the source is over the {REFINE_SPEC_LIMIT}-char limit for an '
-                  'interactive rewrite. Split the spec, or use --check to analyze it.',
-                  file=sys.stderr)
-            return 1
+            source_stat = None
+        if source_stat is not None:
+            if not stat.S_ISREG(source_stat.st_mode):
+                print('error: the source must be a regular file, not a pipe or device.',
+                      file=sys.stderr)
+                return 1
+            if not check_only and source_stat.st_size > REFINE_SPEC_LIMIT * 4:
+                # A file whose byte count alone exceeds 4x the char ceiling is definitely
+                # oversized (UTF-8 is at most 4 bytes per char): refuse it before reading it
+                # at all, so a huge file cannot exhaust memory before the (exact) character
+                # check below.
+                print(f'error: the source is over the {REFINE_SPEC_LIMIT}-char limit for an '
+                      'interactive rewrite. Split the spec, or use --check to analyze it.',
+                      file=sys.stderr)
+                return 1
     if source.kind == 'mrsh':
         print(f'Reading {source.path}...', file=sys.stderr)
     elif source.kind == 'issue':
@@ -891,12 +901,18 @@ async def run_refine(args: Any) -> int:
         in_repo = await _is_git_repo(cwd)
     except Exception:
         in_repo = False
-    result = await run_refine_chat(
-        kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
-        errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
-        model=getattr(args, 'model', None),
-        max_turns=int(getattr(args, 'max_turns', 40)),
-        read_line=_read_line, debug=debug)
+    try:
+        result = await run_refine_chat(
+            kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
+            errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
+            model=getattr(args, 'model', None),
+            max_turns=int(getattr(args, 'max_turns', 40)),
+            read_line=_read_line, debug=debug)
+    except Exception as e:
+        # An exhausted provider or a failed API request is a handled command failure, not a
+        # traceback: the chat never modified the source, so the user can simply re-run.
+        print(f'error: the conversation failed: {e}', file=sys.stderr)
+        return 1
     if result.status == 'locked' and result.payload is not None:
         if getattr(args, 'dry_run', False):
             _print_dry_run(source.kind, result.payload)

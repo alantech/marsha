@@ -8,6 +8,7 @@ are exercised directly, and the `run_refine` driver is driven end-to-end with a 
 
 import asyncio
 import json
+import os
 from typing import Any, Generator
 
 import types
@@ -534,6 +535,47 @@ def test_run_refine_refuses_huge_mrsh_before_reading(
         rc = asyncio.run(refine.run_refine(_args(source=p)))
     assert rc == 1
     assert 'limit' in capsys.readouterr().err
+
+
+def test_run_refine_refuses_special_file_source(tmp_path: Any, capsys: Any) -> None:
+    # A FIFO or device can report size zero (bypassing the byte guard) yet yield an unbounded
+    # stream — and a named pipe can block the read indefinitely: refuse it before reading.
+    p = str(tmp_path / 'spec.mrsh')
+    os.mkfifo(p)
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        raise AssertionError('a non-regular file must be refused before it is read')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    with patch.object(refine, 'load_spec_with_fields', new=fake_load), \
+         patch.object(refine, 'analyze_spec', new=fake_analyze):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'regular file' in capsys.readouterr().err
+
+
+def test_run_refine_chat_failure_is_a_handled_error(tmp_path: Any, capsys: Any) -> None:
+    # A provider/API failure mid-conversation (e.g. an exhausted request budget) exits as a
+    # handled command error, not an unhandled traceback.
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('original')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def boom(**k: Any) -> Any:
+        raise Exception('request budget exhausted')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=boom), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'error: the conversation failed: request budget exhausted' \
+        in capsys.readouterr().err
 
 
 def test_run_refine_limit_tracks_the_model_context(
