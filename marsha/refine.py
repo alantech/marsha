@@ -601,15 +601,19 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # protocol text — markers plus payload — is never shown), and the confirmation
             # step after the chat does not repeat the payload. A lock is valid only once the
             # user has had a turn: the first assistant message precedes any user reply, where
-            # the readiness question is asked instead of locking (a premature lock is shown
-            # as an ordinary turn and the conversation continues). And the model's readiness
-            # is not the user's: the proposal is shown only after the person accepts it
-            # directly (_propose_or_continue), so a lock following a non-affirmative reply
-            # cannot present a rewrite the person did not ask to see.
-            if (pending is None and turn > 0 and _signal_before_payload(
+            # the readiness question is asked instead of locking — a premature lock is not
+            # shown at all (its payload is the proposal, which must not appear before the
+            # go-ahead), so it stays in the transcript with a nudge to ask instead. And the
+            # model's readiness is not the user's: the proposal is shown only after the
+            # person accepts it directly (_propose_or_continue), so a lock following a
+            # non-affirmative reply cannot present a rewrite the person did not ask to see.
+            if (pending is None and _signal_before_payload(
                     text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                 payload = parse_locked_output(text, kind)
                 if payload is not None:
+                    if turn == 0:
+                        _premature_lock_nudge(text, messages)
+                        continue
                     outcome = _propose_or_continue(text, kind, payload, messages,
                                                    read_line)
                     if outcome is not None:
@@ -646,10 +650,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     return ChatResult('timeout', None,
                                       'The final turn ended on an unprocessed tool request; '
                                       'the source was not modified.')
-                if (turn > 0 and _signal_before_payload(
-                        text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
+                if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                     payload = parse_locked_output(text, kind)
                     if payload is not None:
+                        if turn == 0:
+                            # Premature (no user turn yet): not shown, nudged; the final
+                            # turn has no next turn to ask in, so the session times out.
+                            _premature_lock_nudge(text, messages)
+                            continue
                         outcome = _propose_or_continue(text, kind, payload,
                                                        messages, read_line)
                         if outcome is not None:
@@ -780,6 +788,17 @@ def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
     else:
         content = f"# {payload['title']}\n\n{payload['body']}"
     _render_markdown(content)
+
+
+def _premature_lock_nudge(text: str, messages: list[dict[str, str]]) -> None:
+    # A well-formed lock before the person's first turn: the payload is the proposal, and
+    # the proposal must not appear before the person has had a chance to give the go-ahead.
+    # The lock stays in the transcript (the model can see what it emitted) with a nudge to
+    # ask instead of locking; it is not shown on screen.
+    messages.append({'role': 'assistant', 'content': text})
+    messages.append({'role': 'user', 'content': (
+        'That lock is premature: the person has not yet had a turn to give the go-ahead. '
+        'Ask the readiness question instead of locking, and wait for their answer.')})
 
 
 def _propose_or_continue(text: str, kind: str, payload: dict[str, str],
