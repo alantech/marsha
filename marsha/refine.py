@@ -591,9 +591,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 ])
             # A well-formed lock is printed exactly once, as a clean rendered proposal (the
             # raw protocol text — markers plus payload — is never shown), and the
-            # confirmation step after the chat does not repeat the payload.
-            if pending is None and _signal_before_payload(
-                    text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+            # confirmation step after the chat does not repeat the payload. A lock is valid
+            # only once the user has had a turn to give the go-ahead the protocol requires:
+            # the first assistant message precedes any user reply, where the readiness
+            # question is asked instead of locking. A premature lock is shown as an ordinary
+            # turn and the conversation continues, so the user can then give (or withhold)
+            # the go-ahead and the model re-locks on a later turn.
+            if (pending is None and turn > 0 and _signal_before_payload(
+                    text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                 payload = parse_locked_output(text, kind)
                 if payload is not None:
                     _print_lock_turn(text, kind, payload)
@@ -629,13 +634,16 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     return ChatResult('timeout', None,
                                       'The final turn ended on an unprocessed tool request; '
                                       'the source was not modified.')
-                if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+                if (turn > 0 and _signal_before_payload(
+                        text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                     payload = parse_locked_output(text, kind)
                     if payload is not None:
                         _print_lock_turn(text, kind, payload)
                         return ChatResult('locked', payload, text)
                 _print_turn(text)
-            if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+            locked_signal = _signal_before_payload(
+                text.split('\n'), '[[DESIGN:LOCKED]]', kind)
+            if turn > 0 and locked_signal:
                 # A well-formed lock was handled (and printed) above; this is a malformed
                 # one: the raw text is already on screen, so nudge the assistant to fix it.
                 messages.append({'role': 'assistant', 'content': text})
@@ -644,10 +652,11 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     + ('[[NEW:SPEC]]' if kind == 'mrsh'
                        else '[[NEW:TITLE]] and [[NEW:BODY]]')
                     + ' section(s), and it must carry no [[DESIGN:BAIL]] line (the lock '
-                    'and bail outcomes are mutually exclusive). Re-emit the locked design '
-                    'using the exact format requested.')})
+                      'and bail outcomes are mutually exclusive). Re-emit the locked design '
+                      'using the exact format requested.')})
                 continue
-            elif _signal_before_payload(text.split('\n'), '[[DESIGN:BAIL]]', kind):
+            elif not locked_signal and _signal_before_payload(
+                    text.split('\n'), '[[DESIGN:BAIL]]', kind):
                 return ChatResult('bail', None, text)
             else:
                 if turn == max_turns - 1:

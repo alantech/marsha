@@ -1035,16 +1035,27 @@ def test_run_refine_apply_failure_reports_error(tmp_path: Any, capsys: Any) -> N
 # --- run_refine_chat (the multi-turn loop, mocked mapper) ---------------------
 
 
-def test_run_refine_chat_locks_on_first_turn() -> None:
+def test_run_refine_chat_rejects_a_lock_before_any_user_reply() -> None:
+    # The protocol asks the readiness question in the first message and locks only after the
+    # user's go-ahead: a lock on the very first turn (before any user reply) is not
+    # accepted — it is shown as an ordinary turn and the conversation continues until the
+    # user has replied, when the model may re-lock.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\nthe full spec'
+    reads: list[str] = []
+
+    def read() -> str:
+        reads.append('go ahead')
+        return 'go ahead'
+
     with patch.object(refine, 'get_mapper',
-                      new=lambda *a, **k: _scripted_mapper([locked])):
+                      new=lambda *a, **k: _scripted_mapper([locked, locked])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'should not be read'))
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=2,
+            read_line=read))
     assert res.status == 'locked'
     assert res.payload == {'spec': '# Locked spec\nthe full spec'}
+    assert reads  # a user reply happened before the lock was accepted
 
 
 def test_run_refine_chat_bails_on_user_token() -> None:
@@ -1208,10 +1219,12 @@ def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
     # A lock turn is shown once, as a clean rendered proposal: the preamble is kept, the raw
     # protocol markers are never shown, and the payload is not repeated (the confirmation
     # after the chat refers to it instead).
+    question = 'Ready for me to propose the updated specification?'
     locked = ('All settled — here is the locked design.\n'
               '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\n\nthe full spec body')
     with patch.object(refine, 'get_mapper',
-                      new=lambda system, **k: _scripted_mapper([locked])), \
+                      new=lambda system, **k: _scripted_mapper(
+                          [question, locked])), \
          patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
@@ -1317,15 +1330,19 @@ def test_run_refine_chat_tool_cap_notes_unprocessed_result(capsys: Any) -> None:
 def test_run_refine_chat_final_turn_processes_pending_result() -> None:
     # When the tool-round budget runs out on the final turn, the assistant gets one extra
     # call to process the pending tool result, so the result can still inform the outcome
-    # (here, a lock) instead of the session timing out without ever seeing it.
+    # (here, a lock) instead of the session timing out without ever seeing it. The first
+    # turn is a plain question so the user has had a turn to give the go-ahead the lock
+    # requires.
     cmd = 'Looking.\n$ git grep needle'
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
     with patch.object(refine, 'get_mapper',
-                      new=lambda *a, **k: _scripted_mapper([cmd] * 10 + [locked])):
+                      new=lambda *a, **k: _scripted_mapper(
+                          ['Ready for me to propose the updated specification?']
+                          + [cmd] * 10 + [locked])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None,
-            max_turns=1, read_line=lambda: 'x'))
+            max_turns=2, read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
 
