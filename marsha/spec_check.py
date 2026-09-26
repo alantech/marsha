@@ -58,7 +58,11 @@ def parse_spec_check(text: str) -> dict[str, Any]:
         obj = json.loads(t[start:end + 1])
     if not isinstance(obj, dict) or not isinstance(obj.get('compilable'), bool):
         raise Exception(f'Invalid spec check response: {text[:200]}')
-    ambiguities = obj.get('ambiguities', [])
+    # `ambiguities` is required by the prompt: a missing field is a malformed response (so the
+    # retry path runs), not an empty ambiguity list that would read as "locked".
+    if 'ambiguities' not in obj:
+        raise Exception(f'Invalid spec check response: {text[:200]}')
+    ambiguities = obj['ambiguities']
     errors = obj.get('errors', [])
     if not isinstance(ambiguities, list) or not all(
             isinstance(a, str) for a in ambiguities):

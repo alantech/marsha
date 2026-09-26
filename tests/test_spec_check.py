@@ -71,6 +71,13 @@ def test_parse_spec_check_missing_compilable_raises() -> None:
         spec_check.parse_spec_check('{"ambiguities": []}')
 
 
+def test_parse_spec_check_missing_ambiguities_raises() -> None:
+    # A missing `ambiguities` field is malformed (the prompt requires it), not an empty list:
+    # it must raise so the retry path runs instead of reading as a locked spec.
+    with pytest.raises(Exception):
+        spec_check.parse_spec_check('{"compilable": true}')
+
+
 def test_parse_spec_check_non_dict_raises() -> None:
     with pytest.raises(Exception):
         spec_check.parse_spec_check('[1, 2, 3]')

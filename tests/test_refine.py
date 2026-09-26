@@ -94,6 +94,14 @@ def test_resolve_source_mrsh() -> None:
     assert s.kind == 'mrsh' and s.path == 'spec.mrsh'
 
 
+def test_resolve_source_mrsh_requires_mrstsh_extension() -> None:
+    # The positional source is rewritten in place when the design locks, so a non-.mrsh path
+    # (a typo or an accidental file) is rejected before any LLM call, not silently overwritten.
+    for bad in ('README.md', 'spec.txt', 'notes'):
+        with pytest.raises(Exception, match=r'not a .mrsh file'):
+            refine.resolve_source(_args(source=bad))
+
+
 def test_resolve_source_issue() -> None:
     s = refine.resolve_source(_args(issue='218'))
     assert s.kind == 'issue' and s.num == 218 and s.repo is None
@@ -318,6 +326,13 @@ def test_parse_locked_output_requires_lock_marker() -> None:
     assert refine.parse_locked_output('[[NEW:SPEC]]\nx', 'mrsh') is None
 
 
+def test_parse_locked_output_lock_marker_in_prose_is_ignored() -> None:
+    # A marker quoted inside a sentence is not the protocol line: no payload is extracted.
+    text = ('I think we are done - here is what [[DESIGN:LOCKED]] would look like:\n'
+            '[[NEW:SPEC]]\nthe spec')
+    assert refine.parse_locked_output(text, 'mrsh') is None
+
+
 def test_parse_locked_output_issue_missing_body() -> None:
     assert refine.parse_locked_output(
         '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT', 'issue') is None
@@ -469,7 +484,8 @@ def test_run_refine_locks_and_writes_mrsh(tmp_path: Any, capsys: Any) -> None:
         return refine.ChatResult('locked', {'spec': 'LOCKED SPEC'}, 'detail')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, 'run_refine_chat', new=fake_chat):
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         rc = asyncio.run(refine.run_refine(_args(source=p)))
     assert rc == 0
     with open(p) as f:
@@ -489,7 +505,8 @@ def test_run_refine_dry_run_does_not_write(tmp_path: Any, capsys: Any) -> None:
         return refine.ChatResult('locked', {'spec': 'NEW SPEC'}, 'x')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, 'run_refine_chat', new=fake_chat):
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         rc = asyncio.run(refine.run_refine(_args(source=p, dry_run=True)))
     assert rc == 0
     with open(p) as f:
@@ -510,7 +527,8 @@ def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:
         return refine.ChatResult('bail', None, '')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, 'run_refine_chat', new=fake_chat):
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         rc = asyncio.run(refine.run_refine(_args(source=p)))
     assert rc == 1
     with open(p) as f:
@@ -531,7 +549,8 @@ def test_run_refine_timeout_reports_detail(tmp_path: Any, capsys: Any) -> None:
             'timeout', None, 'Reached the maximum number of turns')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, 'run_refine_chat', new=fake_chat):
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         rc = asyncio.run(refine.run_refine(_args(source=p, max_turns=3)))
     assert rc == 1
     assert 'maximum number of turns' in capsys.readouterr().out
@@ -553,7 +572,8 @@ def test_run_refine_apply_failure_reports_error(tmp_path: Any, capsys: Any) -> N
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
          patch.object(refine, 'run_refine_chat', new=fake_chat), \
-         patch.object(refine, '_apply', new=boom):
+         patch.object(refine, '_apply', new=boom), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)):
         rc = asyncio.run(refine.run_refine(_args(source=p)))
     assert rc == 1
     # The failure is reported to stderr (the source is left untouched).
@@ -571,7 +591,7 @@ def test_run_refine_chat_locks_on_first_turn() -> None:
                       new=lambda *a, **k: _scripted_mapper([locked])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=5,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'should not be read'))
     assert res.status == 'locked'
     assert res.payload == {'spec': '# Locked spec\nthe full spec'}
@@ -583,7 +603,7 @@ def test_run_refine_chat_bails_on_user_token() -> None:
                           ['Let me ask: what about X?'])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=5,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: '!bail'))
     assert res.status == 'bail'
     assert res.payload is None
@@ -595,7 +615,7 @@ def test_run_refine_chat_bails_when_assistant_bails() -> None:
                           ['[[DESIGN:BAIL]]\ncannot resolve this'])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=5,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'bail'
 
@@ -605,7 +625,7 @@ def test_run_refine_chat_times_out() -> None:
                       new=lambda *a, **k: _scripted_mapper(['still working...'])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=2,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=2,
             read_line=lambda: 'go on'))
     assert res.status == 'timeout'
     assert res.payload is None
@@ -618,7 +638,7 @@ def test_run_refine_chat_retries_a_malformed_lock() -> None:
                       new=lambda *a, **k: _scripted_mapper([malformed, good])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=5,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'fixed spec'}
@@ -636,7 +656,7 @@ def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
                       new=AsyncMock(return_value=200000)):
         res = asyncio.run(refine.run_refine_chat(
             kind='issue', spec_text='ISSUE SPEC', ambiguities=['a'], errors=[],
-            current_repo='acme/widget', cwd='/', model=None, max_turns=5,
+            current_repo='acme/widget', in_repo=True, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert res.payload == {'title': 'Updated Issue Title',
@@ -657,7 +677,7 @@ def test_run_refine_chat_mrsh_in_repo_gets_readonly_tools() -> None:
          patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='acme/widget', cwd='/', model=None, max_turns=5,
+            current_repo='acme/widget', in_repo=True, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
@@ -676,7 +696,67 @@ def test_run_refine_chat_standalone_mrsh_has_no_tools() -> None:
     with patch.object(refine, 'get_mapper', new=get_mapper):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', cwd='/', model=None, max_turns=5,
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert SPEC_CHECK_GROUNDED_NOTE not in captured['system']
+
+
+def test_run_refine_chat_repo_without_origin_name_still_gets_tools() -> None:
+    # A working tree whose origin remote is missing or unparseable still has a codebase to
+    # inspect: the tools are gated on being in a repo (in_repo), not on a parseable repo name.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    captured: dict[str, str] = {}
+
+    def get_mapper(system: str, **k: Any) -> Any:
+        captured['system'] = system
+        return _scripted_mapper([locked])
+
+    with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, '_resolve_window', new=AsyncMock(return_value=200000)):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=True, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert SPEC_CHECK_GROUNDED_NOTE in captured['system']
+
+
+def test_run_refine_chat_bail_marker_in_prose_does_not_bail() -> None:
+    # A marker quoted in prose is not the protocol line: that turn is not a bail, so the user is
+    # prompted and the next turn can still lock.
+    prose = "If this is hopeless I would emit [[DESIGN:BAIL]] - but let's try one more thing?"
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    lines = iter(['go on'])
+
+    def read_line() -> str:
+        return next(lines, '!bail')
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([prose, locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=read_line))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'the spec'}
+
+
+def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
+    # Merely mentioning [[DESIGN:LOCKED]] in prose is not the protocol line: no lock is
+    # attempted, the user is prompted, and a later exact line still locks.
+    prose = 'Once we settle the last point I will emit [[DESIGN:LOCKED]] and the new spec.'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    lines = iter(['sure'])
+
+    def read_line() -> str:
+        return next(lines, '!bail')
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([prose, locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=read_line))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'the spec'}

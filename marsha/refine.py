@@ -91,7 +91,14 @@ def resolve_source(args: Any) -> SpecSource:
         raise Exception(
             'Provide exactly one of: a *.mrsh path, --issue NUM, or --linear NAME.')
     if kinds == ['mrsh']:
-        return SpecSource(kind='mrsh', path=cast(str, args.source))
+        path = cast(str, args.source)
+        # The positional source is rewritten in place when the design locks, so only a *.mrsh
+        # spec is accepted: a typo or an accidental path (README.md, ...) must fail here, before
+        # any LLM call, rather than be overwritten with the rewritten spec.
+        if not path.endswith('.mrsh'):
+            raise Exception(
+                f'{path!r} is not a .mrsh file; the positional source must be a *.mrsh spec.')
+        return SpecSource(kind='mrsh', path=path)
     if kinds == ['issue']:
         num, repo = parse_issue_ref(args.issue)
         return SpecSource(kind='issue', num=num, repo=repo)
@@ -239,13 +246,23 @@ def _section_to(lines: list[str], start_marker: str, end_marker: str) -> str | N
     return '\n'.join(out)
 
 
+def _has_exact_line(text: str, marker: str) -> bool:
+    """Whether `text` contains a line that is exactly `marker` (ignoring surrounding whitespace).
+
+    The protocol is line-based: a marker counts only as its own line, so a marker that is merely
+    quoted or discussed in prose (e.g. "do not emit [[DESIGN:BAIL]] yet") does not trigger it.
+    """
+    return any(ln.strip() == marker for ln in text.split('\n'))
+
+
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     """Extract the updated source from a locked response, or None if it is malformed.
 
-    Each section runs to its named terminator (or the end of the text), so a marker-like line in
-    the content is preserved rather than silently truncating what is later written back.
+    The lock counts only when `[[DESIGN:LOCKED]]` is a line of its own (not quoted in prose). Each
+    section runs to its named terminator (or the end of the text), so a marker-like line in the
+    content is preserved rather than silently truncating what is later written back.
     """
-    if '[[DESIGN:LOCKED]]' not in text:
+    if not _has_exact_line(text, '[[DESIGN:LOCKED]]'):
         return None
     lines = text.split('\n')
     if kind == 'mrsh':
@@ -317,7 +334,7 @@ async def _resolve_window(model: str | None) -> int | None:
 
 
 async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
-                          errors: list[str], current_repo: str, cwd: str,
+                          errors: list[str], current_repo: str, in_repo: bool, cwd: str,
                           model: str | None, max_turns: int,
                           read_line: Callable[[], str],
                           debug: bool = False) -> ChatResult:
@@ -326,11 +343,12 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     Each turn the assistant may first use the read-only tools to investigate, then speaks to the
     user. The user may answer, ask back, or bail. Returns the outcome.
     """
-    # The read-only codebase tools are available whenever we are inside a repository (any source
-    # kind): a .mrsh refined in a repo lets the assistant inspect that repo, and for an issue or
-    # linear ticket the gate has already guaranteed one. A standalone .mrsh (no repo) has nothing
-    # to inspect, so it runs without tools.
-    tool_ctx = None if not current_repo else tools.ToolContext(
+    # The read-only codebase tools are available whenever we are inside a git working tree (any
+    # source kind), independent of whether its origin remote names a repo: a checkout without an
+    # origin still has a codebase to inspect. `current_repo` is display context only (the
+    # "Codebase context" note in the first message); `in_repo` gates the tools. A standalone .mrsh
+    # (no repo) has nothing to inspect, so it runs without tools.
+    tool_ctx = None if not in_repo else tools.ToolContext(
         phase='refine', workdir=cwd, require_evidence=False,
         context_window=await _resolve_window(model))
     system = REFINE_SYSTEM_PROMPT + _locked_format_note(kind)
@@ -363,7 +381,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 {'role': 'user', 'content': block},
             ])
         print(f'\nmarsha>\n{text}\n')
-        if '[[DESIGN:LOCKED]]' in text:
+        if _has_exact_line(text, '[[DESIGN:LOCKED]]'):
             payload = parse_locked_output(text, kind)
             if payload is not None:
                 return ChatResult('locked', payload, text)
@@ -374,7 +392,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                    else '[[NEW:TITLE]] and [[NEW:BODY]]')
                 + ' section(s). Re-emit the locked design using the exact format requested.')})
             continue
-        if '[[DESIGN:BAIL]]' in text:
+        if _has_exact_line(text, '[[DESIGN:BAIL]]'):
             return ChatResult('bail', None, text)
         line = read_line()
         if _is_bail_token(line):
@@ -498,9 +516,13 @@ async def run_refine(args: Any) -> int:
               'limit for an interactive rewrite. Split the spec, or use --check to analyze it.',
               file=sys.stderr)
         return 1
+    # Whether the chat gets the read-only codebase tools: a git working tree (any source kind),
+    # even one whose origin remote is missing or unparseable (the gate already guaranteed this
+    # for issue/linear; for a .mrsh it decides whether the file sits in a repo worth inspecting).
+    in_repo = await _is_git_repo(cwd)
     result = await run_refine_chat(
         kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
-        errors=check['errors'], current_repo=current, cwd=cwd,
+        errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
         model=getattr(args, 'model', None),
         max_turns=int(getattr(args, 'max_turns', 40)),
         read_line=_read_line, debug=debug)
