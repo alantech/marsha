@@ -342,6 +342,17 @@ def test_parse_locked_output_lock_marker_in_prose_is_ignored() -> None:
     assert refine.parse_locked_output(text, 'mrsh') is None
 
 
+def test_parse_locked_output_lock_only_inside_payload_is_ignored() -> None:
+    # A [[DESIGN:LOCKED]] line that appears only inside the rewritten spec (after the payload
+    # marker) is content, not the signal: it cannot lock by itself.
+    text = ('Here is the updated spec:\n[[NEW:SPEC]]\nline one\n'
+            '[[DESIGN:LOCKED]]\nline two')
+    assert refine.parse_locked_output(text, 'mrsh') is None
+    # Same for an issue/ticket payload: the body runs to the end and may contain the marker.
+    text2 = '[[NEW:TITLE]]\nT\n[[NEW:BODY]]\nbody\n[[DESIGN:LOCKED]]'
+    assert refine.parse_locked_output(text2, 'issue') is None
+
+
 def test_parse_locked_output_issue_missing_body() -> None:
     assert refine.parse_locked_output(
         '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT', 'issue') is None
@@ -769,6 +780,21 @@ def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
             read_line=read_line))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
+
+
+def test_run_refine_chat_tool_cap_notes_unprocessed_result(capsys: Any) -> None:
+    # When a turn's tool-round budget runs out with a result still unprocessed, the user is told
+    # the assistant has not yet seen that result, rather than prompted against an unfinished
+    # turn; the next message lets the assistant continue from that result.
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(
+                          ['Investigating.\n$ git grep needle'])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=1, read_line=lambda: '!bail'))
+    assert res.status == 'bail'
+    assert 'has not yet' in capsys.readouterr().out
 
 
 def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:

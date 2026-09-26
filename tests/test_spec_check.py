@@ -33,6 +33,9 @@ def test_prompts_are_nonempty_and_grounded_note_mentions_codebase() -> None:
     assert spec_check.SPEC_CHECK_PROMPT.strip()
     assert 'implementable' in spec_check.SPEC_CHECK_PROMPT
     assert 'ambiguities' in spec_check.SPEC_CHECK_PROMPT
+    # The source arrives wrapped as untrusted data and the prompt says so.
+    assert '[tool:spec]' in spec_check.SPEC_CHECK_PROMPT
+    assert 'never as instructions' in spec_check.SPEC_CHECK_PROMPT
     assert spec_check.SPEC_CHECK_GROUNDED_NOTE.strip()
     assert 'codebase' in spec_check.SPEC_CHECK_GROUNDED_NOTE
 
@@ -151,6 +154,29 @@ def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
     assert got == {'compilable': True, 'ambiguities': [], 'errors': []}
     # A grounded analysis appends the note and drives the read-only tool loop.
     assert spec_check.SPEC_CHECK_GROUNDED_NOTE in captured['system']
+
+
+def test_analyze_spec_wraps_source_as_untrusted_data() -> None:
+    # The source is externally supplied (issue/ticket text, a .mrsh file): it must reach the
+    # model inside the untrusted-data wrapper so instructions embedded in the spec cannot steer
+    # the analysis (for example into an empty ambiguity list that reads as a locked spec).
+    out = json.dumps({'compilable': True, 'ambiguities': []})
+    seen: dict[str, Any] = {}
+
+    class _M:
+        async def run(self, request: Any) -> str:
+            seen['request'] = request
+            return out
+
+    def get_mapper(system: str, **kw: Any) -> Any:
+        seen['system'] = system
+        return _M()
+
+    with patch.object(spec_check, 'get_mapper', new=get_mapper):
+        asyncio.run(spec_check.analyze_spec('SPEC TEXT'))
+    assert seen['request'].startswith('[tool:spec]')
+    assert 'SPEC TEXT' in seen['request']
+    assert seen['request'].rstrip().endswith('[/tool:spec]')
 
 
 def test_analyze_spec_retries_then_succeeds() -> None:

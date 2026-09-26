@@ -256,16 +256,31 @@ def _has_exact_line(text: str, marker: str) -> bool:
     return any(ln.strip() == marker for ln in text.split('\n'))
 
 
+def _first_exact_line_index(lines: list[str], marker: str) -> int | None:
+    """The index of the first line that is exactly `marker` (ignoring surrounding whitespace)."""
+    for i, ln in enumerate(lines):
+        if ln.strip() == marker:
+            return i
+    return None
+
+
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     """Extract the updated source from a locked response, or None if it is malformed.
 
-    The lock counts only when `[[DESIGN:LOCKED]]` is a line of its own (not quoted in prose). Each
-    section runs to its named terminator (or the end of the text), so a marker-like line in the
-    content is preserved rather than silently truncating what is later written back.
+    The lock counts only when `[[DESIGN:LOCKED]]` is a line of its own (not quoted in prose) and
+    it precedes the payload: a marker that appears only inside the rewritten spec (after
+    `[[NEW:SPEC]]` / `[[NEW:TITLE]]`) is content, not the signal, so it cannot lock by itself.
+    Each section runs to its named terminator (or the end of the text), so a marker-like line in
+    the content is preserved rather than silently truncating what is later written back.
     """
-    if not _has_exact_line(text, '[[DESIGN:LOCKED]]'):
-        return None
     lines = text.split('\n')
+    lock_i = _first_exact_line_index(lines, '[[DESIGN:LOCKED]]')
+    if lock_i is None:
+        return None
+    first_payload = '[[NEW:SPEC]]' if kind == 'mrsh' else '[[NEW:TITLE]]'
+    payload_i = _first_exact_line_index(lines, first_payload)
+    if payload_i is not None and payload_i < lock_i:
+        return None
     if kind == 'mrsh':
         # A .mrsh has a single payload section, so it runs to the end of the response.
         spec = _section_to_end(lines, '[[NEW:SPEC]]')
@@ -413,6 +428,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                            current_repo)}]
     for _turn in range(max_turns):
         text = ''
+        pending = None
         for _round in range(REFINE_MAX_TOOL_ROUNDS):
             messages = await _maybe_compact_chat(messages, mapper, kind, spec_text,
                                                  debug=debug)
@@ -433,6 +449,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 {'role': 'user', 'content': block},
             ])
         print(f'\nmarsha>\n{text}\n')
+        if pending is not None:
+            # The turn's tool-round budget ran out with the last tool result still unprocessed:
+            # the assistant has not seen that result yet, so say so rather than prompt the user
+            # against an unfinished turn; the user's next message lets the assistant continue
+            # from that result on the following turn.
+            print('Note: the assistant used its tool budget this turn and has not yet '
+                  'processed the last tool result. Send any message (for example: go on) '
+                  'to let it continue.')
         if _has_exact_line(text, '[[DESIGN:LOCKED]]'):
             payload = parse_locked_output(text, kind)
             if payload is not None:
