@@ -267,17 +267,23 @@ def _first_exact_line_index(lines: list[str], marker: str) -> int | None:
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     """Extract the updated source from a locked response, or None if it is malformed.
 
-    The protocol is line-based and ordered: `[[DESIGN:LOCKED]]` must be a line of its own (not
-    quoted in prose) and must precede the payload — a marker that appears only inside the
-    rewritten source (after the payload markers) is content, not the signal, so it cannot lock
-    by itself. For an issue/ticket the title marker must precede the body marker, in the order
-    the protocol requests. Each section runs to its named terminator (or the end of the text),
-    so a marker-like line in the content is preserved rather than silently truncating what is
-    later written back.
+    The protocol is line-based, ordered, and mutually exclusive: `[[DESIGN:LOCKED]]` must be a
+    line of its own (not quoted in prose) and must precede the payload — a marker that appears
+    only inside the rewritten source (after the payload markers) is content, not the signal, so
+    it cannot lock by itself. For an issue/ticket the title marker must precede the body marker,
+    in the order the protocol requests. A response that also carries a `[[DESIGN:BAIL]]` line is
+    self-contradictory and is rejected. Each section runs to its named terminator (or the end of
+    the text), so a marker-like line in the content is preserved rather than silently truncating
+    what is later written back.
     """
     lines = text.split('\n')
     lock_i = _first_exact_line_index(lines, '[[DESIGN:LOCKED]]')
     if lock_i is None:
+        return None
+    # The lock and bail outcomes are mutually exclusive by protocol: a response carrying both
+    # is self-contradictory and must not lock (which would overwrite the source) — it is
+    # malformed, so the caller's re-emit correction takes over.
+    if _has_exact_line(text, '[[DESIGN:BAIL]]'):
         return None
     if kind == 'mrsh':
         spec_i = _first_exact_line_index(lines, '[[NEW:SPEC]]')
@@ -487,10 +493,12 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 return ChatResult('locked', payload, text)
             messages.append({'role': 'assistant', 'content': text})
             messages.append({'role': 'user', 'content': (
-                'That lock was malformed: it was missing the required '
+                'That lock was malformed: it must carry the required '
                 + ('[[NEW:SPEC]]' if kind == 'mrsh'
                    else '[[NEW:TITLE]] and [[NEW:BODY]]')
-                + ' section(s). Re-emit the locked design using the exact format requested.')})
+                + ' section(s), and it must carry no [[DESIGN:BAIL]] line (the lock and '
+                'bail outcomes are mutually exclusive). Re-emit the locked design using '
+                'the exact format requested.')})
             continue
         elif _has_exact_line(text, '[[DESIGN:BAIL]]'):
             return ChatResult('bail', None, text)

@@ -361,6 +361,15 @@ def test_parse_locked_output_body_before_title_is_rejected() -> None:
     assert refine.parse_locked_output(text, 'linear') is None
 
 
+def test_parse_locked_output_with_bail_line_is_rejected() -> None:
+    # The lock and bail outcomes are mutually exclusive: a response carrying both is
+    # self-contradictory and must not lock (which would overwrite the source).
+    text = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec\n[[DESIGN:BAIL]]\nstopped'
+    assert refine.parse_locked_output(text, 'mrsh') is None
+    text2 = '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT\n[[NEW:BODY]]\nB\n[[DESIGN:BAIL]]'
+    assert refine.parse_locked_output(text2, 'issue') is None
+
+
 def test_parse_locked_output_issue_empty_body_is_rejected() -> None:
     # An empty body would erase the issue/ticket's description when written back: it is
     # rejected rather than applied.
@@ -691,6 +700,21 @@ def test_run_refine_chat_retries_a_malformed_lock() -> None:
             read_line=lambda: 'x'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'fixed spec'}
+
+
+def test_run_refine_chat_lock_and_bail_together_retries() -> None:
+    # A response carrying both the lock and the bail lines is self-contradictory: it does not
+    # lock (no overwrite), the assistant is asked to re-emit, and a clean follow-up locks.
+    contradictory = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nspec\n[[DESIGN:BAIL]]'
+    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([contradictory, good])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'x'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': 'the spec'}
 
 
 def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
