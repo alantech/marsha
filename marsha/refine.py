@@ -756,6 +756,7 @@ async def run_refine(args: Any) -> int:
         # it, and anything else (including EOF) leaves the source untouched.
         print('The source would be updated as follows:')
         _print_payload(source.kind, result.payload)
+        print('Apply this update? (y/N)')
         answer = _read_line().strip().lower()
         if answer not in ('y', 'yes'):
             print('Not applied; the source was not modified.')

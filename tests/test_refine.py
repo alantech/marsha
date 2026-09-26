@@ -732,6 +732,7 @@ def test_run_refine_declined_confirmation_does_not_write(
         assert f.read() == 'original'  # a declined confirmation never writes
     cap = capsys.readouterr()
     assert 'NEW SPEC' in cap.out  # the rewrite is shown so the person can decide
+    assert 'Apply this update? (y/N)' in cap.out  # explicit question, default no
     assert 'Not applied' in cap.out
 
 
