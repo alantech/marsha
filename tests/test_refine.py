@@ -736,6 +736,38 @@ def test_run_refine_declined_confirmation_does_not_write(
     assert 'Not applied' in cap.out
 
 
+def test_run_refine_refuses_apply_when_source_changed_during_chat(
+        tmp_path: Any, capsys: Any) -> None:
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('original')
+
+    # The first read (at start) and the re-read (before applying) disagree: the source was
+    # edited elsewhere while the conversation ran.
+    loads = iter(['original', 'edited by someone else'])
+
+    async def fake_load(source: Any, cwd: Any) -> str:
+        return next(loads)
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        return refine.ChatResult('locked', {'spec': 'NEW SPEC'}, 'x')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_is_git_repo', new=AsyncMock(return_value=False)), \
+         patch.object(refine, 'load_spec', new=fake_load), \
+         patch.object(refine, '_read_line', new=lambda: 'y'):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    with open(p) as f:
+        assert f.read() == 'original'  # a stale rewrite is never applied
+    assert 'changed while the conversation was running' \
+        in capsys.readouterr().err
+
+
 def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:

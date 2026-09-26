@@ -761,6 +761,22 @@ async def run_refine(args: Any) -> int:
         if answer not in ('y', 'yes'):
             print('Not applied; the source was not modified.')
             return 1
+        # The conversation can run for minutes, during which the source (an issue body, a
+        # ticket description, a file) may be edited elsewhere. The rewrite was built from the
+        # version loaded when refine started, so applying it now would silently clobber the
+        # newer content: re-read and compare at the last moment before writing, and fail
+        # closed if the source cannot be verified.
+        try:
+            current_text = await load_spec(source, cwd)
+        except Exception as e:
+            print(
+                f'error: could not verify the source is unchanged: {e}', file=sys.stderr)
+            return 1
+        if current_text != spec_text:
+            print('The source changed while the conversation was running; the rewrite was '
+                  'built from the older version. Re-run refine to restart from the current '
+                  'source.', file=sys.stderr)
+            return 1
         try:
             await _apply(source, result.payload, cwd)
         except Exception as e:
