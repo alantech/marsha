@@ -1498,6 +1498,26 @@ def test_run_refine_chat_pending_lock_hides_payload(capsys: Any) -> None:
     assert '[[DESIGN:LOCKED]]' not in out
 
 
+def test_run_refine_chat_followup_malformed_lock_hides_payload(capsys: Any) -> None:
+    # A malformed lock in the final tool-result follow-up can still carry proposal content
+    # (the parse failed, the text did not): like any un-accepted lock, its payload stays off
+    # the screen — only the narration is shown.
+    cmd = 'Looking.\n$ git grep needle'
+    malformed = 'Preamble text.\n[[DESIGN:LOCKED]]\nsecret malformed payload'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(
+                          ['Question turn.'] + [cmd] * 10 + [malformed])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=2, read_line=lambda: 'x'))
+    assert res.status == 'timeout'
+    out = capsys.readouterr().out
+    assert 'secret malformed payload' not in out
+    assert '[[DESIGN:LOCKED]]' not in out
+    assert 'Preamble text.' in out  # the narration is kept
+
+
 def test_run_refine_chat_lock_with_pending_command_does_not_lock() -> None:
     # A response that ends with a tool command is a tool request, not a final artifact: even if
     # it carries a lock line and payload it must not lock and write the source (and, for a .mrsh,

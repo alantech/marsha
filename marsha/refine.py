@@ -683,13 +683,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         if outcome is not None:
                             return outcome
                         continue
-                _print_turn(text)
+                _print_turn_hiding_lock_payload(text, kind)
             locked_signal = _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind)
             if locked_signal:
                 # A well-formed lock was handled (and printed) above; this is a malformed
-                # one (a premature one was kept from the screen and nudged): the raw text
-                # is already on screen, so nudge the assistant to fix it.
+                # one (a premature one was kept from the screen and nudged): only its
+                # narration is on screen (the payload never is), so nudge the assistant to
+                # fix it.
                 messages.append({'role': 'assistant', 'content': text})
                 messages.append({'role': 'user', 'content': (
                     'That lock was malformed: it must carry the required '
