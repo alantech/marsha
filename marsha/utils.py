@@ -88,43 +88,48 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
     if max_bytes is None or input is not None:
         read = stream.communicate(input)
     else:
-        # Bounded: stream stdout in chunks and fail at max_bytes, so an oversized output is
-        # refused before it is buffered into memory (a caller's size guard must get the
-        # chance to run on the size, not after the whole payload is in RAM).
+        # Bounded: stream both pipes in chunks and fail at max_bytes of combined output, so an
+        # oversized response is refused before it is buffered into memory (a caller's size
+        # guard must get the chance to run on the size, not after the whole payload is in RAM).
         chunks: list[bytes] = []
+        err_chunks: list[bytes] = []
         total = 0
 
         async def _bounded() -> tuple[bytes, bytes]:
-            nonlocal total
             assert stream.stdout is not None and stream.stderr is not None
-            # Drain stderr concurrently: reading it only after stdout would deadlock on a
-            # child that fills the stderr pipe while keeping stdout open (it would block on
-            # the full pipe and never close stdout).
-            err_task = asyncio.ensure_future(stream.stderr.read())
-            try:
+
+            # Both pipes are drained concurrently: a child that fills one pipe while keeping
+            # the other open would otherwise block on the full pipe and never close the
+            # other, deadlocking a read that only ever looked at one of them.
+            async def _drain(reader: asyncio.StreamReader, sink: list[bytes]) -> None:
+                nonlocal total
                 while True:
-                    chunk = await stream.stdout.read(65536)
+                    chunk = await reader.read(65536)
                     if not chunk:
                         break
                     total += len(chunk)
                     if total > max_bytes:
-                        err_task.cancel()
                         raise Exception(
                             f'command output exceeds the {max_bytes}-byte limit')
-                    chunks.append(chunk)
-                err = await err_task
+                    sink.append(chunk)
+
+            out_task = asyncio.ensure_future(_drain(stream.stdout, chunks))
+            err_task = asyncio.ensure_future(_drain(stream.stderr, err_chunks))
+            try:
+                await asyncio.gather(out_task, err_task)
             except BaseException:
-                # Any failure (overflow, outer cancellation): if the stderr drain is still
-                # pending, cancel and reap it so it does not linger as an unhandled task.
-                if not err_task.done():
-                    err_task.cancel()
-                    try:
-                        await err_task
-                    except BaseException:
-                        pass
+                # Any failure (overflow, outer cancellation): cancel and reap the drain that
+                # is still running so it does not linger as an unhandled task.
+                for task in (out_task, err_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except BaseException:
+                            pass
                 raise
             await stream.wait()
-            return b''.join(chunks), err
+            return b''.join(chunks), b''.join(err_chunks)
 
         read = _bounded()
     try:

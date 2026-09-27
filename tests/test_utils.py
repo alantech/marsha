@@ -56,11 +56,30 @@ def test_run_subprocess_bounded_drains_stderr_concurrently() -> None:
         proc = await asyncio.create_subprocess_exec(
             'sh', '-c', 'head -c 200000 /dev/zero 1>&2; printf ok',
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        return await run_subprocess(proc, timeout=15, max_bytes=10000)
+        return await run_subprocess(proc, timeout=15, max_bytes=300000)
 
     out, err = asyncio.run(scenario())
     assert out == 'ok'
     assert len(err) == 200000
+
+
+def test_run_subprocess_bounded_stderr_overflow_fails() -> None:
+    # stderr is bounded too (the cap covers the combined output): a child that writes over
+    # the limit to stderr, with little stdout, fails with the overflow error and is reaped
+    # instead of buffering unbounded memory.
+    async def scenario() -> tuple[str, int | None]:
+        proc = await asyncio.create_subprocess_exec(
+            'sh', '-c', 'head -c 200000 /dev/zero 1>&2; printf ok',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            await run_subprocess(proc, timeout=15, max_bytes=10000)
+            return ('ok', None)
+        except Exception:
+            return ('overflow', proc.returncode)
+
+    kind, returncode = asyncio.run(scenario())
+    assert kind == 'overflow'
+    assert returncode is not None  # reaped: returncode is set, not a lingering zombie
 
 
 def test_run_subprocess_overflow_fails_and_reaps() -> None:
