@@ -635,7 +635,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     if outcome is not None:
                         return outcome
                     continue
-            _print_turn(text)
+            # A lock carried by a still-tool-requesting response is in-progress (the tool
+            # result may change it): its payload stays off the screen with the same rule as
+            # a premature lock — the narration is shown, the proposal is not.
+            _print_turn_hiding_lock_payload(text, kind)
             if pending is not None:
                 # The turn's tool-round budget ran out with the last tool result still
                 # unprocessed: the assistant has not seen that result yet. Say so, rather
@@ -662,7 +665,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
                 if tools.extract_pending_command(text) is not None:
-                    _print_turn(text)
+                    _print_turn_hiding_lock_payload(text, kind)
                     return ChatResult('timeout', None,
                                       'The final turn ended on an unprocessed tool request; '
                                       'the source was not modified.')
@@ -796,6 +799,18 @@ def _render_markdown(text: str) -> None:
 def _print_turn(text: str) -> None:
     print('\nmarsha>')
     _render_markdown(text)
+
+
+def _print_turn_hiding_lock_payload(text: str, kind: str) -> None:
+    """Show a turn whose text may carry a lock: the narration (the preamble before the lock
+    line) is shown, but the payload never is — a proposal is shown only as a final, accepted
+    lock, never as the raw text of an in-progress (still tool-requesting) turn."""
+    if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
+        preamble = _preamble_before_lock(text).strip()
+        if preamble:
+            _print_turn(preamble)
+        return
+    _print_turn(text)
 
 
 def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:

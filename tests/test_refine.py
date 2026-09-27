@@ -1481,6 +1481,23 @@ def test_run_refine_chat_overflow_returns_handled_result() -> None:
     assert 'context window' in res.detail
 
 
+def test_run_refine_chat_pending_lock_hides_payload(capsys: Any) -> None:
+    # A lock that still ends with a tool command is in-progress (the tool result may change
+    # it): the proposal payload must not appear on screen, only the narration — the same
+    # consent rule as a premature lock.
+    lock_cmd = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nsecret proposal body\n$ git grep needle'
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([lock_cmd])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=1, read_line=lambda: 'x'))
+    assert res.status == 'timeout'
+    out = capsys.readouterr().out
+    assert 'secret proposal body' not in out
+    assert '[[DESIGN:LOCKED]]' not in out
+
+
 def test_run_refine_chat_lock_with_pending_command_does_not_lock() -> None:
     # A response that ends with a tool command is a tool request, not a final artifact: even if
     # it carries a lock line and payload it must not lock and write the source (and, for a .mrsh,

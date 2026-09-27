@@ -49,6 +49,20 @@ def test_run_subprocess_bounded_output() -> None:
     assert err == ''
 
 
+def test_run_subprocess_bounded_drains_stderr_concurrently() -> None:
+    # stderr is drained while stdout is read: a child that fills the stderr pipe (well over
+    # the 64KB buffer) while still writing stdout must not deadlock the bounded reader.
+    async def scenario() -> tuple[str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            'sh', '-c', 'head -c 200000 /dev/zero 1>&2; printf ok',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        return await run_subprocess(proc, timeout=15, max_bytes=10000)
+
+    out, err = asyncio.run(scenario())
+    assert out == 'ok'
+    assert len(err) == 200000
+
+
 def test_run_subprocess_overflow_fails_and_reaps() -> None:
     # ...and output over the limit is refused (before it is buffered) with the child killed
     # and reaped, so an oversized remote response cannot exhaust memory.

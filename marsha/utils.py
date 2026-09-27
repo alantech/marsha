@@ -97,16 +97,32 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
         async def _bounded() -> tuple[bytes, bytes]:
             nonlocal total
             assert stream.stdout is not None and stream.stderr is not None
-            while True:
-                chunk = await stream.stdout.read(65536)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise Exception(
-                        f'command output exceeds the {max_bytes}-byte limit')
-                chunks.append(chunk)
-            err = await stream.stderr.read()
+            # Drain stderr concurrently: reading it only after stdout would deadlock on a
+            # child that fills the stderr pipe while keeping stdout open (it would block on
+            # the full pipe and never close stdout).
+            err_task = asyncio.ensure_future(stream.stderr.read())
+            try:
+                while True:
+                    chunk = await stream.stdout.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        err_task.cancel()
+                        raise Exception(
+                            f'command output exceeds the {max_bytes}-byte limit')
+                    chunks.append(chunk)
+                err = await err_task
+            except BaseException:
+                # Any failure (overflow, outer cancellation): if the stderr drain is still
+                # pending, cancel and reap it so it does not linger as an unhandled task.
+                if not err_task.done():
+                    err_task.cancel()
+                    try:
+                        await err_task
+                    except BaseException:
+                        pass
+                raise
             await stream.wait()
             return b''.join(chunks), err
 
