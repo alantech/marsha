@@ -310,7 +310,7 @@ When a decision needs a concrete value — an exact string, message, number, for
 
 You may be asked a question back — to weigh options, clarify your question, or answer something — answer it, then continue. Keep going until both of you are satisfied the specification is fully specified.
 
-When every open ambiguity is resolved, check whether the person's latest message already amounts to a go-ahead (for example, asking to see the specification). If not, end your turn with an explicit question asking whether they are ready for you to propose the updated specification — a question, not a statement of readiness — and wait for their answer. Once they have signalled a go-ahead, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. The session confirms directly with the person before showing the proposal: if they are not ready, their objection arrives as the next message — resolve it, and emit the lock again once everything is settled. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
+When every open ambiguity is resolved, signal that the design is locked by emitting a line that is exactly [[DESIGN:LOCKED]] and then the updated source, in the exact format requested below. Do not first ask the person whether they are ready to see the proposal — the session asks them directly before showing it, and that is the only readiness question in the flow. If they decline, their objection arrives as the next message — resolve it, and emit the lock again once everything is settled. If the person asks you to stop, or you determine the specification cannot be resolved, emit a line that is exactly [[DESIGN:BAIL]] and a short note instead. Do not emit [[DESIGN:LOCKED]] until you are confident the specification is fully specified.
 '''
 
 
@@ -609,26 +609,17 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     {'role': 'assistant', 'content': text},
                     {'role': 'user', 'content': block},
                 ])
-            # A well-formed lock is shown at most once, as a clean rendered proposal (the raw
-            # protocol text — markers plus payload — is never shown), and the confirmation
-            # step after the chat does not repeat the payload. A lock is valid only once the
-            # user has had a turn: the first assistant message precedes any user reply, where
-            # the readiness question is asked instead of locking — a premature lock is not
-            # shown at all (its payload is the proposal, which must not appear before the
-            # go-ahead), so it stays in the transcript with a nudge to ask instead. And the
-            # model's readiness is not the user's: the proposal is shown only after the
-            # person accepts it directly (_propose_or_continue), so a lock following a
-            # non-affirmative reply cannot present a rewrite the person did not ask to see.
+            # A well-formed lock is shown at most once, as a clean rendered proposal (the
+            # raw protocol text — markers plus payload — is never shown), and the
+            # confirmation step after the chat does not repeat the payload. The proposal is
+            # shown only after the person accepts it directly (_propose_or_continue) — the
+            # harness's gate is the flow's single readiness question (the model is
+            # instructed not to ask one itself), so a lock on any turn, including the
+            # first, goes through the gate rather than presenting a rewrite the person did
+            # not ask to see.
             if (pending is None and _signal_before_payload(
                     text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                 payload = parse_locked_output(text, kind)
-                if turn == 0:
-                    # Premature, well-formed or malformed: the response may carry the
-                    # proposal, which must not appear before the person has had a turn to
-                    # give the go-ahead. Keep it in the transcript and nudge the model to
-                    # ask instead.
-                    _premature_lock_nudge(text, messages)
-                    continue
                 if payload is not None:
                     outcome = _propose_or_continue(text, kind, payload, messages,
                                                    read_line)
@@ -636,8 +627,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         return outcome
                     continue
             # A lock carried by a still-tool-requesting response is in-progress (the tool
-            # result may change it): its payload stays off the screen with the same rule as
-            # a premature lock — the narration is shown, the proposal is not.
+            # result may change it): its payload stays off the screen — the narration is
+            # shown, the proposal is not.
             _print_turn_hiding_lock_payload(text, kind)
             if pending is not None:
                 # The turn's tool-round budget ran out with the last tool result still
@@ -671,12 +662,6 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                       'the source was not modified.')
                 if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                     payload = parse_locked_output(text, kind)
-                    if turn == 0:
-                        # Premature (no user turn yet), well-formed or malformed: not
-                        # shown, nudged; the final turn has no next turn to ask in, so the
-                        # session times out.
-                        _premature_lock_nudge(text, messages)
-                        continue
                     if payload is not None:
                         outcome = _propose_or_continue(text, kind, payload,
                                                        messages, read_line)
@@ -687,8 +672,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             locked_signal = _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind)
             if locked_signal:
-                # A well-formed lock was handled (and printed) above; this is a malformed
-                # one (a premature one was kept from the screen and nudged): only its
+                # A well-formed lock was handled above; this is a malformed one: only its
                 # narration is on screen (the payload never is), so nudge the assistant to
                 # fix it.
                 messages.append({'role': 'assistant', 'content': text})
@@ -827,17 +811,6 @@ def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
 # Declines to the proposal gate that carry no objection of their own: these (and an empty
 # reply) get a follow-up read for the objection; anything else is the objection itself.
 _BARE_DECLINES = {'', 'n', 'no', 'nope', 'not yet', 'not ready'}
-
-
-def _premature_lock_nudge(text: str, messages: list[dict[str, str]]) -> None:
-    # A well-formed lock before the person's first turn: the payload is the proposal, and
-    # the proposal must not appear before the person has had a chance to give the go-ahead.
-    # The lock stays in the transcript (the model can see what it emitted) with a nudge to
-    # ask instead of locking; it is not shown on screen.
-    messages.append({'role': 'assistant', 'content': text})
-    messages.append({'role': 'user', 'content': (
-        'That lock is premature: the person has not yet had a turn to give the go-ahead. '
-        'Ask the readiness question instead of locking, and wait for their answer.')})
 
 
 def _propose_or_continue(text: str, kind: str, payload: dict[str, str],

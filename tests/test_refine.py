@@ -1073,12 +1073,12 @@ def test_run_refine_apply_failure_reports_error(tmp_path: Any, capsys: Any) -> N
 # --- run_refine_chat (the multi-turn loop, mocked mapper) ---------------------
 
 
-def test_run_refine_chat_rejects_a_lock_before_any_user_reply(
+def test_run_refine_chat_first_turn_lock_goes_through_the_gate(
         capsys: Any) -> None:
-    # A lock on the very first turn (before any user reply) is neither shown nor accepted:
-    # the payload is the proposal, and the proposal must not appear before the person has
-    # had a turn to give the go-ahead. The model is nudged to ask instead, and when it
-    # re-locks on a later turn the proposal is shown only after the user accepts it.
+    # A lock on the very first turn (the model believes the spec is already resolved) is
+    # still gated: the session asks the person directly before showing the proposal, and
+    # the model itself is instructed not to ask a readiness question — the gate is the
+    # flow's only one.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\nthe full spec'
     reads: list[str] = []
 
@@ -1087,17 +1087,17 @@ def test_run_refine_chat_rejects_a_lock_before_any_user_reply(
         return 'y'
 
     with patch.object(refine, 'get_mapper',
-                      new=lambda *a, **k: _scripted_mapper([locked, locked])):
+                      new=lambda *a, **k: _scripted_mapper([locked])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=2,
             read_line=read))
     assert res.status == 'locked'
     assert res.payload == {'spec': '# Locked spec\nthe full spec'}
-    assert reads == ['y']  # the premature lock prompted nobody; only the acceptance
+    assert reads == ['y']  # the single readiness question, at the gate
     out = capsys.readouterr().out
     # The proposal appears exactly once: the rendered payload at the acceptance, never the
-    # premature lock's raw text.
+    # lock's raw text.
     assert out.count('the full spec') == 1
 
 
@@ -1146,8 +1146,8 @@ def test_run_refine_chat_retries_a_malformed_lock(capsys: Any) -> None:
             read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'fixed spec'}
-    # The premature (first-turn) lock — malformed or not — is never shown: no raw protocol
-    # text reaches the screen before the user has had a turn.
+    # The malformed first-turn lock is never shown: no raw protocol text reaches the screen,
+    # and the corrected proposal appears only once the user accepts it.
     assert '[[DESIGN:LOCKED]]' not in capsys.readouterr().out
 
 
@@ -1166,7 +1166,7 @@ def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
     out = capsys.readouterr().out
-    assert '[[DESIGN:LOCKED]]' not in out  # the premature lock's payload stays hidden
+    assert '[[DESIGN:LOCKED]]' not in out  # the unparseable lock's payload stays hidden
     assert '[[DESIGN:BAIL]]' not in out
 
 
@@ -1293,9 +1293,8 @@ def test_run_refine_chat_declined_proposal_keeps_refining(capsys: Any) -> None:
     # not shown and the conversation continues with their objection; a later lock is accepted
     # only once the user accepts the proposal.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
-    # Replies, in order: to the next turn, the declined proposal, the objection behind the
-    # decline, and the accepted proposal. (The premature first-turn lock is not shown and
-    # prompts nobody.)
+    # Replies, in order: the declined proposal (the gate's objection), an ordinary next-turn
+    # reply, the declined proposal again (the gate's objection), and the accepted proposal.
     lines = iter(['x', 'n', 'make the error message friendlier', 'y'])
 
     def read_line() -> str:
@@ -1320,7 +1319,9 @@ def test_run_refine_chat_decline_with_inline_objection(capsys: Any) -> None:
     # friendlier") is not discarded: the reply itself becomes the objection, and the user is
     # not prompted for it a second time.
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
-    lines = iter(['x', 'no, make the error message friendlier', 'y'])
+    # The first reply is the gate's: the decline with its objection in the same text. The
+    # later replies are an ordinary next-turn reply and the accepted proposal.
+    lines = iter(['no, make the error message friendlier', 'x', 'y'])
 
     def read_line() -> str:
         return next(lines)
@@ -1483,8 +1484,8 @@ def test_run_refine_chat_overflow_returns_handled_result() -> None:
 
 def test_run_refine_chat_pending_lock_hides_payload(capsys: Any) -> None:
     # A lock that still ends with a tool command is in-progress (the tool result may change
-    # it): the proposal payload must not appear on screen, only the narration — the same
-    # consent rule as a premature lock.
+    # it): the proposal payload must not appear on screen, only the narration — like any
+    # un-accepted lock, it is shown only once the user accepts it.
     lock_cmd = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nsecret proposal body\n$ git grep needle'
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([lock_cmd])):
