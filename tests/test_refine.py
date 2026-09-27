@@ -583,6 +583,29 @@ def test_run_refine_refuses_special_file_source(tmp_path: Any, capsys: Any) -> N
     assert 'regular file' in capsys.readouterr().err
 
 
+def test_run_refine_refuses_symlink_source(tmp_path: Any, capsys: Any) -> None:
+    # A symlink to a regular file passes os.stat's S_ISREG, but the apply step writes through
+    # the path — to the symlink's target, which may be outside the intended spec. The guard
+    # uses lstat, so a symlinked source is refused and its target is untouched.
+    real = tmp_path / 'real.mrsh'
+    real.write_text('original')
+    link = str(tmp_path / 'link.mrsh')
+    os.symlink(real, link)
+
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
+        raise AssertionError('a symlinked source must be refused before it is read')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    with patch.object(refine, 'load_spec_with_fields', new=fake_load), \
+         patch.object(refine, 'analyze_spec', new=fake_analyze):
+        rc = asyncio.run(refine.run_refine(_args(source=link)))
+    assert rc == 1
+    assert 'regular file' in capsys.readouterr().err
+    assert real.read_text() == 'original'  # the target was never read or written
+
+
 def test_run_refine_chat_failure_is_a_handled_error(tmp_path: Any, capsys: Any) -> None:
     # A provider/API failure mid-conversation (e.g. an exhausted request budget) exits as a
     # handled command error, not an unhandled traceback.

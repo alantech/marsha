@@ -942,15 +942,19 @@ async def run_refine(args: Any) -> int:
     if source.kind == 'mrsh':
         # Refuse a source that is not a regular file before reading anything: a FIFO or device
         # can report size zero (which would bypass the byte guard below) yet yield an unbounded
-        # stream, and a named pipe can block the read indefinitely. A path that cannot be
-        # stat'd (e.g. missing) is skipped here and reported by the load below.
+        # stream, and a named pipe can block the read indefinitely. lstat (not stat): a symlink
+        # to a regular file would pass stat, and the apply step writes through the path —
+        # potentially to a target outside the intended spec — so a symlinked source is refused,
+        # not followed. A path that cannot be stat'd (e.g. missing) is skipped here and
+        # reported by the load below.
         try:
-            source_stat = os.stat(cast(str, source.path))
+            source_stat = os.lstat(cast(str, source.path))
         except OSError:
             source_stat = None
         if source_stat is not None:
             if not stat.S_ISREG(source_stat.st_mode):
-                print('error: the source must be a regular file, not a pipe or device.',
+                print('error: the source must be a regular file, not a symlink, pipe, or '
+                      'device.',
                       file=sys.stderr)
                 return 1
             if not check_only and source_stat.st_size > REFINE_SPEC_LIMIT * 4:
