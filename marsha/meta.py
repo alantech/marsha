@@ -158,25 +158,30 @@ def _top_level_sections(file: str) -> list[str]:
     # preamble first, then the text after each top-level heading's '#'. Splitting on lines
     # rather than characters: a "##" (or deeper) heading stays inside the current section,
     # and a '#' inside text (an issue reference, a comment in an example) does not start a
-    # new section. A "# " line inside a fenced code block is code, not a heading.
+    # new section. A "# " line inside a fenced code block is code, not a heading; per
+    # CommonMark, a fence closes only on a line of the same character, at least as long as
+    # the opening fence (so a four-backtick fence can contain a triple-backtick line).
     sections: list[str] = []
     current: list[str] = []
-    fence = ''
+    fence_char = ''
+    fence_len = 0
     for line in file.split('\n'):
         stripped = line.lstrip()
-        if fence:
-            if stripped.startswith(fence):
-                fence = ''
+        if fence_char:
+            if re.fullmatch(f'{fence_char}{{{fence_len},}}', stripped):
+                fence_char = ''
             current.append(line)
             continue
-        if stripped.startswith('```') or stripped.startswith('~~~'):
-            fence = stripped[:3]
-            current.append(line)
-            continue
-        m = re.match(r'^( {0,3})# ', line)
+        m = re.match(r'(`{3,}|~{3,})', stripped)
         if m:
+            fence_char = m.group(1)[0]
+            fence_len = len(m.group(1))
+            current.append(line)
+            continue
+        h = re.match(r'^( {0,3})# ', line)
+        if h:
             sections.append('\n'.join(current))
-            current = [line[len(m.group(1)) + 1:]]
+            current = [line[len(h.group(1)) + 1:]]
             continue
         current.append(line)
     sections.append('\n'.join(current))

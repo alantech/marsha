@@ -94,6 +94,26 @@ def test_top_level_sections_ignores_headings_in_code_fences() -> None:
     assert '# func fake' in sections[1]  # fence content stays in the section
 
 
+def test_top_level_sections_long_fence_contains_short_fence() -> None:
+    # A four-backtick fence can contain a triple-backtick line (CommonMark: the closing fence
+    # must be at least as long as the opening one): the inner line is content, and a "# "
+    # code line inside the fence does not start a section.
+    spec = ('# func add(a: int, b: int): int\n'
+            'Adds two integers together and returns the sum. Padding padding padding '
+            'padding padding padding padding padding padding padding padding padding.\n'
+            '````\n'
+            '```\n'
+            '# func fake(x: int): int\n'
+            '```\n'
+            '````\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0')
+    sections = meta._top_level_sections(spec)
+    assert len(sections) == 2  # the inner "```" line did not close the "````" fence
+    functions, _, _ = meta.extract_functions_and_types(spec)
+    assert len(functions) == 1  # the fenced "# func fake" line is code, not a section
+
+
 def test_top_level_sections_leading_spaces_still_delimit() -> None:
     # Up to three leading spaces still mark a heading (CommonMark); the old character split
     # treated any '#' as a boundary, so this keeps the heading shape recognizable.
