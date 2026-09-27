@@ -135,30 +135,33 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
     try:
         stdout, stderr = await asyncio.wait_for(read, timeout)
     except asyncio.exceptions.TimeoutError as e:
-        try:
-            stream.kill()
-        except OSError:
-            # Ignore 'no such process' error
-            pass
-        # Reap the killed child and close its pipes so it does not linger as a zombie (or leak
-        # its transports) until garbage collection; ignore a follow-up failure if it is
-        # already gone.
-        try:
-            await stream.wait()
-        except Exception:
-            pass
+        await _kill_and_reap(stream)
         # Chain the original TimeoutError so callers can tell a timeout apart from other errors.
         raise Exception('run_subprocess timeout...') from e
+    except asyncio.exceptions.CancelledError:
+        # A cancellation of the calling task is a failure of the read too: without the same
+        # cleanup the child would be left running.
+        await _kill_and_reap(stream)
+        raise
     except Exception:
         # An overflow (or any read failure): the child is no longer wanted — kill and reap it
         # the same way before the error propagates.
-        try:
-            stream.kill()
-        except OSError:
-            pass
-        try:
-            await stream.wait()
-        except Exception:
-            pass
+        await _kill_and_reap(stream)
         raise
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))
+
+
+async def _kill_and_reap(stream: Process) -> None:
+    """Kill a child that is no longer wanted and reap it so it does not linger as a zombie
+    (or leak its transports); a follow-up failure (already gone) is ignored. The kill is
+    synchronous, so it runs even when a cancellation makes the reap await fail — in that
+    case the transport's own exit handling reaps the already-dead child."""
+    try:
+        stream.kill()
+    except OSError:
+        # Ignore 'no such process' error
+        pass
+    try:
+        await stream.wait()
+    except BaseException:
+        pass

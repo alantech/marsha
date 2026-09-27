@@ -36,6 +36,32 @@ def test_run_subprocess_returns_streams() -> None:
     assert err == ''
 
 
+def test_run_subprocess_cancellation_kills_the_child() -> None:
+    # Cancelling the read (not just timing it out) must also kill the child: a cancelled
+    # refine/review task must not leave the CLI subprocess running.
+    async def scenario() -> int | None:
+        proc = await asyncio.create_subprocess_exec(
+            'sleep', '30', stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        task = asyncio.ensure_future(
+            run_subprocess(proc, timeout=30, max_bytes=1000))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # Give the transport a moment to reap the killed child.
+        for _ in range(50):
+            if proc.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        return proc.returncode
+
+    returncode = asyncio.run(scenario())
+    assert returncode is not None  # the child was killed, not left running
+
+
 def test_run_subprocess_bounded_output() -> None:
     # With max_bytes, output within the limit is returned in full...
     async def scenario() -> tuple[str, str]:
