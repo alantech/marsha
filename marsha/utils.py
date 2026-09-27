@@ -59,12 +59,18 @@ def write_file(filename: str, content: str | bytes, mode: str = 'w') -> None:
 
 
 def write_file_no_follow(filename: str, content: str) -> None:
-    # Write `content` to `filename`, refusing to follow a symlink at the final path component
-    # (O_NOFOLLOW). For writes to a user-named path whose symlink-ness was checked earlier in
-    # the run: the check and the write are not atomic, so a path swapped for a symlink in
-    # between must not be followed — the write would overwrite the symlink's target instead.
-    fd = os.open(filename, os.O_WRONLY | os.O_CREAT |
-                 os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    # Write `content` to `filename`, refusing to follow a symlink at the final path component.
+    # For writes to a user-named path whose symlink-ness was checked earlier in the run: the
+    # check and the write are not atomic, so a path swapped for a symlink in between must not
+    # be followed — the write would overwrite the symlink's target instead. On Unix the open
+    # itself carries O_NOFOLLOW (the refusal is atomic); Windows has no O_NOFOLLOW, so the
+    # symlink is refused up front there.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    elif os.path.islink(filename):
+        raise OSError(f'refusing to write through a symlink: {filename}')
+    fd = os.open(filename, flags, 0o644)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(content)
 

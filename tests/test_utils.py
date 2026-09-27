@@ -145,3 +145,23 @@ def test_write_file_no_follow_refuses_symlink(tmp_path: Any) -> None:
     regular = tmp_path / 'regular.txt'
     write_file_no_follow(str(regular), 'hello')
     assert regular.read_text() == 'hello'
+
+
+def test_write_file_no_follow_windows_fallback_refuses_symlink(
+        tmp_path: Any, monkeypatch: Any) -> None:
+    # Windows has no O_NOFOLLOW: the fallback refuses a symlink up front (and still writes
+    # regular paths).
+    target = tmp_path / 'target.txt'
+    target.write_text('target content')
+    link = tmp_path / 'link.txt'
+    os.symlink(target, link)
+    monkeypatch.delattr(os, 'O_NOFOLLOW', raising=False)
+    try:
+        write_file_no_follow(str(link), 'rewrite')
+        raise AssertionError('a symlinked path must not be written through')
+    except OSError:
+        pass
+    assert target.read_text() == 'target content'
+    regular = tmp_path / 'regular.txt'
+    write_file_no_follow(str(regular), 'hello')
+    assert regular.read_text() == 'hello'
