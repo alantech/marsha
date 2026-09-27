@@ -67,6 +67,19 @@ class _ScriptedMapper:
         return self.responses[-1]
 
 
+def _mrsh_spec(marker: str) -> str:
+    # A minimal spec that is a valid .mrsh (one func section with a description and two usage
+    # examples — the shape the .mrsh format rules require, the same parser compile runs): the
+    # [[NEW:SPEC]] payload the locking chat tests emit, with `marker` in the description for
+    # the assertions to find.
+    return ('# func add(a: int, b: int): int\n'
+            f'Adds two integers together and returns the sum. {marker} '
+            'The rest of the description pads it past the minimum length rule.\n'
+            '\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0')
+
+
 # --- parse_issue_ref ----------------------------------------------------------
 
 
@@ -505,8 +518,13 @@ def test_run_refine_check_analyzes_full_oversized_source(
     # rewrite guard does not apply.
     p = str(tmp_path / 'spec.mrsh')
     size = refine.REFINE_SPEC_LIMIT + 1
+    # A valid .mrsh of exactly `size` chars (the oversized content must still pass the format
+    # gate so the test exercises the analysis, not the format rejection).
+    prefix = ('# func add(a: int, b: int): int\n'
+              'Adds two integers together and returns the sum. ')
+    suffix = '\n\n* add(1, 2) -> 3\n* add(-1, 1) -> 0'
     with open(p, 'w') as f:
-        f.write('x' * size)
+        f.write(prefix + 'x' * (size - len(prefix) - len(suffix)) + suffix)
     seen: dict[str, int] = {}
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
@@ -612,7 +630,7 @@ def test_run_refine_check_mrsh_reports_and_never_mutates(
         tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
-        f.write('original spec')
+        f.write(_mrsh_spec('original spec'))
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': ['a1', 'a2'], 'errors': []}
@@ -622,13 +640,13 @@ def test_run_refine_check_mrsh_reports_and_never_mutates(
     assert rc == 1
     assert '2 open ambiguity' in capsys.readouterr().out
     with open(p) as f:
-        assert f.read() == 'original spec'  # --check never writes back
+        assert f.read() == _mrsh_spec('original spec')  # --check never writes back
 
 
 def test_run_refine_check_mrsh_locked(tmp_path: Any, capsys: Any) -> None:
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
-        f.write('spec')
+        f.write(_mrsh_spec('the spec'))
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': [], 'errors': []}
@@ -642,6 +660,23 @@ def test_run_refine_check_mrsh_locked(tmp_path: Any, capsys: Any) -> None:
     # clean for the gate) so a slow run does not look like a hang.
     assert f'Reading {p}...' in cap.err
     assert 'Analyzing the spec for open ambiguities...' in cap.err
+
+
+def test_run_refine_check_mrsh_format_invalid_fails_before_analysis(
+        tmp_path: Any, capsys: Any) -> None:
+    # A .mrsh the format parser rejects can never compile, so --check reports the format
+    # failure without paying for the LLM analysis.
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write('A free-form document with no func sections.')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        raise AssertionError('a non-compilable .mrsh must fail before the analysis')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze):
+        rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
+    assert rc == 1
+    assert 'No functions or types found in file' in capsys.readouterr().err
 
 
 def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
@@ -1079,7 +1114,7 @@ def test_run_refine_chat_first_turn_lock_goes_through_the_gate(
     # still gated: the session asks the person directly before showing the proposal, and
     # the model itself is instructed not to ask a readiness question — the gate is the
     # flow's only one.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\nthe full spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the full spec')
     reads: list[str] = []
 
     def read() -> str:
@@ -1093,7 +1128,7 @@ def test_run_refine_chat_first_turn_lock_goes_through_the_gate(
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=2,
             read_line=read))
     assert res.status == 'locked'
-    assert res.payload == {'spec': '# Locked spec\nthe full spec'}
+    assert res.payload == {'spec': _mrsh_spec('the full spec')}
     assert reads == ['y']  # the single readiness question, at the gate
     out = capsys.readouterr().out
     # The proposal appears exactly once: the rendered payload at the acceptance, never the
@@ -1137,7 +1172,7 @@ def test_run_refine_chat_times_out() -> None:
 
 def test_run_refine_chat_retries_a_malformed_lock(capsys: Any) -> None:
     malformed = '[[DESIGN:LOCKED]]\nI locked it but forgot the section'
-    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nfixed spec'
+    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('fixed spec')
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([malformed, good])):
         res = asyncio.run(refine.run_refine_chat(
@@ -1145,10 +1180,31 @@ def test_run_refine_chat_retries_a_malformed_lock(capsys: Any) -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'y'))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'fixed spec'}
+    assert res.payload == {'spec': _mrsh_spec('fixed spec')}
     # The malformed first-turn lock is never shown: no raw protocol text reaches the screen,
     # and the corrected proposal appears only once the user accepts it.
     assert '[[DESIGN:LOCKED]]' not in capsys.readouterr().out
+
+
+def test_run_refine_chat_rejects_a_noncompilable_mrsh_lock(capsys: Any) -> None:
+    # A .mrsh rewrite must be a .mrsh: a lock whose spec the format parser rejects (here, a
+    # free-form document instead of func sections) is never gated or shown — the parser's
+    # error is fed back to the assistant, and only the corrected lock reaches the gate.
+    bad = ('[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n'
+           '# Purpose\nA free-form document with no func sections.')
+    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the valid spec')
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([bad, good])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec('the valid spec')}
+    out = capsys.readouterr().out
+    assert 'free-form document' not in out  # the non-compilable proposal was never shown
+    assert 'No functions or types found in file' in out  # the parser error was reported
+    assert 'Show the proposal now?' in out  # only the corrected lock reached the gate
 
 
 def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
@@ -1156,7 +1212,7 @@ def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
     # a self-contradictory lock and bail) is neither shown nor locked: the proposal must not
     # appear before the go-ahead, so it stays off the screen and the conversation continues.
     contradictory = '[[DESIGN:LOCKED]]\n[[DESIGN:BAIL]]\n[[NEW:SPEC]]\nspec'
-    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([contradictory, good])):
         res = asyncio.run(refine.run_refine_chat(
@@ -1164,7 +1220,7 @@ def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'y'))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'the spec'}
+    assert res.payload == {'spec': _mrsh_spec('the spec')}
     out = capsys.readouterr().out
     assert '[[DESIGN:LOCKED]]' not in out  # the unparseable lock's payload stays hidden
     assert '[[DESIGN:BAIL]]' not in out
@@ -1173,7 +1229,8 @@ def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
 def test_run_refine_chat_bail_line_inside_payload_locks() -> None:
     # A bail line inside the rewritten spec is content, not a signal: the chat locks and saves
     # the spec verbatim instead of retrying or bailing.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nline one\n[[DESIGN:BAIL]]\nline two'
+    spec = '[[DESIGN:BAIL]]\n' + _mrsh_spec('inside the payload')
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + spec
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([locked])):
         res = asyncio.run(refine.run_refine_chat(
@@ -1181,7 +1238,7 @@ def test_run_refine_chat_bail_line_inside_payload_locks() -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'y'))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'line one\n[[DESIGN:BAIL]]\nline two'}
+    assert res.payload == {'spec': spec}
 
 
 def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
@@ -1206,7 +1263,7 @@ def test_run_refine_chat_locks_issue_with_readonly_tools() -> None:
 def test_run_refine_chat_mrsh_in_repo_gets_readonly_tools() -> None:
     # A .mrsh refined inside a repository gets the read-only codebase tools too (the grounded note
     # is appended to the system prompt), matching issue/linear.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('locked spec')
     captured: dict[str, str] = {}
 
     def get_mapper(system: str, **k: Any) -> Any:
@@ -1228,7 +1285,7 @@ def test_run_refine_chat_standalone_mrsh_gets_repo_independent_tools() -> None:
     # tool), but the repo-independent tools (web, local reads, notes) are still available, so
     # the assistant can e.g. fetch a documentation page the person links instead of asking
     # them to paste it.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('locked spec')
     captured: dict[str, str] = {}
 
     def get_mapper(system: str, **k: Any) -> Any:
@@ -1271,7 +1328,8 @@ def test_run_refine_chat_lock_turn_prints_a_clean_proposal(capsys: Any) -> None:
     # after the chat refers to it instead).
     question = 'Ready for me to propose the updated specification?'
     locked = ('All settled — here is the locked design.\n'
-              '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n# Locked spec\n\nthe full spec body')
+              '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n'
+              + _mrsh_spec('the full spec body'))
     with patch.object(refine, 'get_mapper',
                       new=lambda system, **k: _scripted_mapper(
                           [question, locked])), \
@@ -1292,7 +1350,7 @@ def test_run_refine_chat_declined_proposal_keeps_refining(capsys: Any) -> None:
     # The model's lock is not the user's: when the user declines the proposal, the rewrite is
     # not shown and the conversation continues with their objection; a later lock is accepted
     # only once the user accepts the proposal.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     # Replies, in order: the declined proposal (the gate's objection), an ordinary next-turn
     # reply, the declined proposal again (the gate's objection), and the accepted proposal.
     lines = iter(['x', 'n', 'make the error message friendlier', 'y'])
@@ -1318,7 +1376,7 @@ def test_run_refine_chat_decline_with_inline_objection(capsys: Any) -> None:
     # A decline that carries the objection in the same reply ("no, make the error message
     # friendlier") is not discarded: the reply itself becomes the objection, and the user is
     # not prompted for it a second time.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     # The first reply is the gate's: the decline with its objection in the same text. The
     # later replies are an ordinary next-turn reply and the accepted proposal.
     lines = iter(['no, make the error message friendlier', 'x', 'y'])
@@ -1353,7 +1411,7 @@ def test_print_apply_prompt_is_separated_and_boxed(capsys: Any) -> None:
 def test_run_refine_chat_repo_without_origin_name_still_gets_tools() -> None:
     # A working tree whose origin remote is missing or unparseable still has a codebase to
     # inspect: the tools are gated on being in a repo (in_repo), not on a parseable repo name.
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nlocked spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('locked spec')
     captured: dict[str, str] = {}
 
     def get_mapper(system: str, **k: Any) -> Any:
@@ -1374,7 +1432,7 @@ def test_run_refine_chat_bail_marker_in_prose_does_not_bail() -> None:
     # A marker quoted in prose is not the protocol line: that turn is not a bail, so the user is
     # prompted and the next turn can still lock.
     prose = "If this is hopeless I would emit [[DESIGN:BAIL]] - but let's try one more thing?"
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     lines = iter(['go on', 'y'])
 
     def read_line() -> str:
@@ -1387,14 +1445,14 @@ def test_run_refine_chat_bail_marker_in_prose_does_not_bail() -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=read_line))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'the spec'}
+    assert res.payload == {'spec': _mrsh_spec('the spec')}
 
 
 def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
     # Merely mentioning [[DESIGN:LOCKED]] in prose is not the protocol line: no lock is
     # attempted, the user is prompted, and a later exact line still locks.
     prose = 'Once we settle the last point I will emit [[DESIGN:LOCKED]] and the new spec.'
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     lines = iter(['sure', 'y'])
 
     def read_line() -> str:
@@ -1407,7 +1465,7 @@ def test_run_refine_chat_lock_marker_in_prose_is_not_a_lock() -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=read_line))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'the spec'}
+    assert res.payload == {'spec': _mrsh_spec('the spec')}
 
 
 def test_run_refine_chat_tool_cap_notes_unprocessed_result(capsys: Any) -> None:
@@ -1436,7 +1494,7 @@ def test_run_refine_chat_final_turn_processes_pending_result() -> None:
     # turn is a plain question so the user has had a turn to give the go-ahead the lock
     # requires.
     cmd = 'Looking.\n$ git grep needle'
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
     with patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper(
                           ['Ready for me to propose the updated specification?']
@@ -1446,7 +1504,7 @@ def test_run_refine_chat_final_turn_processes_pending_result() -> None:
             current_repo='', in_repo=False, cwd='/', model=None,
             max_turns=2, read_line=lambda: 'y'))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'the spec'}
+    assert res.payload == {'spec': _mrsh_spec('the spec')}
 
 
 def test_run_refine_chat_final_followup_tool_request_cannot_lock() -> None:
@@ -1550,7 +1608,7 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
             chat_calls.append(messages)
             if self.i == 1:
                 return 'What should happen on a tie?'
-            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
 
     class _Compact:
         def __init__(self) -> None:
@@ -1576,7 +1634,7 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: next(lines, 'y')))
     assert res.status == 'locked'
-    assert res.payload == {'spec': 'the spec'}
+    assert res.payload == {'spec': _mrsh_spec('the spec')}
     assert compact.calls >= 1
     # After a compaction the model sees a single message: the summary plus the spec verbatim.
     assert len(chat_calls[1]) == 1
@@ -1612,7 +1670,7 @@ def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
             chat_calls.append(messages)
             if self.i == 1:
                 return 'Let me record what I found.\n$ notes add "src/a.py:3 - the tie-break"'
-            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+            return '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the spec')
 
     class _Compact:
         def __init__(self) -> None:

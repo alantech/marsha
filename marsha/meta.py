@@ -101,6 +101,9 @@ def validate_marsha_fn(fn: str, void: bool = False) -> None:
             raise Exception(
                 f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
     # Check description
+    if len(ast['children']) < 2:
+        raise Exception(
+            f'Invalid Marsha function: Missing description for `{fn_heading}`.')
     second = ast['children'][1]
     if second['type'] != 'Paragraph':
         raise Exception(

@@ -28,6 +28,7 @@ from marsha import tools
 from marsha.context import (
     CHARS_PER_TOKEN, budget_tokens, estimate_tokens, fits, resolve_context_window)
 from marsha.llm_client import get_client
+from marsha.meta import extract_functions_and_types
 from marsha.log import log
 from marsha.mappers import get_mapper
 from marsha.mappers.base import ContextOverflowError
@@ -290,7 +291,14 @@ def _locked_format_note(kind: str) -> str:
     """How the assistant must emit the updated source once the design is locked."""
     if kind == 'mrsh':
         return ('When you signal the design is locked, put the full updated `.mrsh` file '
-                'contents on the lines that follow a line that is exactly [[NEW:SPEC]].\n')
+                'contents on the lines that follow a line that is exactly [[NEW:SPEC]]. '
+                'The rewrite must itself be a valid .mrsh — it is checked with the same '
+                'parser marsha compile uses, and a rewrite that would not compile is sent '
+                'back to you with the parser error. Keep the original file\'s structure '
+                'and update it in place: each function is a "# func name(args): return '
+                'type" section with a description and a usage-examples list (at least two '
+                'examples, which the test suite is derived from) — not a restructured '
+                'free-form document.\n')
     if kind == 'issue':
         return ('When you signal the design is locked, emit a line that is exactly '
                 '[[NEW:TITLE]] followed by the new title (one line), then a line that is exactly '
@@ -421,6 +429,18 @@ def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     if not title or not title.strip() or not body or not body.strip():
         return None
     return {'title': title.strip().split('\n', 1)[0].strip(), 'body': body}
+
+
+def _mrsh_format_errors(spec: str) -> list[str]:
+    """The .mrsh format errors of a rewritten spec, per the same parser `marsha compile` runs
+    as its first stage (func/type sections, descriptions, usage examples): a .mrsh is not just
+    markdown — a rewrite that would not compile must not be locked into the file. Empty when
+    the spec is a valid .mrsh."""
+    try:
+        extract_functions_and_types(spec)
+        return []
+    except Exception as e:
+        return [str(e)]
 
 
 def _initial_chat_message(kind: str, spec_text: str, ambiguities: list[str],
@@ -609,23 +629,29 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     {'role': 'assistant', 'content': text},
                     {'role': 'user', 'content': block},
                 ])
-            # A well-formed lock is shown at most once, as a clean rendered proposal (the
-            # raw protocol text — markers plus payload — is never shown), and the
-            # confirmation step after the chat does not repeat the payload. The proposal is
-            # shown only after the person accepts it directly (_propose_or_continue) — the
-            # harness's gate is the flow's single readiness question (the model is
-            # instructed not to ask one itself), so a lock on any turn, including the
-            # first, goes through the gate rather than presenting a rewrite the person did
-            # not ask to see.
-            if (pending is None and _signal_before_payload(
-                    text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
-                payload = parse_locked_output(text, kind)
-                if payload is not None:
-                    outcome = _propose_or_continue(text, kind, payload, messages,
-                                                   read_line)
-                    if outcome is not None:
-                        return outcome
-                    continue
+            # A lock that reaches the gate is shown at most once, as a clean rendered
+            # proposal (the raw protocol text — markers plus payload — is never shown), and
+            # the confirmation step after the chat does not repeat the payload. The proposal
+            # is shown only after the person accepts it directly (_propose_or_continue) —
+            # the harness's gate is the flow's single readiness question (the model is
+            # instructed not to ask one itself), so a lock on any turn, including the first,
+            # goes through the gate rather than presenting a rewrite the person did not ask
+            # to see. A .mrsh rewrite must additionally survive the .mrsh format rules (the
+            # same parser compile runs as its first stage): a payload that parses but would
+            # not compile is sent back with the parser's error, like a malformed lock, and
+            # is never gated or shown.
+            locked = (pending is None and _signal_before_payload(
+                text.split('\n'), '[[DESIGN:LOCKED]]', kind))
+            payload = parse_locked_output(text, kind) if locked else None
+            format_errors: list[str] = []
+            if locked and kind == 'mrsh' and payload is not None:
+                format_errors = _mrsh_format_errors(payload['spec'])
+            if locked and payload is not None and not format_errors:
+                outcome = _propose_or_continue(text, kind, payload, messages,
+                                               read_line)
+                if outcome is not None:
+                    return outcome
+                continue
             # A lock carried by a still-tool-requesting response is in-progress (the tool
             # result may change it): its payload stays off the screen — the narration is
             # shown, the proposal is not.
@@ -662,29 +688,48 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                       'the source was not modified.')
                 if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                     payload = parse_locked_output(text, kind)
-                    if payload is not None:
+                    followup_errors: list[str] = []
+                    if kind == 'mrsh' and payload is not None:
+                        followup_errors = _mrsh_format_errors(payload['spec'])
+                    if payload is not None and not followup_errors:
                         outcome = _propose_or_continue(text, kind, payload,
                                                        messages, read_line)
                         if outcome is not None:
                             return outcome
                         continue
+                    # A rewrite that would not compile has no next turn to be nudged in:
+                    # the session times out, with the reason on screen.
+                    if followup_errors:
+                        print(f'Note: the rewrite is not a valid .mrsh '
+                              f'({followup_errors[0]}).')
                 _print_turn_hiding_lock_payload(text, kind)
-            locked_signal = _signal_before_payload(
-                text.split('\n'), '[[DESIGN:LOCKED]]', kind)
-            if locked_signal:
-                # A well-formed lock was handled above; this is a malformed one: only its
-                # narration is on screen (the payload never is), so nudge the assistant to
-                # fix it.
+            if locked:
+                # A lock that did not reach the gate: unparseable, or a .mrsh rewrite the
+                # format rules reject. Only its narration is on screen (the payload never
+                # is), so the assistant is nudged with the specific error to fix.
+                if payload is None:
+                    block = ('That lock was malformed: it must carry the required '
+                             + ('[[NEW:SPEC]]' if kind == 'mrsh'
+                                else '[[NEW:TITLE]] and [[NEW:BODY]]')
+                             + ' section(s), and it must carry no [[DESIGN:BAIL]] line '
+                               '(the lock and bail outcomes are mutually exclusive). '
+                               'Re-emit the locked design using the exact format '
+                               'requested.')
+                else:
+                    block = ('That lock did not follow the .mrsh format, so the rewritten '
+                             'specification would not compile:\n- '
+                             + '\n- '.join(format_errors)
+                             + '\nRe-emit the locked design as a valid .mrsh: each '
+                               'function is a "# func name(args): return type" section '
+                               'with a description and a usage-examples list (at least '
+                               'two examples), keeping the original file\'s structure.')
+                if format_errors:
+                    print(f'Note: the rewrite is not a valid .mrsh '
+                          f'({format_errors[0]}); the assistant is fixing it.')
                 messages.append({'role': 'assistant', 'content': text})
-                messages.append({'role': 'user', 'content': (
-                    'That lock was malformed: it must carry the required '
-                    + ('[[NEW:SPEC]]' if kind == 'mrsh'
-                       else '[[NEW:TITLE]] and [[NEW:BODY]]')
-                    + ' section(s), and it must carry no [[DESIGN:BAIL]] line (the lock '
-                      'and bail outcomes are mutually exclusive). Re-emit the locked design '
-                      'using the exact format requested.')})
+                messages.append({'role': 'user', 'content': block})
                 continue
-            elif not locked_signal and _signal_before_payload(
+            elif not locked and _signal_before_payload(
                     text.split('\n'), '[[DESIGN:BAIL]]', kind):
                 return ChatResult('bail', None, text)
             else:
@@ -967,6 +1012,13 @@ async def run_refine(args: Any) -> int:
                   'for an interactive rewrite with this model. Split the spec, use a model '
                   'with a larger context, or use --check to analyze it.',
                   file=sys.stderr)
+            return 1
+    if check_only and source.kind == 'mrsh':
+        # A .mrsh the format parser rejects can never compile, so it can never be locked:
+        # fail before paying for the LLM analysis.
+        format_errors = _mrsh_format_errors(spec_text)
+        if format_errors:
+            print_diagnostic('error', format_errors[0])
             return 1
     print('Analyzing the spec for open ambiguities...', file=sys.stderr)
     try:
