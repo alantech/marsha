@@ -114,6 +114,53 @@ def test_top_level_sections_long_fence_contains_short_fence() -> None:
     assert len(functions) == 1  # the fenced "# func fake" line is code, not a section
 
 
+def test_top_level_sections_closing_fence_with_trailing_whitespace() -> None:
+    # A closing fence may carry trailing whitespace: it still closes the fence, so the next
+    # top-level heading starts a section instead of being swallowed as fence content.
+    spec = ('# func add(a: int, b: int): int\n'
+            'Adds two integers together and returns the sum. Padding padding padding '
+            'padding padding padding padding padding padding padding padding padding.\n'
+            '```\n'
+            '# comment inside the fence\n'
+            '```   \n'
+            '\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0\n'
+            '\n'
+            '# func sub(a: int): int\n'
+            'Subtracts one from another and returns the difference. Padding padding '
+            'padding padding padding padding padding padding padding padding.\n'
+            '\n'
+            '* sub(5, 3) -> 2\n'
+            '* sub(1, 5) -> -4')
+    functions, _, _ = meta.extract_functions_and_types(spec)
+    assert len(functions) == 2
+
+
+def test_top_level_sections_indented_backtick_line_is_content() -> None:
+    # A backtick line indented by four or more spaces is an indented code block, not a fence
+    # opener (CommonMark allows at most three leading spaces): it must not put the parser
+    # into fence mode and swallow later sections.
+    spec = ('# func add(a: int, b: int): int\n'
+            'Adds two integers together and returns the sum. Padding padding padding '
+            'padding padding padding padding padding padding padding padding padding.\n'
+            '\n'
+            '    ```\n'
+            '    # not a fence\n'
+            '\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0\n'
+            '\n'
+            '# func sub(a: int): int\n'
+            'Subtracts one from another and returns the difference. Padding padding '
+            'padding padding padding padding padding padding padding padding.\n'
+            '\n'
+            '* sub(5, 3) -> 2\n'
+            '* sub(1, 5) -> -4')
+    functions, _, _ = meta.extract_functions_and_types(spec)
+    assert len(functions) == 2
+
+
 def test_top_level_sections_leading_spaces_still_delimit() -> None:
     # Up to three leading spaces still mark a heading (CommonMark); the old character split
     # treated any '#' as a boundary, so this keeps the heading shape recognizable.

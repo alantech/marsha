@@ -159,23 +159,25 @@ def _top_level_sections(file: str) -> list[str]:
     # rather than characters: a "##" (or deeper) heading stays inside the current section,
     # and a '#' inside text (an issue reference, a comment in an example) does not start a
     # new section. A "# " line inside a fenced code block is code, not a heading; per
-    # CommonMark, a fence closes only on a line of the same character, at least as long as
-    # the opening fence (so a four-backtick fence can contain a triple-backtick line).
+    # CommonMark, a fence opens only with up to three leading spaces (four or more is an
+    # indented code block, not a fence), and it closes only on a line of the same character
+    # alone (no info string), at least as long as the opening fence, so a four-backtick fence
+    # can contain a triple-backtick line.
     sections: list[str] = []
     current: list[str] = []
     fence_char = ''
     fence_len = 0
     for line in file.split('\n'):
-        stripped = line.lstrip()
         if fence_char:
-            if re.fullmatch(f'{fence_char}{{{fence_len},}}', stripped):
+            m = re.match(r'^( {0,3})(`{3,}|~{3,})[ \t]*$', line)
+            if m and m.group(2)[0] == fence_char and len(m.group(2)) >= fence_len:
                 fence_char = ''
             current.append(line)
             continue
-        m = re.match(r'(`{3,}|~{3,})', stripped)
+        m = re.match(r'^( {0,3})(`{3,}|~{3,})', line)
         if m:
-            fence_char = m.group(1)[0]
-            fence_len = len(m.group(1))
+            fence_char = m.group(2)[0]
+            fence_len = len(m.group(2))
             current.append(line)
             continue
         h = re.match(r'^( {0,3})# ', line)
