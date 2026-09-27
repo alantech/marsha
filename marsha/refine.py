@@ -186,10 +186,12 @@ async def _repo_gate(source: SpecSource, cwd: str | None) -> str:
     return await _git_repo_name(cwd)
 
 
-async def gh_issue_view(num: int, cwd: str | None = None) -> dict[str, Any]:
+async def gh_issue_view(num: int, cwd: str | None = None,
+                        max_bytes: int | None = None) -> dict[str, Any]:
     """The GitHub issue (number, title, body, comments) as JSON, via the gh CLI."""
     rc, out, err = await _gh('issue', 'view', str(num), '--json',
-                             'number,title,body,comments', cwd=cwd)
+                             'number,title,body,comments', cwd=cwd,
+                             max_bytes=max_bytes)
     if rc != 0:
         raise Exception(f'`gh issue view {num}` failed: {err or out}')
     return cast(dict[str, Any], json.loads(out))
@@ -212,24 +214,28 @@ def render_gh_issue(data: dict[str, Any], num: int) -> str:
     return '\n\n'.join(parts)
 
 
-async def gh_issue_context(num: int, cwd: str | None = None) -> str:
+async def gh_issue_context(num: int, cwd: str | None = None,
+                           max_bytes: int | None = None) -> str:
     """The GitHub issue (title, body, comments) as a rendered spec, via the gh CLI."""
-    return render_gh_issue(await gh_issue_view(num, cwd=cwd), num)
+    return render_gh_issue(await gh_issue_view(num, cwd=cwd, max_bytes=max_bytes), num)
 
 
-async def gh_issue_fields(num: int, cwd: str | None = None) -> tuple[str, str]:
+async def gh_issue_fields(num: int, cwd: str | None = None,
+                          max_bytes: int | None = None) -> tuple[str, str]:
     """The (title, body) of the GitHub issue — the only fields refine rewrites."""
-    rc, out, err = await _gh('issue', 'view', str(num), '--json', 'title,body', cwd=cwd)
+    rc, out, err = await _gh('issue', 'view', str(num), '--json', 'title,body', cwd=cwd,
+                             max_bytes=max_bytes)
     if rc != 0:
         raise Exception(f'`gh issue view {num}` failed: {err or out}')
     data = json.loads(out)
     return data.get('title', ''), data.get('body') or ''
 
 
-async def linear_fields(ticket: str, cwd: str | None = None) -> tuple[str, str]:
+async def linear_fields(ticket: str, cwd: str | None = None,
+                        max_bytes: int | None = None) -> tuple[str, str]:
     """The (title, description) of the Linear ticket — the only fields refine rewrites."""
     rc, out, err = await _run('linear', 'issue', 'view', ticket, '--json',
-                              '--no-pager', cwd=cwd)
+                              '--no-pager', cwd=cwd, max_bytes=max_bytes)
     if rc != 0:
         raise Exception(f'`linear issue view {ticket}` failed: {err or out}')
     data = json.loads(out)
@@ -238,40 +244,46 @@ async def linear_fields(ticket: str, cwd: str | None = None) -> tuple[str, str]:
     return data.get('title', ''), data.get('description') or ''
 
 
-async def load_spec(source: SpecSource, cwd: str | None) -> str:
+async def load_spec(source: SpecSource, cwd: str | None,
+                    max_bytes: int | None = None) -> str:
     """The raw spec text to analyze and refine (a `.mrsh` read verbatim, an issue, a ticket)."""
     if source.kind == 'mrsh':
         return cast(str, read_file(cast(str, source.path)))
     if source.kind == 'issue':
-        return await gh_issue_context(cast(int, source.num), cwd=cwd)
-    return await linear_context(cast(str, source.name), cwd=cwd)
+        return await gh_issue_context(cast(int, source.num), cwd=cwd,
+                                      max_bytes=max_bytes)
+    return await linear_context(cast(str, source.name), cwd=cwd, max_bytes=max_bytes)
 
 
-async def load_spec_with_fields(source: SpecSource, cwd: str | None) -> \
+async def load_spec_with_fields(source: SpecSource, cwd: str | None,
+                                max_bytes: int | None = None) -> \
         tuple[str, tuple[str, str] | None]:
     """The spec text to analyze and refine, plus — for a non-file source — the (title, body)
     it was read from. Both come from a single source read: the text that seeds the chat and the
     baseline the apply-time staleness check compares against must describe the same version of
     the source, or an edit landing between two reads would shift the baseline and pass the check
-    while the rewrite was still built from the older content."""
+    while the rewrite was still built from the older content. `max_bytes` bounds the remote
+    fetch (a .mrsh is bounded by its stat instead), so an oversized remote response fails
+    before it is buffered, matching the .mrsh byte guard."""
     if source.kind == 'mrsh':
         return await load_spec(source, cwd), None
     if source.kind == 'issue':
-        data = await gh_issue_view(cast(int, source.num), cwd)
+        data = await gh_issue_view(cast(int, source.num), cwd, max_bytes=max_bytes)
         return render_gh_issue(data, cast(int, source.num)), \
             (data.get('title', ''), data.get('body') or '')
-    out = await linear_context(cast(str, source.name), cwd=cwd)
+    out = await linear_context(cast(str, source.name), cwd=cwd, max_bytes=max_bytes)
     data = json.loads(out)
     if isinstance(data, list):
         data = data[0] if data else {}
     return out, (data.get('title', ''), data.get('description') or '')
 
 
-async def _source_fields(source: SpecSource, cwd: str) -> tuple[str, str]:
+async def _source_fields(source: SpecSource, cwd: str,
+                         max_bytes: int | None = None) -> tuple[str, str]:
     """The (title, body) refine would rewrite, for a non-file source (an issue or a ticket)."""
     if source.kind == 'issue':
-        return await gh_issue_fields(cast(int, source.num), cwd)
-    return await linear_fields(cast(str, source.name), cwd)
+        return await gh_issue_fields(cast(int, source.num), cwd, max_bytes=max_bytes)
+    return await linear_fields(cast(str, source.name), cwd, max_bytes=max_bytes)
 
 
 def _locked_format_note(kind: str) -> str:
@@ -610,10 +622,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             if (pending is None and _signal_before_payload(
                     text.split('\n'), '[[DESIGN:LOCKED]]', kind)):
                 payload = parse_locked_output(text, kind)
+                if turn == 0:
+                    # Premature, well-formed or malformed: the response may carry the
+                    # proposal, which must not appear before the person has had a turn to
+                    # give the go-ahead. Keep it in the transcript and nudge the model to
+                    # ask instead.
+                    _premature_lock_nudge(text, messages)
+                    continue
                 if payload is not None:
-                    if turn == 0:
-                        _premature_lock_nudge(text, messages)
-                        continue
                     outcome = _propose_or_continue(text, kind, payload, messages,
                                                    read_line)
                     if outcome is not None:
@@ -652,12 +668,13 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                       'the source was not modified.')
                 if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                     payload = parse_locked_output(text, kind)
+                    if turn == 0:
+                        # Premature (no user turn yet), well-formed or malformed: not
+                        # shown, nudged; the final turn has no next turn to ask in, so the
+                        # session times out.
+                        _premature_lock_nudge(text, messages)
+                        continue
                     if payload is not None:
-                        if turn == 0:
-                            # Premature (no user turn yet): not shown, nudged; the final
-                            # turn has no next turn to ask in, so the session times out.
-                            _premature_lock_nudge(text, messages)
-                            continue
                         outcome = _propose_or_continue(text, kind, payload,
                                                        messages, read_line)
                         if outcome is not None:
@@ -666,9 +683,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 _print_turn(text)
             locked_signal = _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind)
-            if turn > 0 and locked_signal:
+            if locked_signal:
                 # A well-formed lock was handled (and printed) above; this is a malformed
-                # one: the raw text is already on screen, so nudge the assistant to fix it.
+                # one (a premature one was kept from the screen and nudged): the raw text
+                # is already on screen, so nudge the assistant to fix it.
                 messages.append({'role': 'assistant', 'content': text})
                 messages.append({'role': 'user', 'content': (
                     'That lock was malformed: it must carry the required '
@@ -790,6 +808,11 @@ def _render_lock_payload(kind: str, payload: dict[str, str]) -> None:
     _render_markdown(content)
 
 
+# Declines to the proposal gate that carry no objection of their own: these (and an empty
+# reply) get a follow-up read for the objection; anything else is the objection itself.
+_BARE_DECLINES = {'', 'n', 'no', 'nope', 'not yet', 'not ready'}
+
+
 def _premature_lock_nudge(text: str, messages: list[dict[str, str]]) -> None:
     # A well-formed lock before the person's first turn: the payload is the proposal, and
     # the proposal must not appear before the person has had a chance to give the go-ahead.
@@ -814,14 +837,19 @@ def _propose_or_continue(text: str, kind: str, payload: dict[str, str],
     if preamble:
         _print_turn(preamble)
     print('\nThe assistant is ready to propose the updated specification. '
-          'Show the proposal now? (y/N)')
+          'Show the proposal now? (y/N, or say what to resolve first)')
     answer = read_line()
     if _is_bail_token(answer):
         return ChatResult('bail', None, answer)
     if answer.strip().lower() not in ('y', 'yes'):
-        more = read_line()
-        if _is_bail_token(more):
-            return ChatResult('bail', None, more)
+        # A decline often carries the objection in the same reply ("no, make the error
+        # message friendlier"): use it rather than making the user type it twice; only a
+        # bare decline (or an empty reply) needs a follow-up read.
+        more = answer.strip()
+        if more.lower() in _BARE_DECLINES:
+            more = read_line()
+            if _is_bail_token(more):
+                return ChatResult('bail', None, more)
         messages.append({'role': 'assistant', 'content': text})
         messages.append({'role': 'user', 'content':
                          'Not yet — resolve this first: ' + more})
@@ -907,12 +935,18 @@ async def run_refine(args: Any) -> int:
         print(f'Loading issue #{source.num}{where}...', file=sys.stderr)
     else:
         print(f'Loading Linear ticket {source.name}...', file=sys.stderr)
+    # A remote source (issue/ticket) cannot be stat'd before reading, so its fetch is bounded
+    # at the same 4x-byte ceiling a .mrsh is guarded by: an oversized remote response fails
+    # before it is buffered into memory, not after. --check analyzes the full source by
+    # design, so it is unbounded.
+    remote_cap = REFINE_SPEC_LIMIT * 4 if not check_only else None
     try:
         # The spec text and — for a non-file source — the (title, body) it was read from, in
         # one read (see load_spec_with_fields). The full rendered context (comments, status,
         # ...) seeds the chat; only the rewritten fields gate the apply, and they must come
         # from the same version of the source as the chat input.
-        spec_text, original_fields = await load_spec_with_fields(source, cwd)
+        spec_text, original_fields = await load_spec_with_fields(
+            source, cwd, max_bytes=remote_cap)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1
@@ -1005,7 +1039,10 @@ async def run_refine(args: Any) -> int:
             changed = current_text != spec_text
         else:
             try:
-                current_fields = await _source_fields(source, cwd)
+                # Bounded as the original read: a field that grew past the ceiling while the
+                # chat ran fails the re-read and the apply is refused (fail closed).
+                current_fields = await _source_fields(source, cwd,
+                                                      max_bytes=remote_cap)
             except Exception as e:
                 print(f'error: could not verify the source is unchanged: {e}',
                       file=sys.stderr)

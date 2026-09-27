@@ -83,9 +83,36 @@ def get_filename_from_path(path: str) -> str:
 
 
 async def run_subprocess(stream: Process, timeout: float = 60.0,
-                         input: bytes | None = None) -> tuple[str, str]:
+                         input: bytes | None = None,
+                         max_bytes: int | None = None) -> tuple[str, str]:
+    if max_bytes is None or input is not None:
+        read = stream.communicate(input)
+    else:
+        # Bounded: stream stdout in chunks and fail at max_bytes, so an oversized output is
+        # refused before it is buffered into memory (a caller's size guard must get the
+        # chance to run on the size, not after the whole payload is in RAM).
+        chunks: list[bytes] = []
+        total = 0
+
+        async def _bounded() -> tuple[bytes, bytes]:
+            nonlocal total
+            assert stream.stdout is not None and stream.stderr is not None
+            while True:
+                chunk = await stream.stdout.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise Exception(
+                        f'command output exceeds the {max_bytes}-byte limit')
+                chunks.append(chunk)
+            err = await stream.stderr.read()
+            await stream.wait()
+            return b''.join(chunks), err
+
+        read = _bounded()
     try:
-        stdout, stderr = await asyncio.wait_for(stream.communicate(input), timeout)
+        stdout, stderr = await asyncio.wait_for(read, timeout)
     except asyncio.exceptions.TimeoutError as e:
         try:
             stream.kill()
@@ -93,12 +120,24 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
             # Ignore 'no such process' error
             pass
         # Reap the killed child and close its pipes so it does not linger as a zombie (or leak
-        # its transports) until garbage collection; ignore a follow-up failure if it is already
-        # gone.
+        # its transports) until garbage collection; ignore a follow-up failure if it is
+        # already gone.
         try:
             await stream.wait()
         except Exception:
             pass
         # Chain the original TimeoutError so callers can tell a timeout apart from other errors.
         raise Exception('run_subprocess timeout...') from e
+    except Exception:
+        # An overflow (or any read failure): the child is no longer wanted — kill and reap it
+        # the same way before the error propagates.
+        try:
+            stream.kill()
+        except OSError:
+            pass
+        try:
+            await stream.wait()
+        except Exception:
+            pass
+        raise
     return (stdout.decode('utf-8'), stderr.decode('utf-8'))

@@ -651,7 +651,7 @@ def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
     async def fake_gate(source: Any, cwd: Any) -> str:
         return 'acme/widget'
 
-    async def fake_load(source: Any, cwd: Any) -> Any:
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
         return 'ISSUE TEXT', ('T', 'B')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
@@ -674,7 +674,7 @@ def test_run_refine_check_linear_announces_load_and_analyze(capsys: Any) -> None
     async def fake_gate(source: Any, cwd: Any) -> str:
         return 'acme/widget'
 
-    async def fake_load(source: Any, cwd: Any) -> Any:
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
         return 'TICKET TEXT', ('T', 'B')
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
@@ -828,10 +828,10 @@ def test_run_refine_issue_comment_only_change_allows_apply(capsys: Any) -> None:
     # the apply-time re-read still matches the baseline and the apply proceeds.
     fields = iter([('Title', 'Body')])
 
-    async def fake_source_fields(source: Any, cwd: Any) -> Any:
+    async def fake_source_fields(source: Any, cwd: Any, **kw: Any) -> Any:
         return next(fields)
 
-    async def fake_load(source: Any, cwd: Any) -> Any:
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
         return 'ISSUE TEXT', ('Title', 'Body')
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
@@ -863,10 +863,10 @@ def test_run_refine_issue_title_change_refuses_apply(capsys: Any) -> None:
     # apply-time re-read (via _source_fields) returns the edited title.
     fields = iter([('Edited Title', 'Body')])
 
-    async def fake_source_fields(source: Any, cwd: Any) -> Any:
+    async def fake_source_fields(source: Any, cwd: Any, **kw: Any) -> Any:
         return next(fields)
 
-    async def fake_load(source: Any, cwd: Any) -> Any:
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
         return 'ISSUE TEXT', ('Title', 'Body')
 
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
@@ -922,7 +922,8 @@ def test_load_spec_with_fields_reads_the_issue_once() -> None:
     # between two reads would shift the baseline while the chat still sees the older content.
     views: list[Any] = []
 
-    async def fake_gh_issue_view(num: Any, cwd: Any = None) -> Any:
+    async def fake_gh_issue_view(num: Any, cwd: Any = None,
+                                 max_bytes: Any = None) -> Any:
         views.append(num)
         return {'title': 'T', 'body': 'B', 'comments': []}
 
@@ -938,7 +939,8 @@ def test_load_spec_with_fields_reads_the_issue_once() -> None:
 def test_load_spec_with_fields_reads_the_ticket_once() -> None:
     reads: list[Any] = []
 
-    async def fake_linear_context(ticket: Any, cwd: Any = None) -> str:
+    async def fake_linear_context(ticket: Any, cwd: Any = None,
+                                  max_bytes: Any = None) -> str:
         reads.append(ticket)
         return '{"title": "T", "description": "D"}'
 
@@ -949,6 +951,33 @@ def test_load_spec_with_fields_reads_the_ticket_once() -> None:
     assert reads == ['ENG-5']  # exactly one fetch
     assert fields == ('T', 'D')
     assert 'description' in text
+
+
+def test_run_refine_binds_remote_load_to_the_spec_limit(capsys: Any) -> None:
+    # A remote source (issue/ticket) cannot be stat'd before reading, so its fetch is bounded
+    # at the same 4x-byte ceiling a .mrsh is guarded by — and --check, which analyzes the full
+    # source by design, is unbounded.
+    calls: list[Any] = []
+
+    async def fake_load(source: Any, cwd: Any, **kw: Any) -> Any:
+        calls.append(kw.get('max_bytes'))
+        return 'ISSUE TEXT', ('T', 'B')
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    async def fake_chat(**k: Any) -> Any:
+        return refine.ChatResult('bail', None, '')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_repo_gate', new=AsyncMock(return_value='acme/widget')), \
+         patch.object(refine, 'load_spec_with_fields', new=fake_load), \
+         patch.object(refine, '_resolve_window',
+                      new=AsyncMock(return_value=200000)):
+        assert asyncio.run(refine.run_refine(_args(issue='218'))) == 1
+        assert asyncio.run(refine.run_refine(_args(issue='218', check=True))) == 1
+    assert calls == [refine.REFINE_SPEC_LIMIT * 4, None]
 
 
 def test_run_refine_bail_does_not_write(tmp_path: Any, capsys: Any) -> None:
@@ -1106,7 +1135,7 @@ def test_run_refine_chat_times_out() -> None:
     assert res.payload is None
 
 
-def test_run_refine_chat_retries_a_malformed_lock() -> None:
+def test_run_refine_chat_retries_a_malformed_lock(capsys: Any) -> None:
     malformed = '[[DESIGN:LOCKED]]\nI locked it but forgot the section'
     good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nfixed spec'
     with patch.object(refine, 'get_mapper',
@@ -1117,11 +1146,15 @@ def test_run_refine_chat_retries_a_malformed_lock() -> None:
             read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'fixed spec'}
+    # The premature (first-turn) lock — malformed or not — is never shown: no raw protocol
+    # text reaches the screen before the user has had a turn.
+    assert '[[DESIGN:LOCKED]]' not in capsys.readouterr().out
 
 
-def test_run_refine_chat_lock_and_bail_together_retries() -> None:
-    # A response carrying a bail signal before the payload is self-contradictory: it does not
-    # lock (no overwrite), the assistant is asked to re-emit, and a clean follow-up locks.
+def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
+    # A first-turn response carrying a lock with proposal content but failing to parse (here,
+    # a self-contradictory lock and bail) is neither shown nor locked: the proposal must not
+    # appear before the go-ahead, so it stays off the screen and the conversation continues.
     contradictory = '[[DESIGN:LOCKED]]\n[[DESIGN:BAIL]]\n[[NEW:SPEC]]\nspec'
     good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
     with patch.object(refine, 'get_mapper',
@@ -1132,6 +1165,9 @@ def test_run_refine_chat_lock_and_bail_together_retries() -> None:
             read_line=lambda: 'y'))
     assert res.status == 'locked'
     assert res.payload == {'spec': 'the spec'}
+    out = capsys.readouterr().out
+    assert '[[DESIGN:LOCKED]]' not in out  # the premature lock's payload stays hidden
+    assert '[[DESIGN:BAIL]]' not in out
 
 
 def test_run_refine_chat_bail_line_inside_payload_locks() -> None:
@@ -1274,9 +1310,33 @@ def test_run_refine_chat_declined_proposal_keeps_refining(capsys: Any) -> None:
             read_line=read_line))
     assert res.status == 'locked'
     out = capsys.readouterr().out
-    assert 'Show the proposal now? (y/N)' in out
+    assert 'Show the proposal now?' in out
     # The rendered proposal appears exactly once: at the acceptance, not at the decline.
     assert out.count('The design is locked. The updated source:') == 1
+
+
+def test_run_refine_chat_decline_with_inline_objection(capsys: Any) -> None:
+    # A decline that carries the objection in the same reply ("no, make the error message
+    # friendlier") is not discarded: the reply itself becomes the objection, and the user is
+    # not prompted for it a second time.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\nthe spec'
+    lines = iter(['x', 'no, make the error message friendlier', 'y'])
+
+    def read_line() -> str:
+        return next(lines)
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(
+                          [locked, 'Working on the error message.', locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=read_line))
+    assert res.status == 'locked'
+    out = capsys.readouterr().out
+    # The proposal question is asked once at the decline and once at the acceptance: the
+    # inline objection was not re-prompted (a discarded reply would have consumed the 'y').
+    assert out.count('Show the proposal now?') == 2
 
 
 def test_print_apply_prompt_is_separated_and_boxed(capsys: Any) -> None:
