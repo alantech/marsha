@@ -37,7 +37,7 @@ from marsha.review import (
 )
 from marsha.spec_check import analyze_spec, SPEC_CHECK_GROUNDED_NOTE
 from marsha.term import print_diagnostic
-from marsha.utils import read_file, write_file
+from marsha.utils import read_file, write_file_no_follow
 
 # The largest source the interactive rewrite will work on, and the ceiling on the model-derived
 # limit in run_refine: the rewrite is built from what the assistant sees, so the chat is fed the
@@ -791,7 +791,10 @@ async def _apply_linear(name: str, title: str, body: str, cwd: str | None) -> No
 async def _apply(source: SpecSource, payload: dict[str, str], cwd: str | None) -> None:
     """Rewrite the source in place with the locked spec (the destructive step)."""
     if source.kind == 'mrsh':
-        write_file(cast(str, source.path), payload['spec'])
+        # O_NOFOLLOW: the symlink refusal at load time and this write are not atomic — the
+        # chat runs in between, and a path swapped for a symlink meanwhile must not be
+        # followed (the write would land on the symlink's target). The open fails instead.
+        write_file_no_follow(cast(str, source.path), payload['spec'])
         return
     if source.kind == 'issue':
         await _apply_issue(cast(int, source.num), payload['title'], payload['body'], cwd)

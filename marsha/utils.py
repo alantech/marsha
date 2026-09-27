@@ -58,6 +58,17 @@ def write_file(filename: str, content: str | bytes, mode: str = 'w') -> None:
             f.write(content)
 
 
+def write_file_no_follow(filename: str, content: str) -> None:
+    # Write `content` to `filename`, refusing to follow a symlink at the final path component
+    # (O_NOFOLLOW). For writes to a user-named path whose symlink-ness was checked earlier in
+    # the run: the check and the write are not atomic, so a path swapped for a symlink in
+    # between must not be followed — the write would overwrite the symlink's target instead.
+    fd = os.open(filename, os.O_WRONLY | os.O_CREAT |
+                 os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
 def write_composed(files: dict[str, str], subdir: str | None = None) -> list[str]:
     # Write a composed on-disk layout ({path: content}) and return the written paths.
     paths: list[str] = []

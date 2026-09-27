@@ -174,10 +174,18 @@ def _top_level_sections(file: str) -> list[str]:
                 fence_char = ''
             current.append(line)
             continue
-        m = re.match(r'^( {0,3})(`{3,}|~{3,})', line)
+        m = re.match(r'^( {0,3})(`{3,}|~{3,})(.*)$', line)
         if m:
-            fence_char = m.group(2)[0]
-            fence_len = len(m.group(2))
+            # CommonMark's fence grammar: a backtick fence's info string cannot contain a
+            # backtick, and a tilde fence's cannot begin with one — a line that fails this
+            # is not an opener (it is a paragraph), and must not start fence mode.
+            delim, info = m.group(2), m.group(3)
+            if (delim[0] == '`' and '`' in info) \
+               or (delim[0] == '~' and re.match(r'^\s*`', info)):
+                current.append(line)
+                continue
+            fence_char = delim[0]
+            fence_len = len(delim)
             current.append(line)
             continue
         h = re.match(r'^( {0,3})# ', line)

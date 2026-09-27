@@ -1,8 +1,10 @@
 """Deterministic tests for the low-level subprocess helper in marsha.utils."""
 
 import asyncio
+import os
+from typing import Any
 
-from marsha.utils import run_subprocess
+from marsha.utils import run_subprocess, write_file_no_follow
 
 
 def test_run_subprocess_timeout_kills_and_reaps() -> None:
@@ -124,3 +126,22 @@ def test_run_subprocess_overflow_fails_and_reaps() -> None:
     kind, returncode = asyncio.run(scenario())
     assert kind == 'overflow'
     assert returncode is not None  # reaped: returncode is set, not a lingering zombie
+
+
+def test_write_file_no_follow_refuses_symlink(tmp_path: Any) -> None:
+    # O_NOFOLLOW: writing through a path that has been swapped for a symlink must fail rather
+    # than overwrite the link's target (the load-time symlink check is not atomic with the
+    # write). Regular paths are written as usual.
+    target = tmp_path / 'target.txt'
+    target.write_text('target content')
+    link = tmp_path / 'link.txt'
+    os.symlink(target, link)
+    try:
+        write_file_no_follow(str(link), 'rewrite')
+        raise AssertionError('a symlinked path must not be written through')
+    except OSError:
+        pass
+    assert target.read_text() == 'target content'  # the target is untouched
+    regular = tmp_path / 'regular.txt'
+    write_file_no_follow(str(regular), 'hello')
+    assert regular.read_text() == 'hello'
