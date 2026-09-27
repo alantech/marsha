@@ -63,8 +63,10 @@ def write_file_no_follow(filename: str, content: str) -> None:
     # For writes to a user-named path whose symlink-ness was checked earlier in the run: the
     # check and the write are not atomic, so a path swapped for a symlink in between must not
     # be followed — the write would overwrite the symlink's target instead. On Unix the open
-    # itself carries O_NOFOLLOW (the refusal is atomic); Windows has no O_NOFOLLOW, so the
-    # symlink is refused up front there.
+    # itself carries O_NOFOLLOW, so the refusal is atomic. Windows' C runtime has no
+    # no-follow open flag (the reparse-flag WinAPI route is not exposed through os.open), so
+    # the symlink is refused up front there: strictly better than the previous unguarded
+    # write, with a residual race window of one syscall for a concurrently swapped path.
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, 'O_NOFOLLOW'):
         flags |= os.O_NOFOLLOW
