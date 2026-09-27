@@ -153,9 +153,39 @@ def validate_marsha_type(type: str) -> None:
                 f'Invalid Marsha type: Not enough examples for `{type_heading}`.')
 
 
+def _top_level_sections(file: str) -> list[str]:
+    # The sections of a .mrsh file, in the shape str.split('#') used to produce: the file
+    # preamble first, then the text after each top-level heading's '#'. Splitting on lines
+    # rather than characters: a "##" (or deeper) heading stays inside the current section,
+    # and a '#' inside text (an issue reference, a comment in an example) does not start a
+    # new section. A "# " line inside a fenced code block is code, not a heading.
+    sections: list[str] = []
+    current: list[str] = []
+    fence = ''
+    for line in file.split('\n'):
+        stripped = line.lstrip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = ''
+            current.append(line)
+            continue
+        if stripped.startswith('```') or stripped.startswith('~~~'):
+            fence = stripped[:3]
+            current.append(line)
+            continue
+        m = re.match(r'^( {0,3})# ', line)
+        if m:
+            sections.append('\n'.join(current))
+            current = [line[len(m.group(1)) + 1:]]
+            continue
+        current.append(line)
+    sections.append('\n'.join(current))
+    return sections
+
+
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[str]]:
     res: tuple[list[str], list[str], list[str]] = ([], [], [])
-    sections = file.split('#')
+    sections = _top_level_sections(file)
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
     void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
     type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'

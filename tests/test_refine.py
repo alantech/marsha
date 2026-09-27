@@ -80,6 +80,22 @@ def _mrsh_spec(marker: str) -> str:
             '* add(-1, 1) -> 0')
 
 
+def _mrsh_spec_subsections(marker: str) -> str:
+    # A valid .mrsh that uses "##" subsections inside the function section (the extended
+    # format): the description paragraph first, subsections in between, and the usage-
+    # examples list as the section's final block.
+    return ('# func add(a: int, b: int): int\n'
+            f'Adds two integers together and returns the sum. {marker} '
+            'The rest of the description pads it past the minimum length rule.\n'
+            '\n'
+            '## Behavior\n\n'
+            'The addition is commutative and handles negative integers.\n'
+            '\n'
+            '## Usage examples\n\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0')
+
+
 # --- parse_issue_ref ----------------------------------------------------------
 
 
@@ -1228,6 +1244,21 @@ def test_run_refine_chat_rejects_a_noncompilable_mrsh_lock(capsys: Any) -> None:
     assert 'free-form document' not in out  # the non-compilable proposal was never shown
     assert 'No functions or types found in file' in out  # the parser error was reported
     assert 'Show the proposal now?' in out  # only the corrected lock reached the gate
+
+
+def test_run_refine_chat_accepts_a_subsection_mrsh_lock(capsys: Any) -> None:
+    # The extended .mrsh format allows "##" subsections inside a function section (the usage-
+    # examples list still last): such a lock passes the format gate and locks normally.
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_subsections('subsection spec')
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec_subsections('subsection spec')}
+    assert 'Show the proposal now?' in capsys.readouterr().out
 
 
 def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:

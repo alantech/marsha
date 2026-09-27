@@ -296,9 +296,12 @@ def _locked_format_note(kind: str) -> str:
                 'parser marsha compile uses, and a rewrite that would not compile is sent '
                 'back to you with the parser error. Keep the original file\'s structure '
                 'and update it in place: each function is a "# func name(args): return '
-                'type" section with a description and a usage-examples list (at least two '
-                'examples, which the test suite is derived from) — not a restructured '
-                'free-form document.\n')
+                'type" section, starting with a description paragraph, organized with '
+                '"##" (or deeper) subsections as needed, and ending with its '
+                'usage-examples list (at least two examples, which the test suite is '
+                'derived from — keep it a list block of its own, separated from any other '
+                'list by a paragraph, since markdown merges lists that are only '
+                'blank-line apart) — not a restructured free-form document.\n')
     if kind == 'issue':
         return ('When you signal the design is locked, emit a line that is exactly '
                 '[[NEW:TITLE]] followed by the new title (one line), then a line that is exactly '
@@ -721,8 +724,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                              + '\n- '.join(format_errors)
                              + '\nRe-emit the locked design as a valid .mrsh: each '
                                'function is a "# func name(args): return type" section '
-                               'with a description and a usage-examples list (at least '
-                               'two examples), keeping the original file\'s structure.')
+                               'starting with a description paragraph, ending with its '
+                               'usage-examples list (at least two examples), with '
+                               '"##" subsections allowed in between, keeping the '
+                               'original file\'s structure.')
                 if format_errors:
                     print(f'Note: the rewrite is not a valid .mrsh '
                           f'({format_errors[0]}); the assistant is fixing it.')

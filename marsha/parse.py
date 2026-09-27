@@ -32,8 +32,12 @@ def format_marsha_for_llm(meta: MarshaMeta) -> str:
         ret = ''
         desc_parts: list[str] = []
         reqs = ''
-        list_started = False
-        for (i, child) in enumerate(ast['children']):
+        children = ast['children']
+        last_list_i = -1
+        for (i, child) in enumerate(children):
+            if child['type'] == 'List':
+                last_list_i = i
+        for (i, child) in enumerate(children):
             if i == 0:
                 # Special handling for the initial header (for now)
                 if child['type'] != 'Heading':
@@ -48,11 +52,13 @@ def format_marsha_for_llm(meta: MarshaMeta) -> str:
                 else:
                     ret = header.split('):')[1].strip()
                 continue
-            if child['type'] == 'List':
-                list_started = True
+            if i == last_list_i:
+                # The usage examples: the section's final list block (validate_marsha_fn
+                # requires a section to end with its examples list); an earlier list (e.g.
+                # under a "##" subsection) is description content.
                 reqs = to_markdown(child)
                 continue
-            if list_started:
+            if last_list_i != -1 and i > last_list_i:
                 raise Exception(
                     'Function description must come *before* usage examples')
             desc_parts.append(to_markdown(child))
