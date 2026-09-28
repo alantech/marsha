@@ -1396,10 +1396,11 @@ def test_spec_urls_finds_nothing_without_urls() -> None:
 
 
 def test_spec_endpoint_errors_flags_dead_routes_and_unreachable_hosts() -> None:
-    # A 404/410 route and an unreachable host are dead; a 200 is alive, and the probe
-    # substitutes a sample value for each placeholder.
+    # A 404/410 route, a 5xx server failure, and an unreachable host are dead; a 200 is
+    # alive, and the probe substitutes a sample value for each placeholder.
     dead = 'https://dead.example.com/api?q={q}'
     gone = 'https://gone.example.com/v1'
+    broken = 'https://broken.example.com/v1'
     live = 'https://live.example.com/v1/{id}'
     probed: list[str] = []
 
@@ -1407,19 +1408,23 @@ def test_spec_endpoint_errors_flags_dead_routes_and_unreachable_hosts() -> None:
         probed.append(url)
         if url.startswith('https://gone.example.com'):
             raise OSError('[Errno -3] name resolution failed')
+        if url.startswith('https://broken.example.com'):
+            raise _http_error(503, url)
         if url == 'https://live.example.com/v1/Test':
             return 200, 'application/json', b'{}'
         raise _http_error(410, url)
 
     with patch.object(tools, 'http_get', new=fake_get):
         errors = asyncio.run(
-            refine._spec_endpoint_errors(f'{dead} {gone} {live}'))
+            refine._spec_endpoint_errors(f'{dead} {gone} {broken} {live}'))
     assert errors == [
         f'{dead} — HTTP 410',
         f'{gone} — unreachable ([Errno -3] name resolution failed)',
+        f'{broken} — HTTP 503',
     ]
     assert probed == ['https://dead.example.com/api?q=Test',
                       'https://gone.example.com/v1',
+                      'https://broken.example.com/v1',
                       'https://live.example.com/v1/Test']
 
 

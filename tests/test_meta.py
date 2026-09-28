@@ -160,21 +160,23 @@ def test_top_level_sections_backtick_info_string_with_backtick_is_not_a_fence() 
     assert len(functions) == 2
 
 
-def test_top_level_sections_tilde_info_string_starting_with_backtick_is_not_a_fence() -> None:
-    # CommonMark: a tilde fence's info string cannot begin with a backtick (after optional
-    # spaces) — such a line is a paragraph, not a fence opener, and must not start fence
-    # mode (which would swallow the later sections). Tested at the splitter level: the
-    # downstream markdown parser is allowed to read the line differently.
+def test_top_level_sections_tilde_info_string_may_start_with_backtick() -> None:
+    # CommonMark: a tilde fence's info string can contain backticks and tildes (unlike a
+    # backtick fence's) — "~~~`code" is a valid fence opener, and a "# " heading inside the
+    # fence is code, not a top-level section.
     spec = ('# func add(a: int, b: int): int\n'
             'Adds two integers together and returns the sum.\n'
             '~~~`code\n'
-            'still description text\n'
-            '\n'
             '# func sub(a: int): int\n'
-            'Subtracts one from another and returns the difference.')
+            'inside the fence\n'
+            '~~~\n'
+            '\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0')
     sections = meta._top_level_sections(spec)
-    assert len(sections) == 3  # preamble + two functions: the "~~~`code" line opened no fence
-    assert '~~~`code' in sections[1]  # it stayed in the first function section
+    assert len(sections) == 2  # preamble + one function: "# func sub" is fence content
+    assert '# func sub' in sections[1]
+    assert sections[1].count('# func') == 1  # only the real heading opens a section
 
 
 def test_top_level_sections_indented_backtick_line_is_content() -> None:

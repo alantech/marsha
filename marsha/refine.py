@@ -60,9 +60,11 @@ REFINE_MAX_TOOL_ROUNDS = 10
 # probes (a real spec names a handful of endpoints; the rest are the model's to verify).
 ENDPOINT_PROBE_TIMEOUT = 10
 ENDPOINT_PROBE_LIMIT = 10
-# Statuses that mean the endpoint's route is gone (a dead endpoint), as opposed to an endpoint
-# that exists but rejects the probe's sample values: a 400/403/422 for an arbitrary sample is a
-# live endpoint refusing the request, not a dead one.
+# Statuses that mean the endpoint is unusable for the spec's purposes: 404/410 — the route is
+# gone, and 5xx — the server answers with an error instead of a usable response (a transient
+# 5xx costs one bounce: the model re-verifies and re-locks, or the user passes
+# --no-endpoint-check). A 400/403/422 for an arbitrary sample is different: the endpoint
+# exists and refused the request, it did not fail.
 _DEAD_ENDPOINT_STATUSES = (404, 410)
 
 # Anchored: the URL must be the whole value. An unanchored search would let garbage around a
@@ -508,12 +510,13 @@ async def _spec_endpoint_errors(text: str) -> list[str]:
     """The external endpoints named in `text` that do not respond, as `url — reason` lines.
 
     The harness decides endpoint liveness itself rather than trusting the model to have
-    checked: a status in _DEAD_ENDPOINT_STATUSES means the route is gone, and an unreachable
-    host means nothing is listening. An endpoint that exists but rejects the probe's sample
-    values (a 400/403/422) is not dead — it is simply unverifiable from here, as is an
-    endpoint on a non-public host (which tools.http_get's SSRF guard refuses to fetch). When
-    no probe could connect at all, the network — not the endpoints — is down, and nothing is
-    reported (a refine session must stay usable offline)."""
+    checked: a status in _DEAD_ENDPOINT_STATUSES means the route is gone, a 5xx means the
+    server is failing, and an unreachable host means nothing is listening. An endpoint that
+    exists but rejects the probe's sample values (a 400/403/422) is not dead — it is simply
+    unverifiable from here, as is an endpoint on a non-public host (which tools.http_get's
+    SSRF guard refuses to fetch). When no probe could connect at all, the network — not the
+    endpoints — is down, and nothing is reported (a refine session must stay usable
+    offline)."""
     urls = _spec_urls(text)[:ENDPOINT_PROBE_LIMIT]
     if not urls:
         return []
@@ -525,7 +528,7 @@ async def _spec_endpoint_errors(text: str) -> list[str]:
                 _probe_url(url), timeout=ENDPOINT_PROBE_TIMEOUT)
         except urllib.error.HTTPError as e:
             connected = True
-            if e.code in _DEAD_ENDPOINT_STATUSES:
+            if e.code in _DEAD_ENDPOINT_STATUSES or e.code >= 500:
                 errors.append(f'{url} — HTTP {e.code}')
         except Exception as e:
             # A 'blocked:' message is the SSRF guard refusing a non-public host: unverifiable,
