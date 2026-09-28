@@ -7,8 +7,10 @@ are exercised directly, and the `run_refine` driver is driven end-to-end with a 
 """
 
 import asyncio
+import email.message
 import json
 import os
+import urllib.error
 from typing import Any, Generator
 
 import types
@@ -18,6 +20,7 @@ import pytest
 
 from marsha import refine
 from marsha import term
+from marsha import tools
 from marsha.mappers.base import ContextOverflowError
 from marsha.spec_check import SPEC_CHECK_GROUNDED_NOTE
 
@@ -94,6 +97,24 @@ def _mrsh_spec_subsections(marker: str) -> str:
             '## Usage examples\n\n'
             '* add(1, 2) -> 3\n'
             '* add(-1, 1) -> 0')
+
+
+def _mrsh_spec_with_url(marker: str, url: str) -> str:
+    # A valid .mrsh whose description paragraph names an external endpoint: the URL sits
+    # where the .mrsh format rules allow it (inside the description block, the examples
+    # list still last), which the endpoint-verification tests need.
+    return ('# func add(a: int, b: int): int\n'
+            f'Adds two integers together and returns the sum. {marker} Data is fetched '
+            f'from {url} before the sum is returned, which pads the description past the '
+            'minimum length rule as well.\n'
+            '\n'
+            '* add(1, 2) -> 3\n'
+            '* add(-1, 1) -> 0')
+
+
+def _http_error(code: int, url: str = 'https://dead.example.com/api') -> Any:
+    # A urllib HTTPError for `code` (what tools.http_get raises for 4xx/5xx responses).
+    return urllib.error.HTTPError(url, code, 'err', email.message.Message(), None)
 
 
 # --- parse_issue_ref ----------------------------------------------------------
@@ -718,6 +739,63 @@ def test_run_refine_check_mrsh_format_invalid_fails_before_analysis(
     assert 'No functions or types found in file' in capsys.readouterr().err
 
 
+def test_run_refine_check_dead_endpoint_fails(
+        tmp_path: Any, capsys: Any) -> None:
+    # A spec that names an endpoint that does not respond is not implementable as written:
+    # --check reports the dead endpoint and exits non-zero even when the LLM analysis finds
+    # nothing else (the harness decides liveness, not the analysis model).
+    dead_url = 'https://dead.example.com/api'
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write(_mrsh_spec_with_url('the spec', dead_url))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': [], 'errors': []}
+
+    async def fake_probe(text: str) -> list[str]:
+        return [f'{dead_url} — HTTP 404']
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
+        rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
+    assert rc == 1
+    cap = capsys.readouterr()
+    assert 'does not respond' in cap.err  # the diagnostic is on stderr
+    assert dead_url in cap.err
+    assert 'Spec is locked' not in cap.out  # a dead endpoint is never "locked"
+
+
+def test_run_refine_passes_source_dead_endpoints_to_the_chat(
+        tmp_path: Any, capsys: Any) -> None:
+    # The source's non-responsive endpoints are probed before the analysis and handed to the
+    # chat, so the assistant knows up front which endpoints the locked design must replace.
+    dead_url = 'https://dead.example.com/api'
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write(_mrsh_spec_with_url('the spec', dead_url))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    seen: dict[str, Any] = {}
+
+    async def fake_chat(**k: Any) -> Any:
+        seen.update(k)
+        return refine.ChatResult('bail', None, 'bail')
+
+    async def fake_probe(text: str) -> list[str]:
+        return [f'{dead_url} — HTTP 404']
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert seen['dead_endpoints'] == [f'{dead_url} — HTTP 404']
+    assert '1 external endpoint(s) named in the spec do not respond' \
+        in capsys.readouterr().err
+
+
 def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
@@ -1259,6 +1337,161 @@ def test_run_refine_chat_accepts_a_subsection_mrsh_lock(capsys: Any) -> None:
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_subsections('subsection spec')}
     assert 'Show the proposal now?' in capsys.readouterr().out
+
+
+# --- spec endpoint verification -----------------------------------------------
+
+
+def test_spec_urls_extracts_urls_including_placeholders() -> None:
+    # A URL runs through its `{placeholder}` group even when the placeholder contains a
+    # space, trailing sentence punctuation is not part of it, and duplicates are dropped
+    # (in order of first appearance).
+    text = ('See https://api.example.com/v1/search?q={URL-encoded location}&limit=10 '
+            'and https://docs.example.com/page. Also (https://link.example.com/a) '
+            'and https://api.example.com/v1/search?q={URL-encoded location}&limit=10 '
+            'again.')
+    assert refine._spec_urls(text) == [
+        'https://api.example.com/v1/search?q={URL-encoded location}&limit=10',
+        'https://docs.example.com/page',
+        'https://link.example.com/a',
+    ]
+
+
+def test_spec_urls_finds_nothing_without_urls() -> None:
+    # A bare hostname or a non-http(s) scheme is not an endpoint to probe.
+    assert refine._spec_urls('no links here: api.example.com and ftp://files.example.com') \
+        == []
+
+
+def test_spec_endpoint_errors_flags_dead_routes_and_unreachable_hosts() -> None:
+    # A 404/410 route and an unreachable host are dead; a 200 is alive, and the probe
+    # substitutes a sample value for each placeholder.
+    dead = 'https://dead.example.com/api?q={q}'
+    gone = 'https://gone.example.com/v1'
+    live = 'https://live.example.com/v1/{id}'
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        if url.startswith('https://gone.example.com'):
+            raise OSError('[Errno -3] name resolution failed')
+        if url == 'https://live.example.com/v1/Test':
+            return 200, 'application/json', b'{}'
+        raise _http_error(410, url)
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(
+            refine._spec_endpoint_errors(f'{dead} {gone} {live}'))
+    assert errors == [
+        f'{dead} — HTTP 410',
+        f'{gone} — unreachable ([Errno -3] name resolution failed)',
+    ]
+    assert probed == ['https://dead.example.com/api?q=Test',
+                      'https://gone.example.com/v1',
+                      'https://live.example.com/v1/Test']
+
+
+def test_spec_endpoint_errors_treats_a_rejected_probe_as_alive() -> None:
+    # A 400/403 for the probe's sample values means the endpoint exists and refused the
+    # request (some APIs want auth or a real value): alive, not dead.
+    url = 'https://strict.example.com/v1/{id}'
+
+    async def fake_get(url2: str, timeout: int = 0) -> Any:
+        raise _http_error(403, url2)
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        assert asyncio.run(refine._spec_endpoint_errors(url)) == []
+
+
+def test_spec_endpoint_errors_skips_nonpublic_hosts() -> None:
+    # The SSRF guard refuses non-public hosts: such an endpoint is unverifiable from here,
+    # not dead (a spec for an internal API is the user's to own, not this probe's).
+    url = 'https://api.internal.example.com/v1'
+
+    async def fake_get(url2: str, timeout: int = 0) -> Any:
+        raise Exception('blocked: api.internal.example.com is not a public host '
+                        '(SSRF guard)')
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        assert asyncio.run(refine._spec_endpoint_errors(url)) == []
+
+
+def test_spec_endpoint_errors_skips_all_when_the_network_is_down() -> None:
+    # When every probe fails to connect, it is the network that is down, not the endpoints:
+    # nothing is reported, so a refine session stays usable offline.
+    urls = 'https://one.example.com/a https://two.example.com/b'
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        raise OSError('[Errno -3] Temporary failure in name resolution')
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        assert asyncio.run(refine._spec_endpoint_errors(urls)) == []
+
+
+def test_run_refine_chat_rejects_a_dead_endpoint_lock(capsys: Any) -> None:
+    # A lock whose payload names an endpoint that does not respond is never gated or shown
+    # (the harness's backstop against a credulous model): the failure is fed back to the
+    # assistant, and only the lock against verified-live endpoints reaches the gate.
+    dead_url = 'https://dead.example.com/api?q={q}'
+    bad = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' \
+        + _mrsh_spec_with_url('dead endpoint', dead_url)
+    good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the live spec')
+    probes = 0
+
+    async def fake_probe(text: str) -> list[str]:
+        nonlocal probes
+        probes += 1
+        return [f'{dead_url} — HTTP 404'] if dead_url in text else []
+
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([bad, good])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec('the live spec')}
+    assert probes == 2  # both locks were probed
+    out = capsys.readouterr().out
+    assert 'dead endpoint' not in out  # the dead-endpoint proposal was never shown
+    assert 'does not respond' in out  # the note was on screen
+    assert 'Show the proposal now?' in out
+
+
+def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
+        capsys: Any) -> None:
+    # The probe reports nothing when the network is down: a lock that names an endpoint
+    # still reaches the gate, so refine stays usable offline.
+    url = 'https://api.example.com/v1'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', url)
+
+    async def fake_probe(text: str) -> list[str]:
+        return []
+
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec_with_url('the spec', url)}
+    assert 'Show the proposal now?' in capsys.readouterr().out
+
+
+def test_initial_chat_message_reports_dead_endpoints() -> None:
+    # The source's non-responsive endpoints are told to the assistant up front (a harness
+    # measurement, presented as its own section), and the section is absent otherwise.
+    msg = refine._initial_chat_message(
+        'mrsh', 'SPEC', [], [], '',
+        dead_endpoints=['https://dead.example.com/api — HTTP 404'])
+    assert 'External endpoints that do not respond' in msg
+    assert 'https://dead.example.com/api — HTTP 404' in msg
+    assert 'A dead endpoint cannot be locked into the specification' in msg
+    assert 'External endpoints that do not respond' not in refine._initial_chat_message(
+        'mrsh', 'SPEC', [], [], '', dead_endpoints=None)
 
 
 def test_run_refine_chat_lock_and_bail_together_retries(capsys: Any) -> None:
