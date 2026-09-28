@@ -46,8 +46,8 @@ def _fixed_context_window() -> Generator[None, None, None]:
 
 def _args(**kw: Any) -> Any:
     base = dict(source=None, issue=None, linear=None, check=False,
-                max_turns=40, dry_run=False, target='python',
-                target_version=None, debug=False, trace=False,
+                max_turns=40, dry_run=False, no_endpoint_check=False,
+                target='python', target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
     base.update(kw)
     return types.SimpleNamespace(**base)
@@ -796,6 +796,38 @@ def test_run_refine_passes_source_dead_endpoints_to_the_chat(
         in capsys.readouterr().err
 
 
+def test_run_refine_no_endpoint_check_skips_the_probe(
+        tmp_path: Any, capsys: Any) -> None:
+    # With --no-endpoint-check the source is never probed (no dead-endpoint report, no note):
+    # for endpoints a generic sample request cannot reach, the user owns the liveness
+    # judgment.
+    url = 'https://private.example.com/v1'
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write(_mrsh_spec_with_url('the spec', url))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    seen: dict[str, Any] = {}
+
+    async def fake_chat(**k: Any) -> Any:
+        seen.update(k)
+        return refine.ChatResult('bail', None, 'bail')
+
+    async def fake_probe(text: str) -> list[str]:
+        raise AssertionError('the probe must not run with --no-endpoint-check')
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
+        rc = asyncio.run(refine.run_refine(_args(source=p, no_endpoint_check=True)))
+    assert rc == 1
+    assert seen['dead_endpoints'] == []
+    assert seen['check_endpoints'] is False
+    assert 'do not respond' not in capsys.readouterr().err
+
+
 def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
     async def fake_analyze(spec_text: str, **k: Any) -> Any:
         return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
@@ -1476,6 +1508,28 @@ def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec_with_url('the spec', url)}
+    assert 'Show the proposal now?' in capsys.readouterr().out
+
+
+def test_run_refine_chat_skips_the_endpoint_probe_when_disabled(capsys: Any) -> None:
+    # With endpoint checking off (--no-endpoint-check) the lock-gate probe never runs (a
+    # private endpoint a generic sample request cannot reach): a lock naming such an endpoint
+    # is neither probed nor bounced, and reaches the gate as usual.
+    url = 'https://private.example.com/v1'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', url)
+
+    async def fake_probe(text: str) -> list[str]:
+        raise AssertionError('the probe must not run when endpoint checking is off')
+
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y', check_endpoints=False))
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_with_url('the spec', url)}
     assert 'Show the proposal now?' in capsys.readouterr().out

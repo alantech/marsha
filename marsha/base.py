@@ -165,6 +165,10 @@ refine_parser.add_argument('--max-turns', type=int, default=40,
                            help='Safety cap on the number of conversation turns (default: 40).')
 refine_parser.add_argument('--dry-run', action='store_true',
                            help='Show the updated source without writing it back.')
+refine_parser.add_argument('--no-endpoint-check', action='store_true',
+                           help='Skip the liveness probe of the external endpoints the spec '
+                                'names (for private endpoints a generic sample request cannot '
+                                'reach); the locked design is then not verified against them.')
 refine_parser.add_argument('--target', default='python',
                            help='Target language (for runtime setup; refine is '
                                 'language-agnostic). Default: python.')

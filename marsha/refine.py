@@ -684,7 +684,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                           errors: list[str], current_repo: str, in_repo: bool, cwd: str,
                           model: str | None, max_turns: int,
                           read_line: Callable[[], str], debug: bool = False,
-                          dead_endpoints: list[str] | None = None) -> ChatResult:
+                          dead_endpoints: list[str] | None = None,
+                          check_endpoints: bool = True) -> ChatResult:
     """Drive the multi-turn conversation until the design is locked, bailed, or turns run out.
 
     Each turn the assistant may first use the read-only tools to investigate, then speaks to the
@@ -696,7 +697,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     tool result, so it can still lock. `dead_endpoints` are the source's endpoints the harness
     found non-responsive: the assistant is told of them up front, and any lock whose payload
     names a non-responsive endpoint is bounced back (with the failure) before it reaches the
-    gate. Returns the outcome.
+    gate; with `check_endpoints` False (--no-endpoint-check) the probe is off and locks are
+    not verified against their endpoints. Returns the outcome.
     """
     # The read-only tools: inside a git working tree (any source kind), the full refine set —
     # a checkout without an origin still has a codebase to inspect, so the tools are gated on
@@ -769,7 +771,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             endpoint_errors: list[str] = []
             if locked and kind == 'mrsh' and payload is not None:
                 format_errors = _mrsh_format_errors(payload['spec'])
-            if locked and payload is not None and not format_errors:
+            if locked and payload is not None and not format_errors \
+                    and check_endpoints:
                 if _spec_urls(_payload_text(kind, payload)):
                     # The probe is network I/O on the lock path: say we are alive.
                     print('Checking the endpoints named in the spec...',
@@ -823,7 +826,8 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     followup_endpoints: list[str] = []
                     if kind == 'mrsh' and payload is not None:
                         followup_errors = _mrsh_format_errors(payload['spec'])
-                    if payload is not None and not followup_errors:
+                    if payload is not None and not followup_errors \
+                            and check_endpoints:
                         followup_endpoints = await _spec_endpoint_errors(
                             _payload_text(kind, payload))
                     if payload is not None and not followup_errors \
@@ -1185,8 +1189,11 @@ async def run_refine(args: Any) -> int:
     # The source's external endpoints are probed before the analysis: a spec that depends
     # on a dead API is not implementable as written, and the harness decides that
     # deterministically rather than trusting the model to have checked (the locked payload
-    # is probed again in the chat before it reaches the gate).
-    dead_endpoints = await _spec_endpoint_errors(spec_text)
+    # is probed again in the chat before it reaches the gate). --no-endpoint-check turns the
+    # probe off — for a private endpoint a generic sample request cannot reach (one that 404s
+    # on an unknown value, say) — and the user owns the liveness judgment then.
+    check_endpoints = not bool(getattr(args, 'no_endpoint_check', False))
+    dead_endpoints = await _spec_endpoint_errors(spec_text) if check_endpoints else []
     if dead_endpoints:
         print(f'Note: {len(dead_endpoints)} external endpoint(s) named in the spec do '
               'not respond.'
@@ -1221,7 +1228,7 @@ async def run_refine(args: Any) -> int:
         result = await run_refine_chat(
             kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
             errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
-            dead_endpoints=dead_endpoints,
+            dead_endpoints=dead_endpoints, check_endpoints=check_endpoints,
             model=getattr(args, 'model', None),
             max_turns=int(getattr(args, 'max_turns', 40)),
             read_line=_read_line, debug=debug)
