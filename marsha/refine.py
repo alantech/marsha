@@ -12,6 +12,7 @@ open ambiguities, the reusable "is this spec locked?" gate for `diff` (#219) and
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import os
@@ -56,8 +57,10 @@ REFINE_MAX_TOOL_ROUNDS = 10
 # The refine step probes the external endpoints a spec names before a design is locked in (a
 # dead API must not be locked into a spec the compile will trust, on the model's say-so). This
 # is the probe's network timeout — well under the page-fetch timeout: it is a liveness check on
-# the lock path, not a content fetch — and the cap on how many of the spec's URLs one pass
-# probes (a real spec names a handful of endpoints; the rest are the model's to verify).
+# the lock path, not a content fetch. The probes of one sweep run concurrently, so a sweep's
+# worst case is one timeout rather than the sum of them, and the cap on how many of the
+# spec's URLs one sweep probes bounds the in-flight fetches (a real spec names a handful of
+# endpoints; the rest are the model's to verify).
 ENDPOINT_PROBE_TIMEOUT = 10
 ENDPOINT_PROBE_LIMIT = 10
 # Statuses that mean the endpoint is unusable for the spec's purposes: 404/410 — the route is
@@ -518,28 +521,33 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
     SSRF guard refuses to fetch). When no probe could connect at all, the network — not the
     endpoints — is down, and nothing is reported (a refine session must stay usable
     offline). URLs in `skip` (endpoints the person confirmed to keep) are not probed at
-    all."""
+    all. The probes run concurrently (http_get already leaves the event loop for the
+    blocking fetch), so a sweep's worst case is one timeout, not the sum of the sweep's
+    timeouts."""
     urls = _spec_urls(text, skip)[:ENDPOINT_PROBE_LIMIT]
     if not urls:
         return []
-    errors: list[str] = []
-    connected = False
-    for url in urls:
+
+    async def probe(url: str) -> tuple[bool, str | None]:
+        # (connected, error line or None): a 4xx/5xx HTTP answer proves the network is up
+        # (connected True), even when the answer itself is the failure.
         try:
             _status, _ctype, _body = await tools.http_get(
                 _probe_url(url), timeout=ENDPOINT_PROBE_TIMEOUT)
         except urllib.error.HTTPError as e:
-            connected = True
-            if e.code in _DEAD_ENDPOINT_STATUSES or e.code >= 500:
-                errors.append(f'{url} — HTTP {e.code}')
+            dead = e.code in _DEAD_ENDPOINT_STATUSES or e.code >= 500
+            return True, (f'{url} — HTTP {e.code}' if dead else None)
         except Exception as e:
             # A 'blocked:' message is the SSRF guard refusing a non-public host: unverifiable,
             # not dead (a spec for an internal API is the user's to own, not this probe's).
-            if not str(e).startswith('blocked:'):
-                errors.append(f'{url} — unreachable ({e})')
-        else:
-            connected = True
-    if not connected and errors:
+            if str(e).startswith('blocked:'):
+                return False, None
+            return False, f'{url} — unreachable ({e})'
+        return True, None
+
+    results = await asyncio.gather(*(probe(url) for url in urls))
+    errors = [line for _connected, line in results if line is not None]
+    if not any(connected for connected, _line in results) and errors:
         # Every probe failed to connect: the network is down, not the endpoints.
         return []
     return errors

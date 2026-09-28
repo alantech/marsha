@@ -1450,15 +1450,36 @@ def test_spec_endpoint_errors_flags_dead_routes_and_unreachable_hosts() -> None:
     with patch.object(tools, 'http_get', new=fake_get):
         errors = asyncio.run(
             refine._spec_endpoint_errors(f'{dead} {gone} {broken} {live}'))
+    # The probes run concurrently: the errors keep the spec's URL order, but the fetches
+    # themselves need not complete in it.
     assert errors == [
         f'{dead} — HTTP 410',
         f'{gone} — unreachable ([Errno -3] name resolution failed)',
         f'{broken} — HTTP 503',
     ]
-    assert probed == ['https://dead.example.com/api?q=Test',
-                      'https://gone.example.com/v1',
-                      'https://broken.example.com/v1',
-                      'https://live.example.com/v1/Test']
+    assert sorted(probed) == sorted([
+        'https://dead.example.com/api?q=Test',
+        'https://gone.example.com/v1',
+        'https://broken.example.com/v1',
+        'https://live.example.com/v1/Test'])
+
+
+def test_spec_endpoint_errors_probes_run_concurrently() -> None:
+    # A sweep's latency is its slowest probe, not the sum: every probe must be in flight
+    # before the first one finishes (serial awaits would interleave start/end per URL).
+    events: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        events.append(f'start {url}')
+        await asyncio.sleep(0.05)
+        events.append(f'end {url}')
+        return 200, 'application/json', b'{}'
+
+    urls = ' '.join(f'https://host{i}.example.com/v1' for i in range(4))
+    with patch.object(tools, 'http_get', new=fake_get):
+        assert asyncio.run(refine._spec_endpoint_errors(urls)) == []
+    assert len(events) == 8
+    assert all(e.startswith('start') for e in events[:4])  # all four overlapped
 
 
 def test_spec_endpoint_errors_treats_a_rejected_probe_as_alive() -> None:
