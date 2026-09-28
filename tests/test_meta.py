@@ -179,6 +179,31 @@ def test_top_level_sections_tilde_info_string_may_start_with_backtick() -> None:
     assert sections[1].count('# func') == 1  # only the real heading opens a section
 
 
+def test_top_level_sections_tolerates_crlf_line_endings() -> None:
+    # A CRLF file that reaches the splitter without newline normalization (the .mrsh read
+    # paths normalize, but the splitter must not depend on it): a "```" + CR line is still a
+    # closing fence, and the sections still split.
+    spec = ('# func add(a: int, b: int): int\r\n'
+            'Adds two integers together and returns the sum. Padding padding padding '
+            'padding padding padding padding padding padding padding padding padding.\r\n'
+            '\r\n'
+            '```\r\n'
+            '# not a heading\r\n'
+            '```\r\n'
+            '\r\n'
+            '* add(1, 2) -> 3\r\n'
+            '* add(-1, 1) -> 0\r\n'
+            '\r\n'
+            '# func sub(a: int): int\r\n'
+            'Subtracts one from another and returns the difference. Padding padding '
+            'padding padding padding padding padding padding padding padding.\r\n'
+            '\r\n'
+            '* sub(5, 3) -> 2\r\n'
+            '* sub(1, 5) -> -4')
+    functions, _, _ = meta.extract_functions_and_types(spec)
+    assert len(functions) == 2
+
+
 def test_top_level_sections_indented_backtick_line_is_content() -> None:
     # A backtick line indented by four or more spaces is an indented code block, not a fence
     # opener (CommonMark allows at most three leading spaces): it must not put the parser

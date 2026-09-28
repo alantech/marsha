@@ -167,7 +167,12 @@ def _top_level_sections(file: str) -> list[str]:
     current: list[str] = []
     fence_char = ''
     fence_len = 0
-    for line in file.split('\n'):
+    for raw_line in file.split('\n'):
+        # A stray carriage return (a CRLF file that reached the splitter without newline
+        # normalization — the .mrsh read paths normalize, but the splitter should not depend
+        # on it) must not defeat the fence and heading line tests: a "```" + CR line is
+        # still a closing fence.
+        line = raw_line.rstrip('\r')
         if fence_char:
             m = re.match(r'^( {0,3})(`{3,}|~{3,})[ \t]*$', line)
             if m and m.group(2)[0] == fence_char and len(m.group(2)) >= fence_len:
