@@ -46,8 +46,8 @@ def _fixed_context_window() -> Generator[None, None, None]:
 
 def _args(**kw: Any) -> Any:
     base = dict(source=None, issue=None, linear=None, check=False,
-                max_turns=40, dry_run=False, no_endpoint_check=False,
-                target='python', target_version=None, debug=False, trace=False,
+                max_turns=40, dry_run=False, target='python',
+                target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
     base.update(kw)
     return types.SimpleNamespace(**base)
@@ -755,8 +755,12 @@ def test_run_refine_check_dead_endpoint_fails(
     async def fake_probe(text: str) -> list[str]:
         return [f'{dead_url} — HTTP 404']
 
+    async def fake_read_line() -> str:
+        raise AssertionError('--check is headless: it reports, it does not ask')
+
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, '_read_line', new=fake_read_line):
         rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
     assert rc == 1
     cap = capsys.readouterr()
@@ -765,42 +769,11 @@ def test_run_refine_check_dead_endpoint_fails(
     assert 'Spec is locked' not in cap.out  # a dead endpoint is never "locked"
 
 
-def test_run_refine_passes_source_dead_endpoints_to_the_chat(
+def test_run_refine_confirmed_dead_source_endpoint_is_exempted(
         tmp_path: Any, capsys: Any) -> None:
-    # The source's non-responsive endpoints are probed before the analysis and handed to the
-    # chat, so the assistant knows up front which endpoints the locked design must replace.
-    dead_url = 'https://dead.example.com/api'
-    p = str(tmp_path / 'spec.mrsh')
-    with open(p, 'w') as f:
-        f.write(_mrsh_spec_with_url('the spec', dead_url))
-
-    async def fake_analyze(spec_text: str, **k: Any) -> Any:
-        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
-
-    seen: dict[str, Any] = {}
-
-    async def fake_chat(**k: Any) -> Any:
-        seen.update(k)
-        return refine.ChatResult('bail', None, 'bail')
-
-    async def fake_probe(text: str) -> list[str]:
-        return [f'{dead_url} — HTTP 404']
-
-    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
-         patch.object(refine, 'run_refine_chat', new=fake_chat), \
-         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
-        rc = asyncio.run(refine.run_refine(_args(source=p)))
-    assert rc == 1
-    assert seen['dead_endpoints'] == [f'{dead_url} — HTTP 404']
-    assert '1 external endpoint(s) named in the spec do not respond' \
-        in capsys.readouterr().err
-
-
-def test_run_refine_no_endpoint_check_skips_the_probe(
-        tmp_path: Any, capsys: Any) -> None:
-    # With --no-endpoint-check the source is never probed (no dead-endpoint report, no note):
-    # for endpoints a generic sample request cannot reach, the user owns the liveness
-    # judgment.
+    # When the person confirms the source's dead endpoint as-is (a private API a generic
+    # sample request cannot reach), it is exempted for the session: the chat neither hears
+    # of it nor probes it at the lock gate.
     url = 'https://private.example.com/v1'
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
@@ -815,17 +788,77 @@ def test_run_refine_no_endpoint_check_skips_the_probe(
         seen.update(k)
         return refine.ChatResult('bail', None, 'bail')
 
-    async def fake_probe(text: str) -> list[str]:
-        raise AssertionError('the probe must not run with --no-endpoint-check')
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        return [f'{url} — HTTP 404']
 
     with patch.object(refine, 'analyze_spec', new=fake_analyze), \
          patch.object(refine, 'run_refine_chat', new=fake_chat), \
-         patch.object(refine, '_spec_endpoint_errors', new=fake_probe):
-        rc = asyncio.run(refine.run_refine(_args(source=p, no_endpoint_check=True)))
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, '_read_line', new=lambda: 'y'):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
     assert rc == 1
     assert seen['dead_endpoints'] == []
-    assert seen['check_endpoints'] is False
-    assert 'do not respond' not in capsys.readouterr().err
+    assert seen['approved_endpoints'] == {url}
+
+
+def test_run_refine_unconfirmed_dead_source_endpoint_is_reported_to_the_chat(
+        tmp_path: Any, capsys: Any) -> None:
+    # When the person wants a working alternative, the dead endpoint is told to the chat
+    # (and the lock gate will still probe for it).
+    url = 'https://dead.example.com/api'
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write(_mrsh_spec_with_url('the spec', url))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['a'], 'errors': []}
+
+    seen: dict[str, Any] = {}
+
+    async def fake_chat(**k: Any) -> Any:
+        seen.update(k)
+        return refine.ChatResult('bail', None, 'bail')
+
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        return [f'{url} — HTTP 404']
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, '_read_line', new=lambda: 'n'):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert seen['dead_endpoints'] == [f'{url} — HTTP 404']
+    assert seen['approved_endpoints'] == set()
+    assert '1 external endpoint(s) named in the spec do not respond' \
+        in capsys.readouterr().err
+
+
+def test_run_refine_bails_at_the_source_endpoint_question(
+        tmp_path: Any, capsys: Any) -> None:
+    # A bail token at the source-level endpoint question ends the session before the
+    # analysis or the chat.
+    url = 'https://private.example.com/v1'
+    p = str(tmp_path / 'spec.mrsh')
+    with open(p, 'w') as f:
+        f.write(_mrsh_spec_with_url('the spec', url))
+
+    async def fake_analyze(spec_text: str, **k: Any) -> Any:
+        raise AssertionError('the analysis must not run after a bail')
+
+    async def fake_chat(**k: Any) -> Any:
+        raise AssertionError('the chat must not run after a bail')
+
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        return [f'{url} — HTTP 404']
+
+    with patch.object(refine, 'analyze_spec', new=fake_analyze), \
+         patch.object(refine, 'run_refine_chat', new=fake_chat), \
+         patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, '_read_line', new=lambda: '!bail'):
+        rc = asyncio.run(refine.run_refine(_args(source=p)))
+    assert rc == 1
+    assert 'Bailed out; the source was not modified.' in capsys.readouterr().out
 
 
 def test_run_refine_check_issue_uses_gate_and_loader(capsys: Any) -> None:
@@ -1465,35 +1498,109 @@ def test_spec_endpoint_errors_skips_all_when_the_network_is_down() -> None:
         assert asyncio.run(refine._spec_endpoint_errors(urls)) == []
 
 
-def test_run_refine_chat_rejects_a_dead_endpoint_lock(capsys: Any) -> None:
-    # A lock whose payload names an endpoint that does not respond is never gated or shown
-    # (the harness's backstop against a credulous model): the failure is fed back to the
-    # assistant, and only the lock against verified-live endpoints reaches the gate.
+def test_run_refine_chat_sends_back_a_dead_endpoint_when_not_kept(capsys: Any) -> None:
+    # A lock whose payload names an endpoint that does not respond is asked of the person
+    # before the gate; when they want a working alternative, the failure is fed back to the
+    # assistant, and only the corrected lock reaches the gate.
     dead_url = 'https://dead.example.com/api?q={q}'
     bad = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' \
         + _mrsh_spec_with_url('dead endpoint', dead_url)
     good = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('the live spec')
-    probes = 0
 
-    async def fake_probe(text: str) -> list[str]:
-        nonlocal probes
-        probes += 1
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
         return [f'{dead_url} — HTTP 404'] if dead_url in text else []
 
+    lines = iter(['n', 'y'])  # decline the keep question, then accept the proposal gate
     with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
          patch.object(refine, 'get_mapper',
                       new=lambda *a, **k: _scripted_mapper([bad, good])):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'y'))
+            read_line=lambda: next(lines, 'y')))
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec('the live spec')}
-    assert probes == 2  # both locks were probed
     out = capsys.readouterr().out
     assert 'dead endpoint' not in out  # the dead-endpoint proposal was never shown
-    assert 'does not respond' in out  # the note was on screen
+    assert 'does not respond' in out  # the endpoint question was on screen
     assert 'Show the proposal now?' in out
+
+
+def test_run_refine_chat_keeps_a_confirmed_dead_endpoint(capsys: Any) -> None:
+    # When the person confirms the dead endpoint as-is (a private API a generic sample
+    # request cannot reach), the lock is exempted and proceeds to the proposal gate.
+    dead_url = 'https://private.example.com/v1'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', dead_url)
+
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        if skip is not None and dead_url in skip:
+            return []
+        return [f'{dead_url} — HTTP 404'] if dead_url in text else []
+
+    lines = iter(['y', 'y'])  # keep the endpoint, then accept the proposal gate
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: next(lines, 'y')))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec_with_url('the spec', dead_url)}
+    out = capsys.readouterr().out
+    assert 'does not respond' in out  # the endpoint question was on screen
+    assert 'Show the proposal now?' in out
+
+
+def test_run_refine_chat_approved_endpoint_is_neither_probed_nor_prompted(
+        capsys: Any) -> None:
+    # An endpoint the person already confirmed (approved_endpoints) is not probed at the lock
+    # gate: no question, straight to the proposal gate.
+    dead_url = 'https://private.example.com/v1'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', dead_url)
+    reads = 0
+
+    def read_line() -> str:
+        nonlocal reads
+        reads += 1
+        return 'y'  # only the proposal gate asks
+
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        assert skip is not None and dead_url in skip, \
+            'an approved endpoint must be skipped, not re-probed'
+        return []
+
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=read_line,
+            approved_endpoints={dead_url}))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec_with_url('the spec', dead_url)}
+    assert reads == 1  # the endpoint question was never asked
+    assert 'does not respond' not in capsys.readouterr().out
+
+
+def test_run_refine_chat_bails_at_the_endpoint_question(capsys: Any) -> None:
+    # A bail token at the endpoint question ends the session (the source is not modified).
+    dead_url = 'https://private.example.com/v1'
+    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', dead_url)
+
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
+        return [f'{dead_url} — HTTP 404']
+
+    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
+         patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([locked])):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: '!bail'))
+    assert res.status == 'bail'
+    assert res.payload is None
 
 
 def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
@@ -1503,7 +1610,7 @@ def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
     url = 'https://api.example.com/v1'
     locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', url)
 
-    async def fake_probe(text: str) -> list[str]:
+    async def fake_probe(text: str, skip: Any = None) -> list[str]:
         return []
 
     with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
@@ -1513,28 +1620,6 @@ def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
             kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
             current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
             read_line=lambda: 'y'))
-    assert res.status == 'locked'
-    assert res.payload == {'spec': _mrsh_spec_with_url('the spec', url)}
-    assert 'Show the proposal now?' in capsys.readouterr().out
-
-
-def test_run_refine_chat_skips_the_endpoint_probe_when_disabled(capsys: Any) -> None:
-    # With endpoint checking off (--no-endpoint-check) the lock-gate probe never runs (a
-    # private endpoint a generic sample request cannot reach): a lock naming such an endpoint
-    # is neither probed nor bounced, and reaches the gate as usual.
-    url = 'https://private.example.com/v1'
-    locked = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec_with_url('the spec', url)
-
-    async def fake_probe(text: str) -> list[str]:
-        raise AssertionError('the probe must not run when endpoint checking is off')
-
-    with patch.object(refine, '_spec_endpoint_errors', new=fake_probe), \
-         patch.object(refine, 'get_mapper',
-                      new=lambda *a, **k: _scripted_mapper([locked])):
-        res = asyncio.run(refine.run_refine_chat(
-            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
-            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
-            read_line=lambda: 'y', check_endpoints=False))
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_with_url('the spec', url)}
     assert 'Show the proposal now?' in capsys.readouterr().out

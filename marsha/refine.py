@@ -468,13 +468,14 @@ _URL_START_RE = re.compile(r'https?://')
 _PLACEHOLDER_RE = re.compile(r'\{[^{}]*\}')
 
 
-def _spec_urls(text: str) -> list[str]:
+def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
     """The unique http(s) URLs named in a spec, in order of first appearance.
 
     A URL runs through a `{placeholder}` group even when the placeholder contains a space
     (`?q={URL-encoded location}` — the brace depth keeps it one URL), and trailing sentence
     punctuation that follows a URL in prose (and an unbalanced closing paren from markdown
-    links) is not part of it."""
+    links) is not part of it. URLs in `skip` (endpoints the person confirmed to keep) are
+    left out."""
     urls: list[str] = []
     seen: set[str] = set()
     for m in _URL_START_RE.finditer(text):
@@ -494,7 +495,7 @@ def _spec_urls(text: str) -> list[str]:
             url = url[:-1]
         while url.endswith(')') and url.count(')') > url.count('('):
             url = url[:-1]
-        if url not in seen:
+        if url not in seen and (skip is None or url not in skip):
             seen.add(url)
             urls.append(url)
     return urls
@@ -506,7 +507,7 @@ def _probe_url(url: str) -> str:
     return _PLACEHOLDER_RE.sub('Test', url)
 
 
-async def _spec_endpoint_errors(text: str) -> list[str]:
+async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list[str]:
     """The external endpoints named in `text` that do not respond, as `url — reason` lines.
 
     The harness decides endpoint liveness itself rather than trusting the model to have
@@ -516,8 +517,9 @@ async def _spec_endpoint_errors(text: str) -> list[str]:
     unverifiable from here, as is an endpoint on a non-public host (which tools.http_get's
     SSRF guard refuses to fetch). When no probe could connect at all, the network — not the
     endpoints — is down, and nothing is reported (a refine session must stay usable
-    offline)."""
-    urls = _spec_urls(text)[:ENDPOINT_PROBE_LIMIT]
+    offline). URLs in `skip` (endpoints the person confirmed to keep) are not probed at
+    all."""
+    urls = _spec_urls(text, skip)[:ENDPOINT_PROBE_LIMIT]
     if not urls:
         return []
     errors: list[str] = []
@@ -549,6 +551,32 @@ def _payload_text(kind: str, payload: dict[str, str]) -> str:
     if kind == 'mrsh':
         return payload['spec']
     return payload['title'] + '\n' + payload['body']
+
+
+def _endpoint_url(error: str) -> str:
+    # The URL part of a `url — reason` line from _spec_endpoint_errors.
+    return error.split(' — ', 1)[0]
+
+
+def _confirm_endpoint(subject: str, errors: list[str],
+                      read_line: Callable[[], str]) -> tuple[str, str]:
+    """Ask the person about the non-responding endpoints `subject` names, at the moment the
+    harness finds them (an endpoint the person knows is fine — a private one a generic
+    sample request cannot reach — is confirmed here, not pre-declared).
+
+    Returns ('keep', '') — use the endpoints as-is (they are exempted for the session),
+    ('fix', reply) — the assistant should look for a working alternative (reply carries the
+    person's words, if any), or ('bail', reply) — the person ended the session."""
+    print(f'\n{subject} names an endpoint that does not respond:\n'
+          + ''.join(f'- {e}\n' for e in errors)
+          + 'Use it as-is, or have the assistant look for a working alternative? '
+          '(y to keep / N to look)')
+    answer = read_line().strip()
+    if _is_bail_token(answer):
+        return 'bail', answer
+    if answer.lower() in ('y', 'yes', 'keep', 'k', 'anyway'):
+        return 'keep', ''
+    return 'fix', answer
 
 
 def _initial_chat_message(kind: str, spec_text: str, ambiguities: list[str],
@@ -688,7 +716,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                           model: str | None, max_turns: int,
                           read_line: Callable[[], str], debug: bool = False,
                           dead_endpoints: list[str] | None = None,
-                          check_endpoints: bool = True) -> ChatResult:
+                          approved_endpoints: set[str] | None = None) -> ChatResult:
     """Drive the multi-turn conversation until the design is locked, bailed, or turns run out.
 
     Each turn the assistant may first use the read-only tools to investigate, then speaks to the
@@ -698,10 +726,11 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     session ends with a handled 'error' result instead of an unhandled abort. If the tool-round
     budget runs out on the final turn, the assistant gets one extra call to process the pending
     tool result, so it can still lock. `dead_endpoints` are the source's endpoints the harness
-    found non-responsive: the assistant is told of them up front, and any lock whose payload
-    names a non-responsive endpoint is bounced back (with the failure) before it reaches the
-    gate; with `check_endpoints` False (--no-endpoint-check) the probe is off and locks are
-    not verified against their endpoints. Returns the outcome.
+    found non-responsive (the assistant is told of them up front), and `approved_endpoints`
+    are the ones the person confirmed to keep. Any lock whose payload names a non-responsive
+    endpoint that is not approved is asked of the person before it reaches the gate: keep it
+    as-is (approved for the session) or have the assistant find a working alternative.
+    Returns the outcome.
     """
     # The read-only tools: inside a git working tree (any source kind), the full refine set —
     # a checkout without an origin still has a codebase to inspect, so the tools are gated on
@@ -726,6 +755,9 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
         kind, spec_text, ambiguities, errors, current_repo,
         dead_endpoints=dead_endpoints)
     messages: list[dict[str, str]] = [{'role': 'user', 'content': initial}]
+    # The endpoints the person confirmed to keep (seeded by the source-level confirmation in
+    # run_refine, and grown by keep answers at the lock gate): exempted from the probe.
+    approved: set[str] = set(approved_endpoints or ())
     try:
         for turn in range(max_turns):
             text = ''
@@ -763,27 +795,43 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # to see. A .mrsh rewrite must additionally survive the .mrsh format rules (the
             # same parser compile runs as its first stage): a payload that parses but would
             # not compile is sent back with the parser's error, like a malformed lock, and
-            # is never gated or shown. So is a lock whose payload names an external endpoint
-            # that does not respond (the harness probes the payload's URLs rather than
-            # trusting the model to have checked): it is sent back with the endpoint's
-            # failure, and only a lock against verified-live endpoints reaches the gate.
+            # is never gated or shown. A lock whose payload names an external endpoint that
+            # does not respond (the harness probes the payload's URLs rather than trusting
+            # the model to have checked) is asked of the person before the gate: keep it
+            # as-is (approved for the session — a private endpoint a sample request cannot
+            # reach) or have the assistant find a working alternative.
             locked = (pending is None and _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind))
             payload = parse_locked_output(text, kind) if locked else None
             format_errors: list[str] = []
             endpoint_errors: list[str] = []
+            endpoint_fix = False
+            endpoint_reply = ''
             if locked and kind == 'mrsh' and payload is not None:
                 format_errors = _mrsh_format_errors(payload['spec'])
-            if locked and payload is not None and not format_errors \
-                    and check_endpoints:
-                if _spec_urls(_payload_text(kind, payload)):
+            if locked and payload is not None and not format_errors:
+                if _spec_urls(_payload_text(kind, payload), approved):
                     # The probe is network I/O on the lock path: say we are alive.
                     print('Checking the endpoints named in the spec...',
                           file=sys.stderr)
                 endpoint_errors = await _spec_endpoint_errors(
-                    _payload_text(kind, payload))
+                    _payload_text(kind, payload), skip=approved)
             if locked and payload is not None and not format_errors \
-                    and not endpoint_errors:
+                    and endpoint_errors:
+                choice, reply = _confirm_endpoint(
+                    'The locked design', endpoint_errors, read_line)
+                if choice == 'bail':
+                    return ChatResult('bail', None, reply)
+                if choice == 'keep':
+                    # Confirmed as-is: exempted for the session (a re-lock naming the same
+                    # endpoint is neither probed nor asked about again).
+                    approved.update(_endpoint_url(e) for e in endpoint_errors)
+                    endpoint_errors = []
+                else:
+                    endpoint_fix = True
+                    endpoint_reply = reply
+            if locked and payload is not None and not format_errors \
+                    and not endpoint_errors and not endpoint_fix:
                 outcome = _propose_or_continue(text, kind, payload, messages,
                                                read_line)
                 if outcome is not None:
@@ -829,10 +877,19 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     followup_endpoints: list[str] = []
                     if kind == 'mrsh' and payload is not None:
                         followup_errors = _mrsh_format_errors(payload['spec'])
-                    if payload is not None and not followup_errors \
-                            and check_endpoints:
+                    if payload is not None and not followup_errors:
                         followup_endpoints = await _spec_endpoint_errors(
-                            _payload_text(kind, payload))
+                            _payload_text(kind, payload), skip=approved)
+                    if payload is not None and not followup_errors \
+                            and followup_endpoints:
+                        choice, reply = _confirm_endpoint(
+                            'The locked design', followup_endpoints, read_line)
+                        if choice == 'bail':
+                            return ChatResult('bail', None, reply)
+                        if choice == 'keep':
+                            approved.update(_endpoint_url(e)
+                                            for e in followup_endpoints)
+                            followup_endpoints = []
                     if payload is not None and not followup_errors \
                             and not followup_endpoints:
                         outcome = _propose_or_continue(text, kind, payload,
@@ -840,21 +897,22 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         if outcome is not None:
                             return outcome
                         continue
-                    # A rewrite that would not compile — or that names a dead endpoint —
-                    # has no next turn to be nudged in: the session times out, with the
-                    # reason on screen.
+                    # A rewrite that would not compile — or that the person sent back to
+                    # fix — has no next turn to be nudged in: the session times out, with
+                    # the reason on screen.
                     if followup_errors:
                         print(f'Note: the rewrite is not a valid .mrsh '
                               f'({followup_errors[0]}).')
                     elif followup_endpoints:
                         print(f'Note: an endpoint named in the spec does not respond '
-                              f'({followup_endpoints[0]}).')
+                              f'({followup_endpoints[0]}) and the final turn has passed; '
+                              'the session ends without locking.')
                 _print_turn_hiding_lock_payload(text, kind)
             if locked:
                 # A lock that did not reach the gate: unparseable, a .mrsh rewrite the
-                # format rules reject, or a payload that names a dead endpoint. Only its
-                # narration is on screen (the payload never is), so the assistant is
-                # nudged with the specific error to fix.
+                # format rules reject, or a payload whose dead endpoint the person sent
+                # back to fix. Only its narration is on screen (the payload never is), so
+                # the assistant is nudged with the specific error to fix.
                 if payload is None:
                     block = ('That lock was malformed: it must carry the required '
                              + ('[[NEW:SPEC]]' if kind == 'mrsh'
@@ -876,18 +934,17 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 else:
                     block = ('That lock names an external endpoint that does not '
                              'respond:\n- ' + '\n- '.join(endpoint_errors)
-                             + '\nA dead endpoint cannot be locked into the '
-                               'specification: verify that each external endpoint the '
-                               'spec names actually works (fetch it, substituting a '
-                               'sample value for any placeholder), replace any dead one '
-                               'with a working alternative, and re-emit the locked '
-                               'design.')
+                             + (f'\nThe person said: {endpoint_reply}'
+                                if endpoint_reply else '')
+                             + '\nDo not lock the specification against an endpoint '
+                               'that does not respond: verify that each external '
+                               'endpoint the spec names actually works (fetch it, '
+                               'substituting a sample value for any placeholder), '
+                               'replace any dead one with a working alternative, and '
+                               're-emit the locked design.')
                 if format_errors:
                     print(f'Note: the rewrite is not a valid .mrsh '
                           f'({format_errors[0]}); the assistant is fixing it.')
-                elif endpoint_errors:
-                    print(f'Note: an endpoint named in the spec does not respond '
-                          f'({endpoint_errors[0]}); the assistant is fixing it.')
                 messages.append({'role': 'assistant', 'content': text})
                 messages.append({'role': 'user', 'content': block})
                 continue
@@ -1192,17 +1249,26 @@ async def run_refine(args: Any) -> int:
     # The source's external endpoints are probed before the analysis: a spec that depends
     # on a dead API is not implementable as written, and the harness decides that
     # deterministically rather than trusting the model to have checked (the locked payload
-    # is probed again in the chat before it reaches the gate). --no-endpoint-check turns the
-    # probe off — for a private endpoint a generic sample request cannot reach (one that 404s
-    # on an unknown value, say) — and the user owns the liveness judgment then.
-    check_endpoints = not bool(getattr(args, 'no_endpoint_check', False))
-    dead_endpoints = await _spec_endpoint_errors(spec_text) if check_endpoints else []
-    if dead_endpoints:
+    # is probed again in the chat before it reaches the gate). The finding is confirmed
+    # with the person at this moment: an endpoint they know is fine (a private one a
+    # generic sample request cannot reach, say) is kept as-is and exempted for the session;
+    # otherwise the assistant looks for a working replacement. --check is headless: it
+    # reports instead of asking.
+    dead_endpoints = await _spec_endpoint_errors(spec_text)
+    approved_endpoints: set[str] = set()
+    if dead_endpoints and not check_only:
+        choice, _reply = _confirm_endpoint('The specification', dead_endpoints,
+                                           _read_line)
+        if choice == 'bail':
+            print('Bailed out; the source was not modified.')
+            return 1
+        if choice == 'keep':
+            approved_endpoints = {_endpoint_url(e) for e in dead_endpoints}
+            dead_endpoints = []
+    if dead_endpoints and not check_only:
         print(f'Note: {len(dead_endpoints)} external endpoint(s) named in the spec do '
-              'not respond.'
-              + ('' if check_only else
-                 ' The assistant will verify working replacements before locking.'),
-              file=sys.stderr)
+              'not respond; the assistant will verify working replacements before '
+              'locking.', file=sys.stderr)
     print('Analyzing the spec for open ambiguities...', file=sys.stderr)
     try:
         check = await analyze_spec(spec_text, tool_ctx=tool_ctx, debug=debug)
@@ -1231,7 +1297,7 @@ async def run_refine(args: Any) -> int:
         result = await run_refine_chat(
             kind=source.kind, spec_text=spec_text, ambiguities=check['ambiguities'],
             errors=check['errors'], current_repo=current, in_repo=in_repo, cwd=cwd,
-            dead_endpoints=dead_endpoints, check_endpoints=check_endpoints,
+            dead_endpoints=dead_endpoints, approved_endpoints=approved_endpoints,
             model=getattr(args, 'model', None),
             max_turns=int(getattr(args, 'max_turns', 40)),
             read_line=_read_line, debug=debug)
