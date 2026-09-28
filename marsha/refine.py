@@ -62,9 +62,9 @@ ENDPOINT_PROBE_TIMEOUT = 10
 ENDPOINT_PROBE_LIMIT = 10
 # Statuses that mean the endpoint is unusable for the spec's purposes: 404/410 — the route is
 # gone, and 5xx — the server answers with an error instead of a usable response (a transient
-# 5xx costs one bounce: the model re-verifies and re-locks, or the user passes
-# --no-endpoint-check). A 400/403/422 for an arbitrary sample is different: the endpoint
-# exists and refused the request, it did not fail.
+# 5xx costs one bounce: the person re-confirms the endpoint as-is or the model re-verifies and
+# re-locks). A 400/403/422 for an arbitrary sample is different: the endpoint exists and
+# refused the request, it did not fail.
 _DEAD_ENDPOINT_STATUSES = (404, 410)
 
 # Anchored: the URL must be the whole value. An unanchored search would let garbage around a
