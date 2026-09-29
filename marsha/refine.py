@@ -358,10 +358,11 @@ Before locking, verify that every external endpoint (URL) the specification name
 def _section_to_end(lines: list[str], start_marker: str) -> str | None:
     """Content from the line after a line that is exactly `start_marker` to the end of the text
     (trailing blanks stripped); None if the marker is absent. Runs to the end so legitimate
-    content that merely looks like a marker line is preserved, not truncated away."""
+    content that merely looks like a marker line is preserved, not truncated away. The marker
+    must be an exact line (trailing whitespace aside): an indented one is content."""
     start = None
     for i, ln in enumerate(lines):
-        if ln.strip() == start_marker:
+        if ln.rstrip() == start_marker:
             start = i + 1
             break
     if start is None:
@@ -375,17 +376,18 @@ def _section_to_end(lines: list[str], start_marker: str) -> str | None:
 def _section_to(lines: list[str], start_marker: str, end_marker: str) -> str | None:
     """Content from the line after a line that is exactly `start_marker` up to (not including) a
     line that is exactly `end_marker`, or the end of the text; None if `start_marker` is absent.
-    Only the named end marker terminates, so other marker-like lines are kept as content."""
+    Only the named end marker terminates, so other marker-like lines are kept as content. Both
+    markers must be exact lines (trailing whitespace aside): an indented one is content."""
     start = None
     for i, ln in enumerate(lines):
-        if ln.strip() == start_marker:
+        if ln.rstrip() == start_marker:
             start = i + 1
             break
     if start is None:
         return None
     out = []
     for ln in lines[start:]:
-        if ln.strip() == end_marker:
+        if ln.rstrip() == end_marker:
             break
         out.append(ln)
     while out and not out[-1].strip():
@@ -394,9 +396,13 @@ def _section_to(lines: list[str], start_marker: str, end_marker: str) -> str | N
 
 
 def _first_exact_line_index(lines: list[str], marker: str) -> int | None:
-    """The index of the first line that is exactly `marker` (ignoring surrounding whitespace)."""
+    """The index of the first line that is exactly `marker` (the protocol's line contract).
+
+    Trailing whitespace is ignored (a stray `\r` or space does not defeat an otherwise exact
+    line), but leading whitespace is not: an indented marker is content — e.g. one shown in a
+    code block — and must not act as a protocol signal."""
     for i, ln in enumerate(lines):
-        if ln.strip() == marker:
+        if ln.rstrip() == marker:
             return i
     return None
 
@@ -421,10 +427,11 @@ def _signal_before_payload(lines: list[str], marker: str, kind: str) -> bool:
 def parse_locked_output(text: str, kind: str) -> dict[str, str] | None:
     """Extract the updated source from a locked response, or None if it is malformed.
 
-    The protocol is line-based, ordered, and mutually exclusive: `[[DESIGN:LOCKED]]` must be a
-    line of its own (not quoted in prose) and must precede the payload — a marker that appears
-    only inside the rewritten source (after the payload markers) is content, not the signal, so
-    it cannot lock by itself. For an issue/ticket the title marker must precede the body marker,
+    The protocol is line-based, ordered, and mutually exclusive: `[[DESIGN:LOCKED]]` must be an
+    exact line — not indented (an indented marker is content, e.g. one shown in a code block),
+    though trailing whitespace (a stray `\r` or space) does not defeat it — and must precede
+    the payload; a marker that appears only inside the rewritten source (after the payload
+    markers) is content, not the signal, so it cannot lock by itself. For an issue/ticket the title marker must precede the body marker,
     in the order the protocol requests. A bail signal line before the payload makes the response
     self-contradictory and it is rejected (a bail line inside the payload is content, not a
     signal). Each section runs to its named terminator (or the end of the text), so a
@@ -1249,10 +1256,11 @@ def _print_dry_run(kind: str, payload: dict[str, str]) -> None:
 
 
 def _preamble_before_lock(text: str) -> str:
-    """The assistant's preamble in a lock turn: the text before the [[DESIGN:LOCKED]] line."""
+    """The assistant's preamble in a lock turn: the text before the [[DESIGN:LOCKED]] line
+    (an exact line, trailing whitespace aside — an indented marker is content, not the lock)."""
     lines = text.split('\n')
     for i, ln in enumerate(lines):
-        if ln.strip() == '[[DESIGN:LOCKED]]':
+        if ln.rstrip() == '[[DESIGN:LOCKED]]':
             return '\n'.join(lines[:i])
     return ''
 

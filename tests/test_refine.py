@@ -436,6 +436,22 @@ def test_parse_locked_output_lock_marker_in_prose_is_ignored() -> None:
     assert refine.parse_locked_output(text, 'mrsh') is None
 
 
+def test_parse_locked_output_indented_markers_are_content_not_protocol() -> None:
+    # The protocol contract is an exact line: an indented marker (one shown as content, e.g.
+    # in a code block) must not lock and must not start a payload. Trailing whitespace (a
+    # stray \r) still does not defeat an exact line.
+    text = ('Here is the protocol:\n'
+            '```\n'
+            '  [[DESIGN:LOCKED]]\n'
+            '  [[NEW:SPEC]]\n'
+            '```\n'
+            '  the spec')
+    assert refine.parse_locked_output(text, 'mrsh') is None
+    # CRLF from the model: a stray \r after the marker does not defeat the exact line.
+    assert refine.parse_locked_output(
+        '[[DESIGN:LOCKED]]\r\n[[NEW:SPEC]]\nthe spec', 'mrsh') == {'spec': 'the spec'}
+
+
 def test_parse_locked_output_body_before_title_is_rejected() -> None:
     # The protocol is title then body: a body marker before the title is a malformed ordering
     # and must not be written back as the issue/ticket body.
