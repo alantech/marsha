@@ -2253,6 +2253,9 @@ def test_run_refine_chat_compacts_when_over_budget_and_keeps_spec() -> None:
 
     lines = iter(['answer one', 'y'])
     with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, 'get_client', return_value=None), \
+         patch.object(refine, 'resolve_context_window',
+                      new=AsyncMock(return_value=4096)), \
          patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
@@ -2314,6 +2317,9 @@ def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
 
     lines = iter(['go on', 'y'])
     with patch.object(refine, 'get_mapper', new=get_mapper), \
+         patch.object(refine, 'get_client', return_value=None), \
+         patch.object(refine, 'resolve_context_window',
+                      new=AsyncMock(return_value=4096)), \
          patch.object(refine, 'fits', lambda text, window, cap=0.5: False):
         res = asyncio.run(refine.run_refine_chat(
             kind='mrsh', spec_text='SPEC TEXT', ambiguities=['a'], errors=[],
