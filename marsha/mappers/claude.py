@@ -8,7 +8,7 @@ import anthropic
 from anthropic.types import Message
 
 from marsha.config import resolve_model, resolve_strong_model
-from marsha.log import log
+from marsha.log import log, progress
 from marsha.llm_client import get_client
 from marsha.mappers.base import BaseMapper, ContextOverflowError
 from marsha.stats import stats
@@ -73,8 +73,9 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
                 out = await stream.get_final_message()
             t2 = time.time()
             total_tokens = out.usage.input_tokens + out.usage.output_tokens
-            print(
-                f'''Chat query took {prettify_time_delta(t2 - t1)}, started at {prettify_time_delta(t1 - t0)}, ms/chars = {(t2 - t1) * 1000 / total_tokens}''')
+            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
+                     f'started at {prettify_time_delta(t1 - t0)}, '
+                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
             log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} (model={model})')
             return out
         except anthropic.BadRequestError as e:

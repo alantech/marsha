@@ -151,6 +151,7 @@ PHASE_CATEGORIES = {
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
+    'refine': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_WEB},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
@@ -208,6 +209,11 @@ class ToolContext:
     # whole-file read guard (a file over half the window is refused rather than buffered). None
     # when it cannot be resolved, in which case the guard is skipped.
     context_window: int | None = None
+    # Override for the phase's category set (PHASE_CATEGORIES): a caller that needs a
+    # narrower or repo-independent tool set sets this explicitly — e.g. a refine chat
+    # outside a git working tree, which still gets the web and local read tools. None (the
+    # default) means the phase's standard set.
+    categories: set[str] | None = None
 
 
 @dataclasses.dataclass
@@ -311,8 +317,14 @@ def _git_page_result(result: str, sub: str, rest: list[str], page: int | None = 
 
 def wrap_untrusted(name: str, content: str) -> str:
     # Present a tool result as explicitly-untrusted reference data, identical
-    # across OpenAI / Claude / local backends (not a native `tool` role).
-    return f'[tool:{name}]\n{content}\n[/tool:{name}]'
+    # across OpenAI / Claude / local backends (not a native `tool` role). Marker-like
+    # sequences inside the content are neutralized (a space after the bracket) so untrusted
+    # text cannot close the wrapper early and escape it, injecting instructions into the
+    # surrounding prompt.
+    closing = f'[/tool:{name}]'
+    content = content.replace(closing, '[/ tool:' + name + ']')
+    content = content.replace(f'[tool:{name}]', '[ tool:' + name + ']')
+    return f'[tool:{name}]\n{content}\n{closing}'
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -1832,7 +1844,8 @@ def build_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
     else:
         commands = agnostic_tool_commands(ctx)
         env_ok = False
-    allowed = PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES)
+    allowed = (ctx.categories if ctx.categories is not None
+               else PHASE_CATEGORIES.get(ctx.phase, _BASE_CATEGORIES))
     out = {}
     for name, cmd in commands.items():
         if cmd.category not in allowed:
@@ -1851,7 +1864,7 @@ def tool_instructions(ctx: ToolContext | None = None) -> str:
     commands = build_commands(ctx)
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
-        'When you need information that is not in the assignment — for example the exact API of a third-party library the code must use — use the fake terminal below. To issue a command, end your response with a single line beginning with `$` followed by the command name and its arguments. Only the final line of your response is read as a command; everything above it is kept as your in-progress reasoning.',
+        'When you need information that is not in the assignment — for example the exact API of a third-party library the code must use — use the fake terminal below. To issue a command, put `$` followed by the command name and its arguments at the end of your response, on its own final line — that is the expected form. Only the end of the final line is read as a command; everything above it is kept as your in-progress reasoning. If the command ends up glued to the end of a sentence line, the trailing `$ command` segment of that line is still read and run. A `$` anywhere earlier in your response is not a command and will not run. One enclosing pair of backticks around the whole command line is tolerated and stripped before it is parsed.',
         'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation.',
         'Available commands:',
     ]
@@ -1874,43 +1887,80 @@ _COMMAND_RE = re.compile(r'^\$\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
 # `$ PAGE=2 git show HEAD:<path>`. Matched before the plain command so the prefix is stripped.
 _PAGE_COMMAND_RE = re.compile(
     r'^\$\s+PAGE=(\d+)\s+([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+(.*))?$')
+# The `$` of a command glued to the end of a prose line ("I'll verify now. $ view-web-page
+# \"https://x\""): a whitespace- or backtick-preceded `$` followed by a space. The last such
+# occurrence starts the command; a `$` anywhere earlier in the response is not a command.
+_TRAILING_COMMAND_RE = re.compile(r'[\s`]\$\s')
 
 
-def extract_pending_command(text: Any) -> PendingCommand | None:
-    """The single command encoded in the last non-empty line of a response, or
-    None when the response does not end with a command. One command per turn,
-    on the final line (robust to weaker/local models); everything above it is
-    in-progress reasoning kept in history. A trailing `$` line that does not
-    name a well-formed command is returned flagged malformed so the loop feeds
-    an error back instead of treating the response as a final artifact."""
-    if not isinstance(text, str):
+def _parse_command_line(line: str) -> PendingCommand | None:
+    """Parse a stripped line as a pending command (None when it is not a `$` command)."""
+    # Models sometimes wrap the command line in backticks (`` `$ calc "1+1"` ``), which would
+    # make it start with a backtick and be silently ignored: strip one enclosing pair (the
+    # protocol line must begin with `$`) so a backticked command still runs.
+    if len(line) >= 2 and line.startswith('`') and line.endswith('`'):
+        line = line[1:-1]
+    if not line.startswith('$'):
         return None
-    last = None
-    for line in text.splitlines():
-        if line.strip():
-            last = line.strip()
-    if last is None or not last.startswith('$'):
-        return None
-    pm = _PAGE_COMMAND_RE.match(last)
+    pm = _PAGE_COMMAND_RE.match(line)
     if pm is not None:
         name = pm.group(2)
         rest = pm.group(3) or ''
         try:
             args = shlex.split(rest)
         except ValueError:
-            return PendingCommand(line=last, name=name, args=[], malformed=True)
-        return PendingCommand(line=last, name=name, args=args,
+            return PendingCommand(line=line, name=name, args=[], malformed=True)
+        return PendingCommand(line=line, name=name, args=args,
                               page=int(pm.group(1)))
-    m = _COMMAND_RE.match(last)
+    m = _COMMAND_RE.match(line)
     if m is None:
-        return PendingCommand(line=last, name=last, args=[], malformed=True)
+        return PendingCommand(line=line, name=line, args=[], malformed=True)
     name = m.group(1)
     rest = m.group(2) or ''
     try:
         args = shlex.split(rest)
     except ValueError:
-        return PendingCommand(line=last, name=name, args=[], malformed=True)
-    return PendingCommand(line=last, name=name, args=args)
+        return PendingCommand(line=line, name=name, args=[], malformed=True)
+    return PendingCommand(line=line, name=name, args=args)
+
+
+def extract_pending_command(text: Any) -> PendingCommand | None:
+    """The single command encoded at the end of a response, or None when the
+    response does not end with a command. One command per turn; everything
+    above it is in-progress reasoning kept in history. The command is the
+    final line when that line begins with `$`, or the trailing `$ command`
+    segment of the final line when the model glued it to the end of a
+    sentence (models do this often enough that a glued command must still
+    run, or the turn loops on the unexecuted command); a `$` anywhere earlier
+    is not a command. A trailing `$` segment that does not name a
+    well-formed command is returned flagged malformed so the loop feeds an
+    error back instead of treating the response as a final artifact."""
+    if not isinstance(text, str):
+        return None
+    last = None
+    for line in text.splitlines():
+        if line.strip():
+            last = line.strip()
+    if last is None:
+        return None
+    if last.startswith('$') or (
+            len(last) >= 2 and last.startswith('`$') and last.endswith('`')):
+        # A command line, bare or wrapped in one backtick pair: parse it, so a
+        # malformed wrap is flagged malformed (not mistaken for prose).
+        return _parse_command_line(last)
+    matches = list(_TRAILING_COMMAND_RE.finditer(last))
+    if not matches:
+        return None
+    m = matches[-1]
+    dollar = m.start() + 1
+    candidate = last[dollar:]
+    if last[m.start()] == '`':
+        # A backtick-wrapped trailing command (`$ cmd`): the closing backtick must be
+        # present (an unclosed span is prose, not a command).
+        if not candidate.endswith('`'):
+            return None
+        candidate = candidate[:-1]
+    return _parse_command_line(candidate)
 
 
 async def execute_command(commands: dict[str, ToolCommand], name: str, args: list[str],

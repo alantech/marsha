@@ -443,27 +443,6 @@ class PythonBackend(LanguageBackend):
 
     # --- generation / review prompts (full templates) -------------------------
 
-    def spec_check_prompt(self) -> str:
-        return '''You are a senior software engineer reviewing an assignment to write a Python 3 function.
-The assignment is written in markdown format.
-It should include sections on the function name, inputs, outputs, a description of what it should do, and some examples of how it should be used.
-
-First, decide whether the document is compilable. Use this test: could at least one implementation exist that satisfies every part of the document (description, inputs, outputs, and all examples) at the same time? If such an implementation could exist, the document is compilable.
-Underspecification is not a reason the document is not compilable: like unspecified behavior in C, whatever the document leaves open is for the implementer to decide reasonably. If the description allows several outcomes (several valid orderings, several equivalent error messages, several formats) and the examples show one of them, an implementation that follows the examples satisfies the document, so it is compilable.
-One section adding more detail than another is not a contradiction: sections only conflict when they state opposing views on what the code should be doing.
-The document is not compilable only when no implementation could satisfy it as written, eg the description says the function prints its result while the examples compare its return value to a string, two examples give different outputs for the same input, or an example is malformed or violates a stated requirement.
-
-Second, list warnings for significant ambiguities. A warning is for an underspecified or ambiguous area that could result in differently-behaving code between independent generation runs, eg a missing exception type or message, missing edge cases, an ambiguous output precision or format, or non-deterministic behavior that would make the generated code flaky to test.
-Be careful not to wear out the user with useless warnings: only warn when the ambiguity is significant enough that two reasonable implementers could plausibly produce different behavior. Do not warn about style, and do not ask for more examples or more precision in areas that are merely unspecified but unlikely to change the behavior.
-
-Respond with a single JSON object and nothing else, in exactly this shape:
-{"compilable": true, "warnings": ["...", "..."]}
-When the document is not compilable, include a third key, an "errors" array with one or more entries:
-{"compilable": false, "warnings": ["..."], "errors": ["...", "..."]}
-Each warning and each error is a markdown-formatted string that cites the relevant portion of the document using inline quotes of the document's own words. Each error must quote the sections that conflict with each other and explain why no implementation could satisfy both.
-Do not wrap the JSON object in code fences.
-'''
-
     def oracle_prompt(self, meta: MarshaMeta) -> str:
         return f'''You are a senior software engineer assigned to write a unit test suite for Python 3 functions.
 The assignment is written in markdown format.

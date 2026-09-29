@@ -75,7 +75,7 @@ def linear_available() -> bool:
     return shutil.which('linear') is not None
 
 
-async def _run(cmd: str, *args: str, cwd: str | None = None, timeout: float = 60, input: bytes | None = None) -> tuple[int | None, str, str]:
+async def _run(cmd: str, *args: str, cwd: str | None = None, timeout: float = 60, input: bytes | None = None, max_bytes: int | None = None) -> tuple[int | None, str, str]:
     stdin = subprocess.PIPE if input is not None else subprocess.DEVNULL
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -87,7 +87,7 @@ async def _run(cmd: str, *args: str, cwd: str | None = None, timeout: float = 60
         raise Exception(f'`{cmd}` is not installed or not on PATH.') from e
     except OSError as e:
         raise Exception(f'could not run `{cmd}`: {e}') from e
-    out, err = await run_subprocess(proc, timeout, input=input)
+    out, err = await run_subprocess(proc, timeout, input=input, max_bytes=max_bytes)
     return (proc.returncode, out, err)
 
 
@@ -96,8 +96,8 @@ async def _git(*args: str, cwd: str | None = None, timeout: float = 60, input: b
     return (rc, out.strip(), err.strip())
 
 
-async def _gh(*args: str, cwd: str | None = None, timeout: float = 120, input: bytes | None = None) -> tuple[int | None, str, str]:
-    rc, out, err = await _run('gh', *args, cwd=cwd, timeout=timeout, input=input)
+async def _gh(*args: str, cwd: str | None = None, timeout: float = 120, input: bytes | None = None, max_bytes: int | None = None) -> tuple[int | None, str, str]:
+    rc, out, err = await _run('gh', *args, cwd=cwd, timeout=timeout, input=input, max_bytes=max_bytes)
     return (rc, out.strip(), err.strip())
 
 
@@ -279,10 +279,11 @@ async def gh_pr_context(num: int, cwd: str | None = None) -> str:
     return '\n\n'.join(parts)
 
 
-async def linear_context(ticket: str, cwd: str | None = None) -> str:
+async def linear_context(ticket: str, cwd: str | None = None, max_bytes: int | None = None) -> str:
     # Pull the ticket to seed the review via the linear CLI (issue view, JSON).
     rc, out, err = await _run(
-        'linear', 'issue', 'view', ticket, '--json', '--no-pager', cwd=cwd)
+        'linear', 'issue', 'view', ticket, '--json', '--no-pager', cwd=cwd,
+        max_bytes=max_bytes)
     if rc != 0:
         raise Exception(f'`linear issue view {ticket}` failed: {err or out}')
     return out

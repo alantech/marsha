@@ -10,7 +10,7 @@ import sys
 from typing import Any, Callable, cast
 
 from marsha import backends, tools
-from marsha.config import resolve_model, resolve_provider, resolve_strong_model
+from marsha.config import resolve_model, resolve_strong_model
 from marsha.context import budget_tokens, estimate_tokens, fits, resolve_context_window
 from marsha.findings import Finding
 from marsha.meta import MarshaMeta, void_note
@@ -26,40 +26,12 @@ from marsha.term import print_diagnostic
 from marsha.utils import read_file, write_file, prettify_time_delta
 from marsha.llm_client import get_client
 from marsha.mappers import get_mapper
-from marsha.mappers.chatgpt import uses_completion_tokens
+from marsha.spec_check import analyze_spec
 
 # The strong model (default gpt-5.6-terra) runs the impl/correction review loops and the
 # test-fixing calls at extra-high reasoning: those are the highest-stakes edits (they may rewrite
 # code or the oracle), so they get the most reasoning budget the model offers.
 STRONG_REASONING_EFFORT = 'xhigh'
-
-
-def parse_spec_check(text: str) -> dict[str, Any]:
-    """Parse the structured spec check response; raise on anything malformed"""
-    t = text.strip()
-    if t.startswith('```'):
-        t = t.split('\n', 1)[1] if '\n' in t else ''
-        if t.rstrip().endswith('```'):
-            t = t.rstrip()[:-3]
-    try:
-        obj = json.loads(t)
-    except json.JSONDecodeError:
-        start, end = t.find('{'), t.rfind('}')
-        if start == -1 or end <= start:
-            raise Exception(
-                f'No JSON object in spec check response: {text[:200]}')
-        obj = json.loads(t[start:end + 1])
-    if not isinstance(obj, dict) or not isinstance(obj.get('compilable'), bool):
-        raise Exception(f'Invalid spec check response: {text[:200]}')
-    warnings = obj.get('warnings', [])
-    errors = obj.get('errors', [])
-    if not isinstance(warnings, list) or not all(isinstance(w, str) for w in warnings):
-        raise Exception(f'Invalid spec check response: {text[:200]}')
-    if not isinstance(errors, list) or not all(isinstance(e, str) for e in errors):
-        raise Exception(f'Invalid spec check response: {text[:200]}')
-    if not obj['compilable'] and len(errors) == 0:
-        raise Exception(f'Not compilable without errors: {text[:200]}')
-    return {'compilable': obj['compilable'], 'warnings': warnings, 'errors': errors}
 
 
 def parse_diagnosis(text: str) -> dict[str, str]:
@@ -86,28 +58,6 @@ def parse_diagnosis(text: str) -> dict[str, str]:
     if not isinstance(reason, str):
         raise Exception(f'Invalid diagnosis response: {text[:200]}')
     return {'fault': fault, 'reason': reason}
-
-
-async def gpt_check_spec(meta: MarshaMeta, retries: int = 2) -> dict[str, Any]:
-    # Reasoning models need a larger budget for their chain of thought. GPT-6 has no 'minimal'
-    # tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that still reasons.
-    if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        answer: dict[str, Any] = {
-            'max_tokens': 8192, 'reasoning_effort': 'low'}
-    elif resolve_provider() == 'anthropic':
-        answer = {'max_tokens': 4096}
-    else:
-        # Local OpenAI-compatible servers: leave the output budget to the server
-        answer = {}
-    gpt_check = get_mapper(backends.current().spec_check_prompt(), n_results=1,
-                           stats_stage='first_stage', label='spec-check', **answer)
-    marsha_for_code_llm = format_marsha_for_llm(meta)
-    try:
-        return parse_spec_check(await gpt_check.run(marsha_for_code_llm))
-    except Exception:
-        if retries > 0:
-            return await gpt_check_spec(meta, retries - 1)
-        raise
 
 
 async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int = 3, debug: bool = False) -> str:
@@ -868,10 +818,11 @@ async def generate_code(args: Any, meta: MarshaMeta, n_results: int, debug: bool
     try:
         if not args.exclude_sanity_check:
             log('spec sanity check')
-            check = await gpt_check_spec(meta)
+            check = await analyze_spec(
+                format_marsha_for_llm(meta), debug=debug, stats_stage='first_stage')
             if not args.no_warn:
-                for warning in check['warnings']:
-                    print_diagnostic('warning', warning)
+                for ambiguity in check['ambiguities']:
+                    print_diagnostic('warning', ambiguity)
             for error in check['errors']:
                 print_diagnostic('error', error)
             if not check['compilable']:

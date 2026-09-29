@@ -101,6 +101,9 @@ def validate_marsha_fn(fn: str, void: bool = False) -> None:
             raise Exception(
                 f'Invalid Marsha function: Missing return type for `{fn_heading}`.')
     # Check description
+    if len(ast['children']) < 2:
+        raise Exception(
+            f'Invalid Marsha function: Missing description for `{fn_heading}`.')
     second = ast['children'][1]
     if second['type'] != 'Paragraph':
         raise Exception(
@@ -150,9 +153,59 @@ def validate_marsha_type(type: str) -> None:
                 f'Invalid Marsha type: Not enough examples for `{type_heading}`.')
 
 
+def _top_level_sections(file: str) -> list[str]:
+    # The sections of a .mrsh file, in the shape str.split('#') used to produce: the file
+    # preamble first, then the text after each top-level heading's '#'. Splitting on lines
+    # rather than characters: a "##" (or deeper) heading stays inside the current section,
+    # and a '#' inside text (an issue reference, a comment in an example) does not start a
+    # new section. A "# " line inside a fenced code block is code, not a heading; per
+    # CommonMark, a fence opens only with up to three leading spaces (four or more is an
+    # indented code block, not a fence), and it closes only on a line of the same character
+    # alone (no info string), at least as long as the opening fence, so a four-backtick fence
+    # can contain a triple-backtick line.
+    sections: list[str] = []
+    current: list[str] = []
+    fence_char = ''
+    fence_len = 0
+    for raw_line in file.split('\n'):
+        # A stray carriage return (a CRLF file that reached the splitter without newline
+        # normalization — the .mrsh read paths normalize, but the splitter should not depend
+        # on it) must not defeat the fence and heading line tests: a "```" + CR line is
+        # still a closing fence.
+        line = raw_line.rstrip('\r')
+        if fence_char:
+            m = re.match(r'^( {0,3})(`{3,}|~{3,})[ \t]*$', line)
+            if m and m.group(2)[0] == fence_char and len(m.group(2)) >= fence_len:
+                fence_char = ''
+            current.append(line)
+            continue
+        m = re.match(r'^( {0,3})(`{3,}|~{3,})(.*)$', line)
+        if m:
+            # CommonMark's fence grammar: a backtick fence's info string cannot contain a
+            # backtick (a tilde fence's can contain backticks and tildes) — a backtick-fence
+            # line that fails this is not an opener (it is a paragraph), and must not start
+            # fence mode.
+            delim, info = m.group(2), m.group(3)
+            if delim[0] == '`' and '`' in info:
+                current.append(line)
+                continue
+            fence_char = delim[0]
+            fence_len = len(delim)
+            current.append(line)
+            continue
+        h = re.match(r'^( {0,3})# ', line)
+        if h:
+            sections.append('\n'.join(current))
+            current = [line[len(h.group(1)) + 1:]]
+            continue
+        current.append(line)
+    sections.append('\n'.join(current))
+    return sections
+
+
 def extract_functions_and_types(file: str) -> tuple[list[str], list[str], list[str]]:
     res: tuple[list[str], list[str], list[str]] = ([], [], [])
-    sections = file.split('#')
+    sections = _top_level_sections(file)
     func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\):'
     void_func_regex = r'\s*func [a-zA-Z_][a-zA-Z0-9_]*\(.*\)'
     type_regex = r'\s*type [a-zA-Z_][a-zA-Z0-9_]*\s*[a-zA-Z0-9_\.\/]*'

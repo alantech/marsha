@@ -23,7 +23,8 @@ def split_preamble(doc: str, header: str) -> tuple[str, str]:
 def format_marsha_for_llm(meta: MarshaMeta) -> str:
     break_line = '\n'
     res: list[str] = [f'# Requirements for file `{meta.filename}`']
-    for func in meta.functions + meta.void_funcs:
+    for func, is_void in ([(f, False) for f in meta.functions]
+                          + [(f, True) for f in meta.void_funcs]):
         ast = _get_ast(Document(func))
         if ast['children'][0]['type'] != 'Heading':
             raise Exception('Invalid Marsha function')
@@ -32,8 +33,16 @@ def format_marsha_for_llm(meta: MarshaMeta) -> str:
         ret = ''
         desc_parts: list[str] = []
         reqs = ''
-        list_started = False
-        for (i, child) in enumerate(ast['children']):
+        children = ast['children']
+        last_list_i = -1
+        if not is_void:
+            # Void functions have no usage-examples list (the validator requires one
+            # only for functions that return), so their final list is description
+            # content, not examples.
+            for (i, child) in enumerate(children):
+                if child['type'] == 'List':
+                    last_list_i = i
+        for (i, child) in enumerate(children):
             if i == 0:
                 # Special handling for the initial header (for now)
                 if child['type'] != 'Heading':
@@ -48,11 +57,13 @@ def format_marsha_for_llm(meta: MarshaMeta) -> str:
                 else:
                     ret = header.split('):')[1].strip()
                 continue
-            if child['type'] == 'List':
-                list_started = True
+            if i == last_list_i:
+                # The usage examples: the section's final list block (validate_marsha_fn
+                # requires a section to end with its examples list); an earlier list (e.g.
+                # under a "##" subsection) is description content.
                 reqs = to_markdown(child)
                 continue
-            if list_started:
+            if last_list_i != -1 and i > last_list_i:
                 raise Exception(
                     'Function description must come *before* usage examples')
             desc_parts.append(to_markdown(child))
