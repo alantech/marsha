@@ -59,10 +59,10 @@ REFINE_MAX_TOOL_ROUNDS = 10
 # The refine step probes the external endpoints a spec names before a design is locked in (a
 # dead API must not be locked into a spec the compile will trust, on the model's say-so). This
 # is the probe's network timeout — well under the page-fetch timeout: it is a liveness check on
-# the lock path, not a content fetch. The probes of one sweep run concurrently, so a sweep's
-# worst case is one timeout rather than the sum of them, and the cap on how many of the
-# spec's URLs one sweep probes bounds the in-flight fetches (a real spec names a handful of
-# endpoints; the rest are the model's to verify).
+# the lock path, not a content fetch. Every named URL is probed, in concurrent batches of
+# ENDPOINT_PROBE_LIMIT: the width bounds the in-flight fetches (and a batch's worst case is
+# one timeout, not the sum of its probes) while coverage stays complete, so a dead endpoint
+# cannot hide beyond the first batch.
 ENDPOINT_PROBE_TIMEOUT = 10
 ENDPOINT_PROBE_LIMIT = 10
 # Statuses that mean the endpoint is unusable for the spec's purposes: 404/410 — the route is
@@ -525,10 +525,12 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
     SSRF guard refuses to fetch). When no probe could connect at all, the network — not the
     endpoints — is down, and nothing is reported (a refine session must stay usable
     offline). URLs in `skip` (endpoints the person confirmed to keep) are not probed at
-    all. The probes run concurrently (http_get already leaves the event loop for the
-    blocking fetch), so a sweep's worst case is one timeout, not the sum of the sweep's
-    timeouts."""
-    urls = _spec_urls(text, skip)[:ENDPOINT_PROBE_LIMIT]
+    all. Every named URL is probed — a dead endpoint must not slip past the gate beyond
+    the first batch — in concurrent batches of ENDPOINT_PROBE_LIMIT (http_get already
+    leaves the event loop for the blocking fetch), so a batch's worst case is one timeout,
+    not the sum of its probes; a batch in which nothing could connect stops the sweep,
+    since the network is down and no later batch could verify anything either."""
+    urls = _spec_urls(text, skip)
     if not urls:
         return []
 
@@ -549,9 +551,21 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
             return False, f'{url} — unreachable ({e})'
         return True, None
 
-    results = await asyncio.gather(*(probe(url) for url in urls))
-    errors = [line for _connected, line in results if line is not None]
-    if not any(connected for connected, _line in results) and errors:
+    errors: list[str] = []
+    connected_any = False
+    for start in range(0, len(urls), ENDPOINT_PROBE_LIMIT):
+        batch = urls[start:start + ENDPOINT_PROBE_LIMIT]
+        results = await asyncio.gather(*(probe(url) for url in batch))
+        batch_connected = any(connected for connected, _line in results)
+        connected_any = connected_any or batch_connected
+        for _connected, line in results:
+            if line is not None:
+                errors.append(line)
+        if not batch_connected:
+            # Nothing in this batch could connect: the network is down, and no later
+            # batch could verify anything either.
+            break
+    if not connected_any and errors:
         # Every probe failed to connect: the network is down, not the endpoints.
         return []
     return errors
@@ -1416,6 +1430,9 @@ async def run_refine(args: Any) -> int:
     # generic sample request cannot reach, say) is kept as-is and exempted for the session;
     # otherwise the assistant looks for a working replacement. --check is headless: it
     # reports instead of asking.
+    if _spec_urls(spec_text):
+        # The probe is network I/O before anything else: say we are alive.
+        print('Checking the endpoints named in the spec...', file=sys.stderr)
     dead_endpoints = await _spec_endpoint_errors(spec_text)
     approved_endpoints: set[str] = set()
     if dead_endpoints and not check_only:

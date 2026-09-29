@@ -1512,6 +1512,40 @@ def test_spec_endpoint_errors_probes_run_concurrently() -> None:
     assert all(e.startswith('start') for e in events[:4])  # all four overlapped
 
 
+def test_spec_endpoint_errors_probes_every_url_in_batches() -> None:
+    # The batch width bounds concurrency, not coverage: every named URL is probed, so a
+    # dead endpoint beyond the first batch cannot slip past the gate unreported.
+    urls = [f'https://host{i}.example.com/v1' for i in range(12)]
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        if url.startswith('https://host11.example.com'):
+            raise _http_error(404, url)
+        return 200, 'application/json', b'{}'
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
+    assert errors == ['https://host11.example.com/v1 — HTTP 404']
+    assert len(probed) == 12
+
+
+def test_spec_endpoint_errors_stops_the_sweep_when_the_network_is_down() -> None:
+    # A batch in which nothing connects means the network is down: later batches are
+    # skipped (they could not verify anything), and nothing is reported.
+    urls = [f'https://host{i}.example.com/v1' for i in range(15)]
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        raise OSError('[Errno -3] name resolution failed')
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
+    assert errors == []
+    assert len(probed) == 10  # one batch, then the sweep stops
+
+
 def test_spec_endpoint_errors_treats_a_rejected_probe_as_alive() -> None:
     # A 400/403 for the probe's sample values means the endpoint exists and refused the
     # request (some APIs want auth or a real value): alive, not dead.
