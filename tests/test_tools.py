@@ -1111,15 +1111,30 @@ def test_run_with_tools_citation_bounce_is_bounded(tmp_path: Any) -> None:
 
 
 def test_unretrieved_citations_extraction() -> None:
-    # The shared extractor finds doc paths and URLs; unretrieved_citations reports the ones absent
-    # from the retrieval scopes (a doc needs a read command, a URL a web retrieval or search).
+    # The shared extractor finds doc paths and URLs; unretrieved_citations reports the ones not
+    # read (a doc needs git show/summarize/find-in-file, a URL a view-web-page or web-search hit).
     text = 'see docs/NOTES.md and https://example.com/x for the pattern'
     assert tools.cited_sources(text) == (['docs/NOTES.md'], ['https://example.com/x'])
-    assert tools.unretrieved_citations(text, '', '', '') == \
+    assert tools.unretrieved_citations(text, [], []) == \
         ['docs/NOTES.md', 'https://example.com/x']
+    # A doc read via git show and a URL returned by web-search are both considered read.
     assert tools.unretrieved_citations(
-        text, 'git show HEAD:docs/NOTES.md', '',
-        'Search results:\nhttps://example.com/x') == []
+        text, [('$ git show HEAD:docs/NOTES.md', '')],
+        [('$ web-search "x"', 'https://example.com/x')]) == []
+
+
+def test_unretrieved_citations_requires_a_real_read() -> None:
+    # A citation is satisfied only by a real read: a URL merely mentioned in a summarized local
+    # file is not fetched, git ls-files lists a doc without reading it, and a web-search query that
+    # contains a URL does not fetch it (only the results count).
+    url = 'https://example.com/x'
+    assert tools.unretrieved_citations(
+        url, [], [('$ summarize docs/NOTES.md', f'see {url}')]) == [url]
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git ls-files docs/NOTES.md', 'docs/NOTES.md')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        url, [], [('$ web-search "' + url + ' bug"', 'no urls here')]) == [url]
 
 
 def test_run_with_tools_unknown_command_feeds_error() -> None:

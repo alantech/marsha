@@ -2115,17 +2115,59 @@ def _is_cited_doc_path(token: str) -> bool:
     return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
 
 
-def _cited_in_scope(cited: str, scope: str) -> bool:
-    # Whether a cited doc path or URL appears in the retrieval scope. Lenient: the citation is
-    # trimmed of a leading ./ and trailing punctuation, then matched as a substring, so a
-    # citation written slightly differently from the command still counts. Empty is a match.
-    norm = cited.strip()
-    if norm.startswith('./'):
-        norm = norm[2:]
-    norm = norm.rstrip(_CITE_PUNCT)
-    if not norm:
+def _command_tool(cmd: str) -> str | None:
+    # The tool name of a `$ <tool> ...` command line (a page prefix like `3$` is stripped).
+    parts = re.sub(r'^(?:\d+\$|\$)\s*', '', cmd.strip()).split()
+    return parts[0] if parts else None
+
+
+def _command_target(cmd: str) -> str | None:
+    # The path or URL a content-READ command targets, else None. Reads are git show / git
+    # cat-file, summarize, find-in-file, and view-web-page. Listing/search commands (git grep,
+    # git ls-files, list-tree, web-search) do not read a file's content, so they yield None.
+    parts = re.sub(r'^(?:\d+\$|\$)\s*', '', cmd.strip()).split()
+    if not parts:
+        return None
+    tool, args = parts[0], parts[1:]
+    if tool == 'git':
+        if len(args) >= 2 and args[0] in ('show', 'cat-file'):
+            a = args[-1]
+            return a.split(':', 1)[1] if (':' in a and '://' not in a) else a
+        return None
+    if tool in ('summarize', 'view-web-page'):
+        return args[0] if args else None
+    if tool == 'find-in-file':
+        return args[-1] if args else None
+    return None
+
+
+def _path_matches(cited: str, retrieved: str) -> bool:
+    # A citation matches a read path exactly, or — when the citation is a bare name (no '/') — by
+    # basename, so a reviewer who opened docs/NOTES.md satisfies a citation of just NOTES.md.
+    if cited == retrieved:
         return True
-    return norm in scope
+    return '/' not in cited and cited == retrieved.rsplit('/', 1)[-1]
+
+
+def retrieved_paths_and_urls(
+        evidence: list[tuple[str, str]], sources: list[tuple[str, str]]
+) -> tuple[set[str], set[str]]:
+    # The doc/code paths and URLs actually read: paths from git show/cat-file and summarize /
+    # find-in-file, urls from a view-web-page / summarize target and from web-search result text.
+    paths: set[str] = set()
+    urls: set[str] = set()
+    for cmd, _out in evidence:
+        t = _command_target(cmd)
+        if t and not t.startswith('http'):
+            paths.add(t)
+    for cmd, out in sources:
+        t = _command_target(cmd)
+        if t:
+            (urls if t.startswith('http') else paths).add(t)
+        if _command_tool(cmd) == 'web-search':
+            for u in _CITE_URL_RE.findall(out or ''):
+                urls.add(u.rstrip(_CITE_PUNCT))
+    return paths, urls
 
 
 def cited_sources(text: str) -> tuple[list[str], list[str]]:
@@ -2153,26 +2195,17 @@ def opened_command_scope(evidence: list[tuple[str, str]]) -> str:
     return '\n'.join(cmd for cmd, _out in evidence if 'grep' not in cmd.split())
 
 
-def source_scopes(sources: list[tuple[str, str]]) -> tuple[str, str]:
-    # (command lines, web-search outputs) from a sources ledger. A doc is proven by the command
-    # that opened it; a URL is proven by a web retrieval, but web-search surfaces the URL only in
-    # its output, so the search output is carried separately for the URL check.
-    cmds = '\n'.join(cmd for cmd, _out in sources)
-    search = '\n'.join(
-        out for cmd, out in sources if cmd.lstrip('$ ').startswith('web-search'))
-    return cmds, search
-
-
 def unretrieved_citations(
-        text: str, git_scope: str, src_cmds: str, search_outs: str) -> list[str]:
-    # The doc paths and URLs cited in `text` that were not retrieved. A doc path must appear in a
-    # git read or a read-tool command; a URL in a web-retrieval command or web-search results. An
-    # empty result means every citation was retrieved (or the text cites no doc/URL at all).
-    doc_paths, urls = cited_sources(text)
-    unret = [p for p in doc_paths
-             if not _cited_in_scope(p, git_scope + '\n' + src_cmds)]
-    unret += [u for u in urls
-              if not _cited_in_scope(u, src_cmds + '\n' + search_outs)]
+        text: str, evidence: list[tuple[str, str]], sources: list[tuple[str, str]]
+) -> list[str]:
+    # The doc paths and URLs cited in `text` that were not read. A doc path must have been opened
+    # (git show / cat-file, summarize, or find-in-file); a URL fetched (view-web-page / summarize)
+    # or surfaced by a web-search result. Empty means every citation was read (or none cited).
+    paths, urls = retrieved_paths_and_urls(evidence, sources)
+    doc_paths, cited_urls = cited_sources(text)
+    unret = [p for p in doc_paths if not any(
+        _path_matches(p, r) for r in paths)]
+    unret += [u for u in cited_urls if u not in urls]
     return unret
 
 
@@ -2237,8 +2270,7 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
                     and citation_bounces < MAX_CITATION_BOUNCES):
                 cite_text = _CITE_FINDING_LOC_RE.sub(r'\1', text)
                 bad = unretrieved_citations(
-                    cite_text, opened_command_scope(ctx.evidence),
-                    *source_scopes(ctx.sources))
+                    cite_text, ctx.evidence, ctx.sources)
                 if bad:
                     citation_bounces += 1
                     if debug:

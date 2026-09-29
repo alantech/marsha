@@ -1314,10 +1314,8 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             # institutional knowledge, dropped like any other unverified claim. A code-only
             # finding cites no doc/URL and is left to the checks above.
             text = ' '.join(filter(None, [f.get('desc'), f.get('support')]))
-            src_cmds, search_outs = tools.source_scopes(f.get('sources') or [])
-            git_scope = tools.opened_command_scope(evidence)
             bad = tools.unretrieved_citations(
-                text, git_scope, src_cmds, search_outs)
+                text, evidence, f.get('sources') or [])
             if bad:
                 cited = bad[0]
                 verb = 'fetched' if cited.startswith('http') else 'retrieved'
