@@ -2247,6 +2247,24 @@ def test_prompt_reader_shift_enter_inserts_a_newline() -> None:
     assert _run_piped_prompt(b'first\x1bOMsecond\r') == 'first\nsecond'
 
 
+def test_prompt_reader_ctrl_j_inserts_a_newline() -> None:
+    # Ctrl+J is the newline key that works in every terminal (VTE — GNOME
+    # Terminal — cannot report Shift- or Ctrl+Enter distinctly). Without the
+    # explicit binding it would fall through to "treat \n as Enter" and submit.
+    assert _run_piped_prompt(b'first\nsecond\r') == 'first\nsecond'
+
+
+def test_prompt_reader_alt_enter_inserts_a_newline() -> None:
+    # Alt+Enter: VTE prefixes it with ESC (ESC + CR), the one modified Enter
+    # GNOME Terminal can distinguish.
+    assert _run_piped_prompt(b'first\x1b\rsecond\r') == 'first\nsecond'
+
+
+def test_prompt_reader_ctrl_enter_inserts_a_newline() -> None:
+    # Ctrl+Enter on kitty/xterm-modified terminals (unreportable in VTE).
+    assert _run_piped_prompt(b'first\x1b[13;5usecond\r') == 'first\nsecond'
+
+
 def test_prompt_reader_ctrl_d_is_eof_on_an_empty_buffer() -> None:
     # Ctrl-D on an empty buffer is the session's EOF (a bail), not a submit of nothing.
     with pytest.raises(EOFError):

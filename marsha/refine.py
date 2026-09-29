@@ -661,10 +661,11 @@ def _read_line() -> str:
     assistant, shredding the conversation. On a terminal the reply is read
     with a prompt_toolkit session instead: a pasted block (the terminal's
     bracketed paste) lands in the buffer as one message, Enter submits
-    whatever is in the buffer, Shift+Enter — where the terminal sends a
-    distinct sequence — inserts a newline while typing, and Ctrl-D submits
-    the buffer or is an EOF when it is empty. Without a terminal (piped
-    stdin, tests) it falls back to the plain line read."""
+    whatever is in the buffer, a newline while typing is Ctrl+J (every
+    terminal), Alt+Enter (GNOME Terminal) or Shift+/Ctrl+Enter where the
+    terminal reports them distinctly, and Ctrl-D submits the buffer or is an
+    EOF when it is empty. Without a terminal (piped stdin, tests) it falls
+    back to the plain line read."""
     if not sys.stdin.isatty():
         try:
             return input('\nyou> ')
@@ -685,10 +686,15 @@ _PROMPT_HISTORY: Any = None
 def _prompt_key_bindings() -> Any:
     # The reply's key bindings. Enter submits the whole (possibly multi-line)
     # buffer — the default for a multiline buffer is to insert a newline and
-    # offer no submit key at all. Shift+Enter, where the terminal distinguishes
-    # it (the kitty/xterm-modified and legacy xterm sequences), inserts a
-    # newline instead. Ctrl-D submits what is there; on an empty buffer it is
-    # an EOF (the session's bail) — the default binding deletes a character.
+    # offer no submit key at all. A newline while typing goes through one of
+    # several keys, because terminals disagree on which modified Enters they
+    # can even report: GNOME Terminal (VTE) sends the same byte for Shift- and
+    # Ctrl+Enter as for Enter, but prefixes Alt+Enter with ESC; kitty/xterm
+    # report modified Enters as distinct sequences; and Ctrl+J is a plain byte
+    # every terminal can send. (On terminals that emit the \x1b[27;<n>;13~
+    # forms, the library itself maps them to a bare Enter, so they submit.)
+    # Ctrl-D submits what is there; on an empty buffer it is an EOF (the
+    # session's bail) — the default binding deletes a character.
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
 
@@ -705,8 +711,16 @@ def _prompt_key_bindings() -> Any:
         else:
             event.app.exit(exception=EOFError())
 
+    # Ctrl+J: works in every terminal. Without this binding it would fall
+    # through to the default "treat \n as Enter" and submit the buffer.
+    @kb.add('c-j')
+    # Alt+Enter: VTE's (GNOME Terminal) one distinguishable modified Enter.
+    @kb.add(Keys.Escape, Keys.ControlM)
+    # Shift+Enter: kitty/xterm-modified and legacy xterm terminals.
     @kb.add(Keys.Escape, '[', '1', '3', ';', '2', 'u')
     @kb.add(Keys.Escape, 'O', 'M')
+    # Ctrl+Enter: kitty/xterm-modified terminals (unreportable in VTE).
+    @kb.add(Keys.Escape, '[', '1', '3', ';', '5', 'u')
     def newline(event: Any) -> None:
         event.app.current_buffer.insert_text('\n')
 
