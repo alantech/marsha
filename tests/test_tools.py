@@ -981,12 +981,65 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
 
 
 def test_run_with_tools_does_not_record_non_git_evidence() -> None:
-    # Only git output is evidence; a web-search result is not.
+    # Only git output is evidence; a web-search result is not evidence (it is a retrieved source).
     mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
     ctx = tools.ToolContext('gen')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert ctx.evidence == []
+    assert len(ctx.sources) == 1  # the search result IS recorded, as a source
+
+
+def test_run_with_tools_records_retrieved_sources() -> None:
+    # A retrieval tool (view-web-page) records its output on ctx.sources, not ctx.evidence, so the
+    # evidence gate's citation check can prove a finding's cited URL was really fetched.
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='PAGE-CONTENT')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+    assert len(ctx.sources) == 1
+    line, result = ctx.sources[0]
+    assert 'view-web-page' in line and 'example.com/x' in line
+    assert 'PAGE-CONTENT' in result
+
+
+def test_run_with_tools_records_summarize_as_source() -> None:
+    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command',
+                      new=AsyncMock(return_value='Summary of docs/NOTES.md: overflow.')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+    assert len(ctx.sources) == 1
+    assert 'summarize docs/NOTES.md' in ctx.sources[0][0]
+
+
+def test_run_with_tools_list_tree_is_not_a_source() -> None:
+    # list-tree proves a doc EXISTS, not that its contents were read, so it is not a source: a
+    # directory listing must not satisfy a citation.
+    mapper = ScriptedMapper(['$ list-tree docs\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='docs/NOTES.md')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.sources == [] and ctx.evidence == []
+
+
+def test_run_with_tools_does_not_record_error_source() -> None:
+    # An `error:` result from a retrieval tool carries no retrieved content, so it is not recorded
+    # as a source (mirroring the git evidence rule).
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='error: bad url')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.sources == []
+
+
+def test_codegen_tool_budget_allows_api_discovery() -> None:
+    # Code generation must be able to search the web for the real APIs it interfaces with and to
+    # diagnose failing tests; the budget was raised well above the old five-round default so a
+    # generation is not cut off before it gets past its first lookup.
+    assert tools.MAX_TOOL_ROUNDS >= 50
 
 
 def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
@@ -1409,6 +1462,59 @@ def test_summarize_file_uses_helper_model(tmp_path: Any) -> None:
     assert 'SUMMARY TEXT' in out
     assert '# Notes' in seen['m'].req
     assert seen['m'].kw.get('label') == 'read:summarize'
+
+
+def test_summarize_caches_within_run(tmp_path: Any) -> None:
+    # A repeated summarize of the same target within a run is served from the shared read_cache
+    # instead of calling the helper model again.
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        out1 = asyncio.run(tools.summarize(['notes.md'], ctx))
+        out2 = asyncio.run(tools.summarize(['notes.md'], ctx))
+    assert out1 == out2
+    assert len(calls) == 1  # the second call was served from the cache
+
+
+def test_summarize_cache_is_per_target(tmp_path: Any) -> None:
+    # Distinct targets are distinct cache keys: summarizing two different files calls the helper
+    # model once each.
+    (tmp_path / 'a.md').write_text('# A\n')
+    (tmp_path / 'b.md').write_text('# B\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        asyncio.run(tools.summarize(['a.md'], ctx))
+        asyncio.run(tools.summarize(['b.md'], ctx))
+    assert len(calls) == 2
+
+
+def test_find_in_file_caches_within_run(tmp_path: Any) -> None:
+    # A repeated find-in-file with the same query and target within a run is served from the cache.
+    (tmp_path / 'notes.md').write_text('# Notes\nthe body\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        out1 = asyncio.run(tools.find_in_file(['failure modes', 'notes.md'], ctx))
+        out2 = asyncio.run(tools.find_in_file(['failure modes', 'notes.md'], ctx))
+    assert out1 == out2
+    assert len(calls) == 1
 
 
 def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:

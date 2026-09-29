@@ -44,10 +44,12 @@ REVIEW_DIFF_LIMIT = 120_000
 PR_FILES_MAX_PAGES = 10
 # A reviewer probing a large codebase with the git tool needs many rounds to map a diff against
 # the code it touches; a tight cap cut reviewers off mid-inspection on big PRs, so they finished
-# with no findings at all. 75 lets a reviewer walk the relevant call graph and read the files it
-# actually needs before it decides. This is a cap, not a target — a small diff still finishes in
-# a few rounds — and it bounds each reviewer's, the critic's, and the conventions gate's loop.
-REVIEW_MAX_TOOL_ROUNDS = 75
+# with no findings at all. Every finding must now also carry a retrieved source citation (a doc,
+# a URL, or the codebase's own config), and the archivist walks the repo's documented prior
+# issues, so 150 lets a reviewer read the code, gather the citations, and check the docs before
+# it decides. This is a cap, not a target — a small diff still finishes in a few rounds — and it
+# bounds each reviewer's, the critic's, and the conventions gate's loop.
+REVIEW_MAX_TOOL_ROUNDS = 150
 # The review runs the panel, the conventions gate, and the consolidation at 'high' reasoning —
 # above gpt-6-luna's 'medium' default — so a single pass is more reliable.
 # A fixed seed makes sampling as reproducible as the provider allows (a seed-honoring provider
@@ -982,6 +984,20 @@ def _is_distinctive(tok: str) -> bool:
                  or re.search(r'[a-z][A-Z]', tok) is not None))
 
 
+# A token that is a source REFERENCE, not a code symbol: a URL, a path containing a '/'
+# separator, or a bare name ending in a file extension (e.g. AGENTS.md, config.json). These are
+# verified by the citation / file-opened checks, so they are stripped before code-symbol anchor
+# extraction — otherwise a cited doc's last component (NOTES.md) or a URL's domain (example.com)
+# would be mistaken for a fabricated code symbol and drop a real, source-grounded finding.
+_REFISH_RE = re.compile(
+    r'https?://\S+'
+    r'|\b[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_.\-]+)+/?'
+    r'|\b[A-Za-z0-9_\-]+\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|md|markdown|txt|rst|adoc|org'
+    r'|json|ya?ml|toml|cfg|ini|sh|bash|zsh|css|scss|less|html?|xml|csv|tsv|lock|env'
+    r'|gitignore|dockerignore|editorconfig)\b',
+    re.I)
+
+
 def _distinctive_anchors(finding: Finding, file_basenames: set[str]) -> set[str]:
     # The code-like symbols a finding leans on, drawn from its headline and support (NOT its
     # location: the cited path is checked separately as "the file was opened", and letting it feed
@@ -990,8 +1006,10 @@ def _distinctive_anchors(finding: Finding, file_basenames: set[str]) -> set[str]
     # a real file in the repo (file_basenames) is excluded for the same reason. For the finding to
     # count as grounded, at least one of these must appear in the git output its reviewer actually
     # retrieved. An empty set means the check falls back to the cited file having been opened.
+    # Source references (URLs, doc paths, name.ext) are stripped first — they are not code symbols.
     text = ' '.join(
         filter(None, [finding.get('desc'), finding.get('support')]))
+    text = _REFISH_RE.sub(' ', text)
     anchors = set()
     for tok in _ANCHOR_TOKEN.findall(text):
         if _is_distinctive(tok) and tok not in file_basenames:
@@ -1177,6 +1195,68 @@ def _opened_command_scope(evidence: list[tuple[str, str]]) -> str:
     return '\n'.join(lines)
 
 
+# --- cited-source verification (the evidence gate's citation check) ----------------
+#
+# A finding that names a documentation file or a web URL as the basis of its claim must have
+# actually retrieved it — opened the doc (git show / cat-file) or fetched it (summarize /
+# find-in-file / view-web-page / web-search). This is the institutional-knowledge half of the
+# gate: it stops a "re-introduces the pattern documented in docs/X.md" finding where X.md was
+# never opened. Code file paths are NOT checked here — they are grounded by the existing symbol /
+# file git checks. The match is deliberately lenient (a citation written slightly differently from
+# the command still counts as retrieved): the failure it must avoid is a FALSE DROP of a real,
+# grounded finding, not a false pass.
+
+_DOC_EXT_RE = re.compile(r'\.(?:md|markdown|txt|rst|adoc|org)$', re.I)
+_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
+_URL_RE = re.compile(r'https?://\S+')
+_PATH_TOKEN_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
+_CITE_PUNCT = '.,;:!?)]\'"`'
+
+
+def _is_doc_path(token: str) -> bool:
+    # A cited token is a documentation file (not a code file) when it ends in a prose extension or
+    # is a bare changelog-style name. Code files (.py / .ts / ...) are excluded — the existing git
+    # symbol/file checks ground them, not the citation check.
+    if _DOC_EXT_RE.search(token):
+        return True
+    return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
+
+
+def _cited_sources(finding: Finding) -> tuple[list[str], list[str]]:
+    # The documentation paths and URLs a finding cites in its desc + support, normalized (trailing
+    # punctuation stripped) and de-duplicated. Returns (doc_paths, urls).
+    text = ' '.join(
+        filter(None, [finding.get('desc'), finding.get('support')]))
+    urls: list[str] = []
+    for u in _URL_RE.findall(text):
+        u = u.rstrip(_CITE_PUNCT)
+        if u not in urls:
+            urls.append(u)
+    paths: list[str] = []
+    for tok in _PATH_TOKEN_RE.findall(text):
+        tok = tok.rstrip(_CITE_PUNCT)
+        if _is_doc_path(tok) and tok not in paths:
+            paths.append(tok)
+    for m in _DOC_BARE_RE.finditer(text):
+        if m.group(0) not in paths:
+            paths.append(m.group(0))
+    return sorted(paths), urls
+
+
+def _cited_in_scope(cited: str, scope: str) -> bool:
+    # Whether a cited doc path or URL appears in the retrieved-command scope (the command text of
+    # the git reads and source retrievals the reviewer actually ran). Lenient: the citation is
+    # trimmed of a leading ./ and trailing punctuation, then matched as a substring, so a citation
+    # written slightly differently from the command still counts. An empty citation is a match.
+    norm = cited.strip()
+    if norm.startswith('./'):
+        norm = norm[2:]
+    norm = norm.rstrip(_CITE_PUNCT)
+    if not norm:
+        return True
+    return norm in scope
+
+
 async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False) -> list[Finding]:
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
@@ -1301,6 +1381,31 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
                                   f'asserts {symbol} is undefined or absent, but '
                                   f'it is present in the reviewed tree')
                     break
+        if ok:
+            # (citation) a finding that names a documentation file or a URL as the basis of its
+            # claim must have actually retrieved it — opened the doc via git, or fetched it via
+            # summarize / find-in-file / view-web-page / web-search. A "re-introduces the pattern
+            # documented in docs/X.md" finding where X.md was never opened is a guess about
+            # institutional knowledge, dropped like any other unverified claim. A code-only
+            # finding cites no doc/URL and is left to the checks above.
+            doc_paths, urls = _cited_sources(f)
+            if doc_paths or urls:
+                git_scope = _opened_command_scope(evidence)
+                src_scope = '\n'.join(
+                    cmd for cmd, _out in (f.get('sources') or []))
+                for p in doc_paths:
+                    if not _cited_in_scope(p, git_scope + '\n' + src_scope):
+                        ok, reason = (False,
+                                      f'cites {p} but never retrieved it (no git read or '
+                                      f'summarize/find-in-file/view-web-page of that doc)')
+                        break
+                if ok:
+                    for u in urls:
+                        if not _cited_in_scope(u, src_scope):
+                            ok, reason = (False,
+                                          f'cites {u} but never fetched it '
+                                          f'(no web retrieval of that URL)')
+                            break
         if ok:
             kept.append(f)
         elif debug:
@@ -1607,8 +1712,9 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
         rev_message = (message + prior_round_block(group, refutation, 'the critic')
                        + _REFUTE_CONFIDENCE_RULE)
         # A fresh ledger for the revision so it re-verifies rather than trusting round 0.
+        # A fresh sources ledger too (read_cache is shared, as in run_personas).
         rev_ctx = dataclasses.replace(
-            tool_ctx, notes=list(tool_ctx.notes), evidence=[])
+            tool_ctx, notes=list(tool_ctx.notes), evidence=[], sources=[])
         revised = await run_personas(
             [spec], rev_message, model, 'review', debug=debug, loop='review',
             guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
@@ -1618,8 +1724,10 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
         # otherwise sit on an empty revision-round ledger; merge the code it already read so the
         # evidence gate still grounds it.
         base_evidence = list(group[0].get('evidence') or [])
+        base_sources = list(group[0].get('sources') or [])
         for f in revised:
             f['evidence'] = list(f.get('evidence') or []) + base_evidence
+            f['sources'] = list(f.get('sources') or []) + base_sources
         return revised
     results = await asyncio.gather(*(handle(n, g) for n, g in by_reviewer.items()))
     return [f for sub in results for f in sub]
@@ -1640,6 +1748,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
     prior_preamble: str = ''
     actionable: list[Finding] = []
     evidence_by_number: dict[int | None, list[tuple[str, str]]] = {}
+    sources_by_number: dict[int | None, list[tuple[str, str]]] = {}
     for i in range(rounds + 1):
         user_message = message
         if i > 0:
@@ -1669,6 +1778,8 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
         for f in findings:
             evidence_by_number.setdefault(
                 _label_reviewer_number(f['label']), []).extend(f.get('evidence') or [])
+            sources_by_number.setdefault(
+                _label_reviewer_number(f['label']), []).extend(f.get('sources') or [])
         actionable = dedup_findings(findings)
         if i == rounds or not actionable:
             break
@@ -1690,6 +1801,8 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
     for f in actionable:
         f['evidence'] = evidence_by_number.get(
             _label_reviewer_number(f['label']), list(f.get('evidence') or []))
+        f['sources'] = sources_by_number.get(
+            _label_reviewer_number(f['label']), list(f.get('sources') or []))
     return dedup_by_location(actionable)
 
 
@@ -1815,13 +1928,18 @@ async def run_review(args: Any) -> int:
         # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
         # for the same (name, label) so the evidence gate sees all the code the panel actually read.
         evidence_by_key: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        sources_by_key: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for p in passes:
             for pf in p:
                 evidence_by_key.setdefault(
                     (pf['name'], pf['label']), []).extend(pf.get('evidence') or [])
+                sources_by_key.setdefault(
+                    (pf['name'], pf['label']), []).extend(pf.get('sources') or [])
         for f in actionable:
             f['evidence'] = evidence_by_key.get(
                 (f['name'], f['label']), list(f.get('evidence') or []))
+            f['sources'] = sources_by_key.get(
+                (f['name'], f['label']), list(f.get('sources') or []))
         if args.debug:
             print(f'[Review] consensus over {consensus_n} passes '
                   f'(threshold {threshold}): {len(union)} candidate(s) -> '
@@ -1852,10 +1970,14 @@ async def run_review(args: Any) -> int:
         # The consolidation re-emits one-line findings (it drops non-defects and merges dupes), so
         # the reviewer's supporting paragraphs are re-attached by (name, label) afterwards: the
         # evidence was gathered by the reviewer with the git tools and should survive reduction.
-        support_by_label: dict[tuple[str, str], str] = {(f['name'], f['label']): f.get('support', '')
-                                                        for f in actionable}
-        evidence_by_label: dict[tuple[str, str], list[tuple[str, str]]] = {(f['name'], f['label']): list(f.get('evidence') or [])
-                                                                           for f in actionable}
+        support_by_label: dict[tuple[str, str], str] = {
+            (f['name'], f['label']): f.get('support', '') for f in actionable}
+        evidence_by_label: dict[tuple[str, str], list[tuple[str, str]]] = {
+            (f['name'], f['label']): list(f.get('evidence') or [])
+            for f in actionable}
+        sources_by_label: dict[tuple[str, str], list[tuple[str, str]]] = {
+            (f['name'], f['label']): list(f.get('sources') or [])
+            for f in actionable}
         context = (
             f'Consolidate findings from a code review of the checked-out branch '
             f'against the default branch {base_name}.')
@@ -1880,6 +2002,7 @@ async def run_review(args: Any) -> int:
             key = (f['name'], f['label'])
             f['support'] = support_by_label.get(key, '')
             f['evidence'] = evidence_by_label.get(key, [])
+            f['sources'] = sources_by_label.get(key, [])
         actionable = await evidence_gate(
             actionable, cwd, base_ref, debug=args.debug, post_consolidation=True)
         actionable = dedup_findings(actionable)

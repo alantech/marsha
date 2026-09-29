@@ -60,7 +60,19 @@ from marsha.utils import JSON, run_subprocess
 # Safety cap on how many tool rounds one generation may spend issuing commands
 # before the stage falls back to its normal retry logic (the last, still-a-command
 # response is returned so the stage's validation fails and its retry takes over).
-MAX_TOOL_ROUNDS = 5
+# Code generation must search the web for the real APIs it is told to interface with and,
+# when tests fail, read enough of the codebase to diagnose them; five rounds cut that off
+# before it got past the first lookup, so it implemented against a guessed API. 50 leaves
+# room for the lookups and the diagnosis. This is a cap, not a target — a simple generation
+# still finishes in a few rounds.
+MAX_TOOL_ROUNDS = 50
+
+# The tools whose output is a retrieved SOURCE (not a code read): a doc the reviewer summarized or
+# searched, or a web page it viewed or searched for. Their results are recorded in
+# ToolContext.sources so the evidence gate's citation check can prove a finding's cited doc path or
+# URL was actually retrieved. `list-tree` is excluded deliberately: it proves a doc EXISTS, not
+# that its contents were read, so a directory listing must not satisfy a citation.
+SOURCE_TOOLS = {'summarize', 'find-in-file', 'view-web-page', 'web-search'}
 
 # Bounds on the output fed back into the conversation, so a single tool result
 # cannot blow the context budget.
@@ -200,6 +212,17 @@ class ToolContext:
     # really retrieved — the basis for the review's anti-hallucination evidence gate. A fresh list
     # per reviewer so their ledgers do not leak across reviewers.
     evidence: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    # Per-reviewer ledger of the NON-git sources the reviewer actually retrieved: the (command
+    # line, output) of every summarize / find-in-file / view-web-page / web-search call. Kept
+    # separate from `evidence` (git only) so the mandatory-probing and code-grounding checks keep
+    # keying off real git reads, while the evidence gate's citation check — a finding's cited doc
+    # path or URL must have been retrieved — judges against this. A fresh list per reviewer.
+    sources: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    # Cache for the LLM-backed read tools (summarize / find-in-file), keyed by a normalized
+    # command line, so repeating the same retrieval within a run returns the cached result instead
+    # of calling the helper model again. Unlike the ledgers above it is NOT reset per reviewer:
+    # every reviewer in a review shares the caller's dict, so one summary serves the whole run.
+    read_cache: dict[str, str] = dataclasses.field(default_factory=dict)
     # When True (the review panel), the loop will not accept a findings response until the
     # reviewer has actually run a git command — the changed-file summary (names + line counts) is
     # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
@@ -1587,6 +1610,11 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         return ('error: summarize takes one argument, a file path in the working tree or a URL, '
                 'e.g. $ summarize docs/NOTES.md')
     target = args[0].strip()
+    # A repeated retrieval within the run (same target, any reviewer) is served from the shared
+    # cache instead of calling the helper model again.
+    key = 'summarize\t' + target
+    if ctx is not None and key in ctx.read_cache:
+        return ctx.read_cache[key]
     # Bound the WHOLE helper request, not just the text: the header carries the target (an
     # unbounded URL or path), so refuse it before any fetch or read when it cannot fit.
     header = f'# Source: {target}\n\n'
@@ -1661,7 +1689,10 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     if not summary:
         return 'error: summarize could not be run (the helper model returned nothing).'
     note = '\n[the source was truncated before summarizing]' if truncated else ''
-    return f'Summary of {shown} (1-3 paragraphs):{note}\n\n{summary}'
+    result = f'Summary of {shown} (1-3 paragraphs):{note}\n\n{summary}'
+    if ctx is not None:
+        ctx.read_cache[key] = result
+    return result
 
 
 async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
@@ -1675,6 +1706,11 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     query = ' '.join(args[:-1]).strip()
     if not query:
         return 'error: find-in-file needs a non-empty query before the file path.'
+    # A repeated search within the run (same query and target, any reviewer) is served from the
+    # shared cache instead of calling the helper model again.
+    key = 'find-in-file\t' + query + '\t' + path
+    if ctx is not None and key in ctx.read_cache:
+        return ctx.read_cache[key]
     # Bound the WHOLE helper request, not just the document: the header carries the query and
     # path (unbounded user text), so refuse it before any read when it cannot fit. '1: ' is
     # the shortest numbered line, so the header must leave room for it.
@@ -1765,7 +1801,10 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
         return f'No content in {shown_path} is relevant to: {shown}'
     note = (f'\n[only the first {covered_chars} chars of {shown_path} were searched]'
             if truncated else '')
-    return f'Relevant parts of {shown_path} for: {shown}{note}\n\n{result}'
+    out = f'Relevant parts of {shown_path} for: {shown}{note}\n\n{result}'
+    if ctx is not None:
+        ctx.read_cache[key] = out
+    return out
 
 
 # --- the command set: agnostic base, layered per target -------------------------
@@ -2108,6 +2147,11 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
         # appears in the echoed command line, with no code actually read.
         if pending.name == 'git' and not result.startswith('error:'):
             ctx.evidence.append((pending.line, result))
+        elif (pending.name in SOURCE_TOOLS
+              and not result.startswith('error:')):
+            # A retrieved source (a doc or a web page), recorded separately from the git evidence
+            # so the citation check can prove a finding's cited doc/URL was actually fetched.
+            ctx.sources.append((pending.line, result))
         block = (wrap_untrusted(label, result)
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '

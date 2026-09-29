@@ -97,6 +97,13 @@ def test_default_branch_local(repo: Any) -> None:
     assert name == 'main' and ref == 'main'
 
 
+def test_review_tool_budget_allows_citation_gathering() -> None:
+    # Every finding must carry a retrieved source citation and the archivist walks the repo's
+    # documented prior issues, so the review tool budget was doubled (from 75) to leave room for
+    # reading the code, gathering the citations, and checking the docs before deciding.
+    assert review.REVIEW_MAX_TOOL_ROUNDS >= 150
+
+
 def test_branch_diff_and_stat(repo: Any) -> None:
     diff = asyncio.run(review.branch_diff('main', 'HEAD'))
     assert 'a.txt' in diff
@@ -437,6 +444,53 @@ def test_run_personas_attaches_evidence_to_findings() -> None:
     assert len(fs) == 1
     assert fs[0]['evidence'] == ev
     assert base.evidence == []
+
+
+def test_run_personas_fresh_sources_but_shared_cache() -> None:
+    # Each reviewer gets a fresh sources ledger (retrieved docs must not leak across reviewers),
+    # but the read_cache is shared across the run so one summarize/find-in-file serves them all.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[])
+    captured = []
+
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        captured.append(ctx)
+        return 'NO FINDINGS'
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1), ('Eli', 'body', 2)], 'msg', 'm', 'review',
+            tool_ctx=base))
+    assert len(captured) == 2
+    for ctx in captured:
+        assert ctx is not base
+        assert ctx.sources is not base.sources
+        assert ctx.read_cache is base.read_cache  # the cache is shared across the run
+    assert captured[0].sources is not captured[1].sources
+
+
+def test_run_personas_attaches_sources_to_findings() -> None:
+    # A reviewer's findings carry the sources it actually retrieved (docs/URLs), so the evidence
+    # gate's citation check can verify a cited doc/URL was really fetched. The shared base is not
+    # mutated.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[])
+    src = [('$ summarize docs/NOTES.md', 'Summary of docs/NOTES.md: the overflow pattern.')]
+
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        ctx.sources.extend(src)
+        return 'A1 [MAJOR] a.txt:2 - bad thing\nGrounded in docs/NOTES.md.'
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        fs = asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base))
+    assert len(fs) == 1
+    assert fs[0]['sources'] == src
+    assert base.sources == []
 
 
 # --- budget-gated compaction re-attaches the notes ---------------------------
@@ -871,6 +925,87 @@ def test_gate_keeps_deleted_file_finding(repo: Any) -> None:
                       support='read the deleted file via git show main:removed.txt')
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
+
+
+# --- the evidence gate's citation check (institutional-knowledge grounding) -------
+
+
+def _src_finding(desc: str, location: str, evidence: list[tuple[str, str]],
+                 sources: list[tuple[str, str]], support: str = '') -> Finding:
+    return {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+            'location': location, 'desc': desc, 'support': support,
+            'evidence': evidence, 'sources': sources}
+
+
+def test_gate_drops_finding_citing_doc_never_retrieved(repo: Any) -> None:
+    # A finding whose support cites docs/NOTES.md as its basis, but the reviewer never retrieved
+    # that doc (no git read, no summarize/find-in-file), is a guess about institutional knowledge:
+    # the citation check drops it even though its code symbol is grounded.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    f = _src_finding(
+        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
+        support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_finding_citing_doc_retrieved_via_git(repo: Any) -> None:
+    # The same finding is kept when the reviewer actually opened the cited doc with git: the
+    # citation is real, so the institutional-knowledge claim is grounded.
+    ev = [
+        ('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1'),
+        ('$ git show HEAD:docs/NOTES.md', 'Overflow pattern: do not reuse the buffer.'),
+    ]
+    f = _src_finding(
+        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
+        support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_keeps_finding_citing_doc_retrieved_via_source(repo: Any) -> None:
+    # A doc retrieved with a read tool (summarize) is a real source: the citation is satisfied by
+    # the sources ledger, not just by git.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    src = [('$ summarize docs/NOTES.md', 'Summary of docs/NOTES.md: overflow pattern.')]
+    f = _src_finding(
+        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, src,
+        support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_drops_finding_citing_url_never_fetched(repo: Any) -> None:
+    # A finding that cites a URL it never fetched (no view-web-page/web-search/summarize of it) is
+    # an unverified web citation: dropped.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    f = _src_finding(
+        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, [],
+        support='See https://example.com/overflow for the documented failure mode.')
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
+def test_gate_keeps_finding_citing_url_fetched(repo: Any) -> None:
+    # The URL is kept when the reviewer actually fetched it (view-web-page): the web citation is real.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    src = [('$ view-web-page https://example.com/overflow',
+            '<page> the documented failure mode </page>')]
+    f = _src_finding(
+        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, src,
+        support='See https://example.com/overflow for the documented failure mode.')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
+def test_gate_citation_check_runs_post_consolidation(repo: Any) -> None:
+    # The consolidator rewrites a finding and can invent a doc citation the reviewer never
+    # retrieved. The citation check still runs post-consolidation (even though the primary
+    # evidence check is skipped), so the invented citation is dropped.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    f = _src_finding(
+        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
+        support='Documented in docs/SECRET.md, which this re-introduces.')
+    assert asyncio.run(review.evidence_gate(
+        [f], repo, 'main', post_consolidation=True)) == []
 
 
 def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
