@@ -528,46 +528,51 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
     all. Every named URL is probed — a dead endpoint must not slip past the gate beyond
     the first batch — in concurrent batches of ENDPOINT_PROBE_LIMIT (http_get already
     leaves the event loop for the blocking fetch), so a batch's worst case is one timeout,
-    not the sum of its probes; a batch in which nothing could connect stops the sweep,
-    since the network is down and no later batch could verify anything either."""
+    not the sum of its probes. A batch stops the sweep only when it is positive evidence
+    that the network is down — nothing connected and at least one probe failed to reach
+    the network (an SSRF-blocked probe never touches the network, so a batch of only
+    non-public hosts says nothing about it and the sweep continues); the outage batch's
+    own failures are the outage's, not the endpoints', and are not reported."""
     urls = _spec_urls(text, skip)
     if not urls:
         return []
 
-    async def probe(url: str) -> tuple[bool, str | None]:
-        # (connected, error line or None): a 4xx/5xx HTTP answer proves the network is up
-        # (connected True), even when the answer itself is the failure.
+    async def probe(url: str) -> tuple[str, str | None]:
+        # ('alive' | 'dead' | 'unreachable' | 'blocked', error line or None). An HTTP
+        # answer — even a dead one — proves the network reached the host.
         try:
             _status, _ctype, _body = await tools.http_get(
                 _probe_url(url), timeout=ENDPOINT_PROBE_TIMEOUT)
         except urllib.error.HTTPError as e:
             dead = e.code in _DEAD_ENDPOINT_STATUSES or e.code >= 500
-            return True, (f'{url} — HTTP {e.code}' if dead else None)
+            return ('dead' if dead else 'alive',
+                    f'{url} — HTTP {e.code}' if dead else None)
         except Exception as e:
             # A 'blocked:' message is the SSRF guard refusing a non-public host: unverifiable,
-            # not dead (a spec for an internal API is the user's to own, not this probe's).
+            # not dead (a spec for an internal API is the user's to own, not this probe's),
+            # and no evidence either way about the network.
             if str(e).startswith('blocked:'):
-                return False, None
-            return False, f'{url} — unreachable ({e})'
-        return True, None
+                return 'blocked', None
+            return 'unreachable', f'{url} — unreachable ({e})'
+        return 'alive', None
 
     errors: list[str] = []
-    connected_any = False
     for start in range(0, len(urls), ENDPOINT_PROBE_LIMIT):
         batch = urls[start:start + ENDPOINT_PROBE_LIMIT]
         results = await asyncio.gather(*(probe(url) for url in batch))
-        batch_connected = any(connected for connected, _line in results)
-        connected_any = connected_any or batch_connected
-        for _connected, line in results:
+        statuses = [status for status, _line in results]
+        batch_connected = any(status in ('alive', 'dead')
+                              for status in statuses)
+        batch_outage = (not batch_connected
+                        and 'unreachable' in statuses)
+        if batch_outage:
+            # Nothing connected and a probe failed to reach the network: this batch's
+            # failures are the outage's, not the endpoints' — stop, and report none of
+            # them (no later batch could verify anything either).
+            break
+        for _status, line in results:
             if line is not None:
                 errors.append(line)
-        if not batch_connected:
-            # Nothing in this batch could connect: the network is down, and no later
-            # batch could verify anything either.
-            break
-    if not connected_any and errors:
-        # Every probe failed to connect: the network is down, not the endpoints.
-        return []
     return errors
 
 

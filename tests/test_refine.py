@@ -1546,6 +1546,51 @@ def test_spec_endpoint_errors_stops_the_sweep_when_the_network_is_down() -> None
     assert len(probed) == 10  # one batch, then the sweep stops
 
 
+def test_spec_endpoint_errors_a_blocked_batch_does_not_stop_the_sweep() -> None:
+    # An SSRF-blocked probe never touches the network: a batch of only non-public hosts
+    # is not evidence of an outage, so later batches (which may hold public endpoints)
+    # are still probed.
+    urls = [f'https://host{i}.internal.example.com/v1' for i in range(10)]
+    urls += ['https://public.example.com/v1', 'https://dead.example.com/v1']
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        if url.startswith('https://dead.example.com'):
+            raise _http_error(404, url)
+        if 'internal.example.com' in url:
+            raise Exception(f'blocked: {url.split("//")[1]} is not a public host '
+                            '(SSRF guard)')
+        return 200, 'application/json', b'{}'
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
+    assert errors == ['https://dead.example.com/v1 — HTTP 404']
+    assert len(probed) == 12
+
+
+def test_spec_endpoint_errors_an_outage_batch_reports_nothing() -> None:
+    # When a later batch fails to connect entirely, its failures are the outage's, not
+    # the endpoints': they are not reported (only what earlier, connected batches found).
+    urls = [f'https://host{i}.example.com/v1' for i in range(9)]
+    urls += ['https://dead.example.com/v1']
+    urls += [f'https://outage{i}.example.com/v1' for i in range(4)]
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        if url.startswith('https://dead.example.com'):
+            raise _http_error(404, url)
+        if url.startswith('https://outage'):
+            raise OSError('[Errno -3] name resolution failed')
+        return 200, 'application/json', b'{}'
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
+    assert errors == ['https://dead.example.com/v1 — HTTP 404']
+    assert len(probed) == 14
+
+
 def test_spec_endpoint_errors_treats_a_rejected_probe_as_alive() -> None:
     # A 400/403 for the probe's sample values means the endpoint exists and refused the
     # request (some APIs want auth or a real value): alive, not dead.
