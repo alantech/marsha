@@ -996,6 +996,22 @@ def test_gate_keeps_finding_citing_url_fetched(repo: Any) -> None:
     assert kept == [f]
 
 
+def test_gate_keeps_finding_citing_url_from_search_results(repo: Any) -> None:
+    # A URL is proven by a web retrieval. view-web-page names it in the command, but web-search
+    # surfaces it only in its results (the output), so a finding citing a URL the search returned
+    # is kept even without a separate view-web-page of that URL.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    src = [('$ web-search "overflow failure mode"',
+            'Search results for: overflow failure mode\n'
+            '1. Overflow failure mode\nhttps://example.com/overflow\n'
+            '   the documented failure mode')]
+    f = _src_finding(
+        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, src,
+        support='See https://example.com/overflow for the documented failure mode.')
+    kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
+    assert kept == [f]
+
+
 def test_gate_citation_check_runs_post_consolidation(repo: Any) -> None:
     # The consolidator rewrites a finding and can invent a doc citation the reviewer never
     # retrieved. The citation check still runs post-consolidation (even though the primary
