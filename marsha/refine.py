@@ -530,7 +530,9 @@ def _probe_url(url: str) -> str:
 
 
 async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list[str]:
-    """The external endpoints named in `text` that do not respond, as `url — reason` lines.
+    """The external endpoints named in `text` that could not be verified as working
+    (dead, or left unverified when the sweep ran out of budget), as `url — reason`
+    lines.
 
     The harness decides endpoint liveness itself rather than trusting the model to have
     checked: a status in _DEAD_ENDPOINT_STATUSES means the route is gone, a 5xx means the
@@ -613,14 +615,15 @@ def _endpoint_url(error: str) -> str:
 
 def _confirm_endpoint(subject: str, errors: list[str],
                       read_line: Callable[[], str]) -> tuple[str, str]:
-    """Ask the person about the non-responding endpoints `subject` names, at the moment the
-    harness finds them (an endpoint the person knows is fine — a private one a generic
-    sample request cannot reach — is confirmed here, not pre-declared).
+    """Ask the person about the endpoints `subject` names that could not be verified as
+    working, at the moment the harness finds them (an endpoint the person knows is fine —
+    a private one a generic sample request cannot reach — is confirmed here, not
+    pre-declared).
 
     Returns ('keep', '') — use the endpoints as-is (they are exempted for the session),
     ('fix', reply) — the assistant should look for a working alternative (reply carries the
     person's words, if any), or ('bail', reply) — the person ended the session."""
-    print(f'\n{subject} names an endpoint that does not respond:\n'
+    print(f'\n{subject} names an endpoint that could not be verified as working:\n'
           + ''.join(f'- {e}\n' for e in errors)
           + 'Use it as-is, or have the assistant look for a working alternative? '
           '(y to keep / N to look)')
@@ -665,15 +668,17 @@ def _initial_chat_message(kind: str, spec_text: str, ambiguities: list[str],
         parts.append('# Contradictions that must be resolved\n\n' + findings_note
                      + tools.wrap_untrusted('spec-check', errs))
     if dead_endpoints:
-        # The harness's own measurement (not source data): the source names endpoints that do
-        # not respond, and the locked design must not depend on them.
-        parts.append('# External endpoints that do not respond\n\n'
-                     'The harness fetched each external URL named in the source before this '
-                     'conversation; these did not respond:\n'
-                     + '\n'.join(f'- {e}' for e in dead_endpoints) + '\n'
-                     'A dead endpoint cannot be locked into the specification. Verify what '
-                     'actually works (fetch the candidate endpoints, substituting a sample '
-                     'value for any placeholder) and use a working one in the locked design.')
+        # The harness's own measurement (not source data): the source names endpoints that
+        # could not be verified as working, and the locked design must not depend on them.
+        parts.append(
+            '# External endpoints that could not be verified as working\n\n'
+            'The harness fetched each external URL named in the source before this '
+            'conversation; these could not be verified as working:\n'
+            + '\n'.join(f'- {e}' for e in dead_endpoints) + '\n'
+            'A dead or unverified endpoint cannot be locked into the specification. '
+            'Verify what actually works (fetch the candidate endpoints, substituting a '
+            'sample value for any placeholder) and use a working one in the locked '
+            'design.')
     if current_repo:
         parts.append(f'# Codebase context\n\n'
                      f'The source belongs to the repository `{current_repo}`, which you may '
@@ -999,10 +1004,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # same parser compile runs as its first stage): a payload that parses but would
             # not compile is sent back with the parser's error, like a malformed lock, and
             # is never gated or shown. A lock whose payload names an external endpoint that
-            # does not respond (the harness probes the payload's URLs rather than trusting
-            # the model to have checked) is asked of the person before the gate: keep it
-            # as-is (approved for the session — a private endpoint a sample request cannot
-            # reach) or have the assistant find a working alternative.
+            # could not be verified as working (the harness probes the payload's URLs rather
+            # than trusting the model to have checked) is asked of the person before the
+            # gate: keep it as-is (approved for the session — a private endpoint a sample
+            # request cannot reach) or have the assistant find a working alternative.
             locked = (pending is None and _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind))
             payload = parse_locked_output(text, kind) if locked else None
@@ -1107,9 +1112,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         print(f'Note: the rewrite is not a valid .mrsh '
                               f'({followup_errors[0]}).')
                     elif followup_endpoints:
-                        print(f'Note: an endpoint named in the spec does not respond '
-                              f'({followup_endpoints[0]}) and the final turn has passed; '
-                              'the session ends without locking.')
+                        print(f'Note: an endpoint named in the spec could not be '
+                              f'verified as working ({followup_endpoints[0]}); the '
+                              'final turn has passed, so the session ends without '
+                              'locking.')
                 _print_turn_hiding_lock_payload(text, kind)
             if locked:
                 # A lock that did not reach the gate: unparseable, a .mrsh rewrite the
@@ -1135,16 +1141,18 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                              '"##" subsections allowed in between, keeping the '
                              'original file\'s structure.')
                 else:
-                    block = ('That lock names an external endpoint that does not '
-                             'respond:\n- ' + '\n- '.join(endpoint_errors)
+                    block = ('That lock names an external endpoint that could not '
+                             'be verified as working:\n- '
+                             + '\n- '.join(endpoint_errors)
                              + (f'\nThe person said: {endpoint_reply}'
                                 if endpoint_reply else '')
-                             + '\nDo not lock the specification against an endpoint '
-                               'that does not respond: verify that each external '
-                               'endpoint the spec names actually works (fetch it, '
-                               'substituting a sample value for any placeholder), '
-                               'replace any dead one with a working alternative, and '
-                               're-emit the locked design.')
+                             + '\nDo not lock the specification against an '
+                               'unverified endpoint: verify that each external '
+                               'endpoint the spec names actually works (fetch '
+                               'it, substituting a sample value for any '
+                               'placeholder), replace any that does not work '
+                               'with a working alternative, and re-emit the '
+                               'locked design.')
                 if format_errors:
                     print(f'Note: the rewrite is not a valid .mrsh '
                           f'({format_errors[0]}); the assistant is fixing it.')
@@ -1472,9 +1480,9 @@ async def run_refine(args: Any) -> int:
             approved_endpoints = {_endpoint_url(e) for e in dead_endpoints}
             dead_endpoints = []
     if dead_endpoints and not check_only:
-        print(f'Note: {len(dead_endpoints)} external endpoint(s) named in the spec do '
-              'not respond; the assistant will verify working replacements before '
-              'locking.', file=sys.stderr)
+        print(f'Note: {len(dead_endpoints)} external endpoint(s) named in the spec '
+              'could not be verified as working; the assistant will verify them '
+              'before locking.', file=sys.stderr)
     print('Analyzing the spec for open ambiguities...', file=sys.stderr)
     try:
         check = await analyze_spec(spec_text, tool_ctx=tool_ctx, debug=debug)
@@ -1483,11 +1491,12 @@ async def run_refine(args: Any) -> int:
         return 1
     if check_only:
         for error in dead_endpoints:
-            print_diagnostic('error', 'External endpoint named in the spec does not '
-                                      f'respond: {error}')
+            print_diagnostic('error', 'External endpoint named in the spec could '
+                                      f'not be verified as working: {error}')
         if dead_endpoints:
-            print(f'{len(dead_endpoints)} external endpoint(s) in the spec do not '
-                  'respond; the specification is not implementable as written.')
+            print(f'{len(dead_endpoints)} external endpoint(s) in the spec could '
+                  'not be verified as working; the specification is not '
+                  'implementable as written.')
             return 1
         return _run_check(check)
     # Whether the chat gets the read-only codebase tools: a git working tree (any source kind),

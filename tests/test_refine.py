@@ -743,9 +743,10 @@ def test_run_refine_check_mrsh_format_invalid_fails_before_analysis(
 
 def test_run_refine_check_dead_endpoint_fails(
         tmp_path: Any, capsys: Any) -> None:
-    # A spec that names an endpoint that does not respond is not implementable as written:
-    # --check reports the dead endpoint and exits non-zero even when the LLM analysis finds
-    # nothing else (the harness decides liveness, not the analysis model).
+    # A spec that names an endpoint that could not be verified as working is not
+    # implementable as written: --check reports the dead endpoint and exits non-zero
+    # even when the LLM analysis finds nothing else (the harness decides liveness,
+    # not the analysis model).
     dead_url = 'https://dead.example.com/api'
     p = str(tmp_path / 'spec.mrsh')
     with open(p, 'w') as f:
@@ -766,7 +767,7 @@ def test_run_refine_check_dead_endpoint_fails(
         rc = asyncio.run(refine.run_refine(_args(source=p, check=True)))
     assert rc == 1
     cap = capsys.readouterr()
-    assert 'does not respond' in cap.err  # the diagnostic is on stderr
+    assert 'could not be verified as working' in cap.err  # the diagnostic is on stderr
     assert dead_url in cap.err
     assert 'Spec is locked' not in cap.out  # a dead endpoint is never "locked"
 
@@ -832,8 +833,8 @@ def test_run_refine_unconfirmed_dead_source_endpoint_is_reported_to_the_chat(
     assert rc == 1
     assert seen['dead_endpoints'] == [f'{url} — HTTP 404']
     assert seen['approved_endpoints'] == set()
-    assert '1 external endpoint(s) named in the spec do not respond' \
-        in capsys.readouterr().err
+    assert 'external endpoint(s) named in the spec could not be verified as ' \
+        'working' in capsys.readouterr().err
 
 
 def test_run_refine_bails_at_the_source_endpoint_question(
@@ -1659,7 +1660,8 @@ def test_spec_endpoint_errors_skips_all_when_the_network_is_down() -> None:
 
 
 def test_run_refine_chat_sends_back_a_dead_endpoint_when_not_kept(capsys: Any) -> None:
-    # A lock whose payload names an endpoint that does not respond is asked of the person
+    # A lock whose payload names an endpoint that could not be verified as working is
+    # asked of the person
     # before the gate; when they want a working alternative, the failure is fed back to the
     # assistant, and only the corrected lock reaches the gate.
     dead_url = 'https://dead.example.com/api?q={q}'
@@ -1682,7 +1684,7 @@ def test_run_refine_chat_sends_back_a_dead_endpoint_when_not_kept(capsys: Any) -
     assert res.payload == {'spec': _mrsh_spec('the live spec')}
     out = capsys.readouterr().out
     assert 'dead endpoint' not in out  # the dead-endpoint proposal was never shown
-    assert 'does not respond' in out  # the endpoint question was on screen
+    assert 'could not be verified as working' in out  # the endpoint question was on screen
     assert 'Show the proposal now?' in out
 
 
@@ -1708,7 +1710,7 @@ def test_run_refine_chat_keeps_a_confirmed_dead_endpoint(capsys: Any) -> None:
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_with_url('the spec', dead_url)}
     out = capsys.readouterr().out
-    assert 'does not respond' in out  # the endpoint question was on screen
+    assert 'could not be verified as working' in out  # the endpoint question was on screen
     assert 'Show the proposal now?' in out
 
 
@@ -1741,7 +1743,7 @@ def test_run_refine_chat_approved_endpoint_is_neither_probed_nor_prompted(
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_with_url('the spec', dead_url)}
     assert reads == 1  # the endpoint question was never asked
-    assert 'does not respond' not in capsys.readouterr().out
+    assert 'could not be verified as working' not in capsys.readouterr().out
 
 
 def test_run_refine_chat_bails_at_the_endpoint_question(capsys: Any) -> None:
@@ -1786,15 +1788,17 @@ def test_run_refine_chat_locks_when_the_endpoint_probe_reports_nothing(
 
 
 def test_initial_chat_message_reports_dead_endpoints() -> None:
-    # The source's non-responsive endpoints are told to the assistant up front (a harness
-    # measurement, presented as its own section), and the section is absent otherwise.
+    # The source's endpoints that could not be verified as working are told to the
+    # assistant up front (a harness measurement, presented as its own section), and the
+    # section is absent otherwise.
     msg = refine._initial_chat_message(
         'mrsh', 'SPEC', [], [], '',
         dead_endpoints=['https://dead.example.com/api — HTTP 404'])
-    assert 'External endpoints that do not respond' in msg
+    assert 'External endpoints that could not be verified as working' in msg
     assert 'https://dead.example.com/api — HTTP 404' in msg
-    assert 'A dead endpoint cannot be locked into the specification' in msg
-    assert 'External endpoints that do not respond' not in refine._initial_chat_message(
+    assert 'cannot be locked into the specification' in msg
+    assert 'External endpoints that could not be verified as working' not in \
+        refine._initial_chat_message(
         'mrsh', 'SPEC', [], [], '', dead_endpoints=None)
 
 
