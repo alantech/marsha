@@ -22,6 +22,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 from typing import Any, Awaitable, Callable, NoReturn, cast
 
@@ -65,6 +66,12 @@ REFINE_MAX_TOOL_ROUNDS = 10
 # cannot hide beyond the first batch.
 ENDPOINT_PROBE_TIMEOUT = 10
 ENDPOINT_PROBE_LIMIT = 10
+# The whole sweep's budget: on a URL-rich spec (many batches, each a timeout
+# away) the batches above would otherwise take many minutes on the lock path.
+# When the sweep runs out of this budget it stops and reports the not-yet-
+# probed URLs as unverified — the person can keep them or have the assistant
+# check them — rather than skipping them silently.
+ENDPOINT_PROBE_SWEEP_DEADLINE = 60
 # Statuses that mean the endpoint is unusable for the spec's purposes: 404/410 — the route is
 # gone, and 5xx — the server answers with an error instead of a usable response (a transient
 # 5xx costs one bounce: the person re-confirms the endpoint as-is or the model re-verifies and
@@ -482,10 +489,17 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
     links) is not part of it — nor is the closing backtick of an inline-code span
     (`` `https://x/` ``), which the model wraps URLs in habitually and which a probe would
     otherwise request as part of the path. URLs in `skip` (endpoints the person confirmed
-    to keep) are left out."""
+    to keep) are left out. A match that starts inside a URL already extracted
+    is not an endpoint of its own — and skipping it keeps the scan linear
+    (every span is read once) instead of quadratic, where each nested match
+    re-read the same long span would otherwise dominate a whitespace-free
+    token full of URLs."""
     urls: list[str] = []
     seen: set[str] = set()
+    span_end = 0
     for m in _URL_START_RE.finditer(text):
+        if m.start() < span_end:
+            continue
         i = m.end()
         depth = 0
         while i < len(text):
@@ -497,6 +511,7 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
             elif c.isspace() and depth == 0:
                 break
             i += 1
+        span_end = i
         url = text[m.start():i]
         while url and url[-1] in '.,;:!\'"<>`':
             url = url[:-1]
@@ -557,6 +572,7 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
         return 'alive', None
 
     errors: list[str] = []
+    deadline = time.monotonic() + ENDPOINT_PROBE_SWEEP_DEADLINE
     for start in range(0, len(urls), ENDPOINT_PROBE_LIMIT):
         batch = urls[start:start + ENDPOINT_PROBE_LIMIT]
         results = await asyncio.gather(*(probe(url) for url in batch))
@@ -573,6 +589,12 @@ async def _spec_endpoint_errors(text: str, skip: set[str] | None = None) -> list
         for _status, line in results:
             if line is not None:
                 errors.append(line)
+        if time.monotonic() >= deadline:
+            # Out of budget: the URLs not yet probed are unverified, not dead —
+            # report them so the person can keep them or have them checked.
+            for unprobed in urls[start + ENDPOINT_PROBE_LIMIT:]:
+                errors.append(f'{unprobed} — not verified (probe deadline)')
+            break
     return errors
 
 

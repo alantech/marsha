@@ -1424,6 +1424,18 @@ def test_spec_urls_extracts_urls_including_placeholders() -> None:
     ]
 
 
+def test_spec_urls_nested_matches_are_not_endpoints_of_their_own() -> None:
+    # A URL starting inside another URL's span is part of it, not an endpoint of its
+    # own — and skipping nested matches keeps the scan linear instead of quadratic,
+    # where each nested match re-reading the same long span would dominate a
+    # whitespace-free token full of URLs.
+    assert refine._spec_urls(
+        'https://a.example.com/https://b.example.com') == \
+        ['https://a.example.com/https://b.example.com']
+    big = ''.join(f'https://h{i}.example.com/v1' for i in range(20_000))
+    assert refine._spec_urls(big) == [big]
+
+
 def test_spec_urls_finds_nothing_without_urls() -> None:
     # A bare hostname or a non-http(s) scheme is not an endpoint to probe.
     assert refine._spec_urls('no links here: api.example.com and ftp://files.example.com') \
@@ -1589,6 +1601,24 @@ def test_spec_endpoint_errors_an_outage_batch_reports_nothing() -> None:
         errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
     assert errors == ['https://dead.example.com/v1 — HTTP 404']
     assert len(probed) == 14
+
+
+def test_spec_endpoint_errors_reports_the_rest_when_the_deadline_expires() -> None:
+    # Out of budget, the sweep reports the not-yet-probed URLs as unverified (the person
+    # can keep them or have them checked) instead of skipping them silently.
+    urls = [f'https://host{i}.example.com/v1' for i in range(12)]
+    probed: list[str] = []
+
+    async def fake_get(url: str, timeout: int = 0) -> Any:
+        probed.append(url)
+        await asyncio.sleep(0.2)
+        return 200, 'application/json', b'{}'
+
+    with patch.object(tools, 'http_get', new=fake_get), \
+         patch.object(refine, 'ENDPOINT_PROBE_SWEEP_DEADLINE', 0.1):
+        errors = asyncio.run(refine._spec_endpoint_errors(' '.join(urls)))
+    assert probed == urls[:10]  # one batch, then the deadline
+    assert errors == [f'{u} — not verified (probe deadline)' for u in urls[10:]]
 
 
 def test_spec_endpoint_errors_treats_a_rejected_probe_as_alive() -> None:
