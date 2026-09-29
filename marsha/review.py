@@ -1392,13 +1392,17 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             if doc_paths or urls:
                 src = f.get('sources') or []
                 # A doc path is proven by the command that opened it (a git
-                # read or a read tool). A URL is proven by a web retrieval,
-                # but web-search names the URL only in its output, so the
-                # URL check also searches the retrieved text.
+                # read or a read tool). A URL is proven by a web retrieval:
+                # view-web-page / summarize name it in the command, and
+                # web-search surfaces it in its results. A URL that appears
+                # only in a summarized local file was not fetched, so beyond
+                # the command lines only the web-search output counts.
                 git_scope = _opened_command_scope(evidence)
                 src_cmds = '\n'.join(cmd for cmd, _out in src)
-                src_outs = '\n'.join(out for _cmd, out in src)
-                src_text = src_cmds + '\n' + src_outs
+                search_outs = '\n'.join(
+                    out for cmd, out in src
+                    if cmd.lstrip('$ ').startswith('web-search'))
+                url_scope = src_cmds + '\n' + search_outs
                 for p in doc_paths:
                     if not _cited_in_scope(p, git_scope + '\n' + src_cmds):
                         ok, reason = (False,
@@ -1407,7 +1411,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
                         break
                 if ok:
                     for u in urls:
-                        if not _cited_in_scope(u, src_text):
+                        if not _cited_in_scope(u, url_scope):
                             ok, reason = (False,
                                           f'cites {u} but never fetched it '
                                           f'(no web retrieval of that URL)')

@@ -1012,6 +1012,19 @@ def test_gate_keeps_finding_citing_url_from_search_results(repo: Any) -> None:
     assert kept == [f]
 
 
+def test_gate_drops_finding_citing_url_only_in_local_doc(repo: Any) -> None:
+    # A URL is proven by a web retrieval, not by local text. A URL that appears only in a
+    # summarized local file (summarize docs/NOTES.md) was never fetched, so a finding citing
+    # it is dropped even though the doc's text mentions the URL.
+    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
+    src = [('$ summarize docs/NOTES.md',
+            'Summary of docs/NOTES.md: see https://example.com/overflow for context.')]
+    f = _src_finding(
+        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, src,
+        support='See https://example.com/overflow for the documented failure mode.')
+    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
+
+
 def test_gate_citation_check_runs_post_consolidation(repo: Any) -> None:
     # The consolidator rewrites a finding and can invent a doc citation the reviewer never
     # retrieved. The citation check still runs post-consolidation (even though the primary
