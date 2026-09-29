@@ -74,6 +74,11 @@ MAX_TOOL_ROUNDS = 50
 # that its contents were read, so a directory listing must not satisfy a citation.
 SOURCE_TOOLS = {'summarize', 'find-in-file', 'view-web-page', 'web-search'}
 
+# How many times the tool loop will bounce a findings response back to retrieve a cited doc/URL it
+# has not read, before returning it as-is and letting the deterministic evidence gate make the
+# call. Bounded so a stuck reviewer cannot burn the whole tool budget on the citation probe.
+MAX_CITATION_BOUNCES = 2
+
 # Bounds on the output fed back into the conversation, so a single tool result
 # cannot blow the context budget.
 RESULT_CHAR_LIMIT = 12_000
@@ -2081,6 +2086,96 @@ def _is_no_findings_response(text: Any) -> bool:
     return _FINDING_SEVERITY_RE.search(text or '') is None
 
 
+# --- cited-source verification: shared by the tool-loop bounce and the evidence gate ---
+#
+# A finding that names a documentation file or a web URL as the basis of its claim must have
+# actually retrieved it — opened the doc (git show / cat-file) or fetched it (summarize /
+# find-in-file / view-web-page / web-search). This is the institutional-knowledge half of the
+# anti-hallucination checks: it stops a "re-introduces the pattern documented in docs/X.md"
+# finding where X.md was never opened. Code file paths are NOT checked here — the symbol / file
+# git checks ground those. The match is deliberately lenient (a citation written slightly
+# differently from the command still counts as retrieved): the failure it must avoid is a FALSE
+# DROP of a real, grounded finding, not a false pass.
+_CITE_DOC_EXT_RE = re.compile(r'\.(?:md|markdown|txt|rst|adoc|org)$', re.I)
+_CITE_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
+_CITE_URL_RE = re.compile(r'https?://\S+')
+_CITE_PATH_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
+_CITE_PUNCT = '.,;:!?)]\'"`'
+# A finding's path:line location is not a citation, so it is stripped before extraction.
+_CITE_FINDING_LOC_RE = re.compile(
+    r'(\[(?:MAJOR|MINOR|NIT|NITPICK)\]\s+)\S+:\d+')
+
+
+def _is_cited_doc_path(token: str) -> bool:
+    # A cited token is a documentation file (not a code file) when it ends in a prose extension or
+    # is a bare changelog-style name. Code files (.py / .ts / ...) are excluded — the git symbol /
+    # file checks ground those, not the citation check.
+    if _CITE_DOC_EXT_RE.search(token):
+        return True
+    return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
+
+
+def _cited_in_scope(cited: str, scope: str) -> bool:
+    # Whether a cited doc path or URL appears in the retrieval scope. Lenient: the citation is
+    # trimmed of a leading ./ and trailing punctuation, then matched as a substring, so a
+    # citation written slightly differently from the command still counts. Empty is a match.
+    norm = cited.strip()
+    if norm.startswith('./'):
+        norm = norm[2:]
+    norm = norm.rstrip(_CITE_PUNCT)
+    if not norm:
+        return True
+    return norm in scope
+
+
+def cited_sources(text: str) -> tuple[list[str], list[str]]:
+    # The doc paths and URLs cited in `text`, normalized (trailing punctuation stripped) and
+    # de-duplicated. Returns (doc_paths, urls).
+    urls: list[str] = []
+    for u in _CITE_URL_RE.findall(text or ''):
+        u = u.rstrip(_CITE_PUNCT)
+        if u not in urls:
+            urls.append(u)
+    paths: list[str] = []
+    for tok in _CITE_PATH_RE.findall(text or ''):
+        tok = tok.rstrip(_CITE_PUNCT)
+        if _is_cited_doc_path(tok) and tok not in paths:
+            paths.append(tok)
+    for m in _CITE_DOC_BARE_RE.finditer(text or ''):
+        if m.group(0) not in paths:
+            paths.append(m.group(0))
+    return sorted(paths), urls
+
+
+def opened_command_scope(evidence: list[tuple[str, str]]) -> str:
+    # The command text that establishes a file/doc was OPENED. A `git grep` is a search, not a
+    # file open (a no-match grep reads no code from its pathspec), so it is excluded.
+    return '\n'.join(cmd for cmd, _out in evidence if 'grep' not in cmd.split())
+
+
+def source_scopes(sources: list[tuple[str, str]]) -> tuple[str, str]:
+    # (command lines, web-search outputs) from a sources ledger. A doc is proven by the command
+    # that opened it; a URL is proven by a web retrieval, but web-search surfaces the URL only in
+    # its output, so the search output is carried separately for the URL check.
+    cmds = '\n'.join(cmd for cmd, _out in sources)
+    search = '\n'.join(
+        out for cmd, out in sources if cmd.lstrip('$ ').startswith('web-search'))
+    return cmds, search
+
+
+def unretrieved_citations(
+        text: str, git_scope: str, src_cmds: str, search_outs: str) -> list[str]:
+    # The doc paths and URLs cited in `text` that were not retrieved. A doc path must appear in a
+    # git read or a read-tool command; a URL in a web-retrieval command or web-search results. An
+    # empty result means every citation was retrieved (or the text cites no doc/URL at all).
+    doc_paths, urls = cited_sources(text)
+    unret = [p for p in doc_paths
+             if not _cited_in_scope(p, git_scope + '\n' + src_cmds)]
+    unret += [u for u in urls
+              if not _cited_in_scope(u, src_cmds + '\n' + search_outs)]
+    return unret
+
+
 async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | None = None,
                          debug: bool = False, max_rounds: int = MAX_TOOL_ROUNDS) -> Any:
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
@@ -2105,6 +2200,7 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
     commands = build_commands(ctx)
     messages = [{'role': 'user', 'content': request}]
     last_text = ''
+    citation_bounces = 0
     for round_ in range(max_rounds):
         messages = await _maybe_compact_tool_history(messages, mapper, ctx, debug=debug)
         text = await mapper.run(messages)
@@ -2132,6 +2228,37 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
                     {'role': 'user', 'content': block},
                 ])
                 continue
+            # Citation probing: a finding that cites a doc/URL the reviewer never retrieved is
+            # bounced back to retrieve it (bounded by MAX_CITATION_BOUNCES), mirroring the git
+            # probe above. The deterministic evidence gate remains the final arbiter; this only
+            # gives the reviewer a chance to back a citation it already made. The finding's
+            # location is stripped first so a finding located in a doc is not read as a citation.
+            if (ctx.require_evidence and not _is_no_findings_response(text)
+                    and citation_bounces < MAX_CITATION_BOUNCES):
+                cite_text = _CITE_FINDING_LOC_RE.sub(r'\1', text)
+                bad = unretrieved_citations(
+                    cite_text, opened_command_scope(ctx.evidence),
+                    *source_scopes(ctx.sources))
+                if bad:
+                    citation_bounces += 1
+                    if debug:
+                        print(f'[tools] citation bounce: {", ".join(bad)} '
+                              f'not retrieved; requesting retrieval')
+                    shown = ', '.join(bad[:5])
+                    if len(bad) > 5:
+                        shown += f', and {len(bad) - 5} more'
+                    block = (
+                        f'You cited {shown} in a finding but have not retrieved it. A citation '
+                        f'you have not read is not a basis for a finding. Retrieve it before you '
+                        f'rely on it: `git show HEAD:<path>` (or `summarize` / `find-in-file`) '
+                        f'a doc, or `view-web-page` / `web-search` a URL. Keep the citation only '
+                        f'if the source you read actually supports the finding; if it does not, '
+                        f'withdraw that finding. Then re-issue your findings.')
+                    messages.extend([
+                        {'role': 'assistant', 'content': text},
+                        {'role': 'user', 'content': block},
+                    ])
+                    continue
             return text
         if debug:
             print(f'[tools] round {round_ + 1}/{max_rounds}: {pending.name}')

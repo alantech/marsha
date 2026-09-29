@@ -1066,6 +1066,62 @@ def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
     assert out2 == 'NO FINDINGS' and ctx2.evidence == []
 
 
+def test_run_with_tools_bounces_unretrieved_citation(tmp_path: Any) -> None:
+    # A finding that cites a doc the reviewer never retrieved is bounced back to retrieve it,
+    # mirroring the git probe. It is only accepted once the cited doc is actually read, which lands
+    # in the evidence ledger. (The finding's own location, mid.py:2, is not a citation.)
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs' / 'NOTES.md').write_text('# Notes\nthe pattern\n')
+    subprocess.run(['git', 'add', 'mid.py', 'docs'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong, per docs/NOTES.md'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # git probe -> finding citing an unread doc (bounced) -> retrieve the doc -> finding (kept).
+    mapper = ScriptedMapper([
+        '$ git show HEAD:mid.py\n',
+        finding,
+        '$ git show HEAD:docs/NOTES.md\n',
+        finding,
+    ])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == finding
+    assert any('docs/NOTES.md' in line for line, _ in ctx.evidence)
+
+
+def test_run_with_tools_citation_bounce_is_bounded(tmp_path: Any) -> None:
+    # The citation bounce is bounded: after MAX_CITATION_BOUNCES the finding is returned as-is
+    # (the deterministic evidence gate makes the final call), so a stuck reviewer cannot burn the
+    # whole tool budget on the citation probe.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong, per docs/NOTES.md'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # git probe -> finding (bounce 1) -> finding (bounce 2) -> finding (returned, at the cap).
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', finding, finding, finding])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx, max_rounds=10))
+    assert out == finding
+
+
+def test_unretrieved_citations_extraction() -> None:
+    # The shared extractor finds doc paths and URLs; unretrieved_citations reports the ones absent
+    # from the retrieval scopes (a doc needs a read command, a URL a web retrieval or search).
+    text = 'see docs/NOTES.md and https://example.com/x for the pattern'
+    assert tools.cited_sources(text) == (['docs/NOTES.md'], ['https://example.com/x'])
+    assert tools.unretrieved_citations(text, '', '', '') == \
+        ['docs/NOTES.md', 'https://example.com/x']
+    assert tools.unretrieved_citations(
+        text, 'git show HEAD:docs/NOTES.md', '',
+        'Search results:\nhttps://example.com/x') == []
+
+
 def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])

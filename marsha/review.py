@@ -1182,81 +1182,6 @@ def _path_token_match(command_scope: str, file_path: str) -> bool:
     return False
 
 
-def _opened_command_scope(evidence: list[tuple[str, str]]) -> str:
-    # The command text that establishes a file was OPENED (git show, git cat-file, a pathspec).
-    # A `git grep` is a SEARCH, not a file open: even with a pathspec it returns only matching
-    # lines (or nothing at all on a clean no-match), so a location-only finding must be grounded on
-    # a `git show`, not on a grep that read no code from the cited file.
-    lines = []
-    for cmd, _out in evidence:
-        if 'grep' in cmd.split():
-            continue  # a search, not a file open
-        lines.append(cmd)
-    return '\n'.join(lines)
-
-
-# --- cited-source verification (the evidence gate's citation check) ----------------
-#
-# A finding that names a documentation file or a web URL as the basis of its claim must have
-# actually retrieved it — opened the doc (git show / cat-file) or fetched it (summarize /
-# find-in-file / view-web-page / web-search). This is the institutional-knowledge half of the
-# gate: it stops a "re-introduces the pattern documented in docs/X.md" finding where X.md was
-# never opened. Code file paths are NOT checked here — they are grounded by the existing symbol /
-# file git checks. The match is deliberately lenient (a citation written slightly differently from
-# the command still counts as retrieved): the failure it must avoid is a FALSE DROP of a real,
-# grounded finding, not a false pass.
-
-_DOC_EXT_RE = re.compile(r'\.(?:md|markdown|txt|rst|adoc|org)$', re.I)
-_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
-_URL_RE = re.compile(r'https?://\S+')
-_PATH_TOKEN_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
-_CITE_PUNCT = '.,;:!?)]\'"`'
-
-
-def _is_doc_path(token: str) -> bool:
-    # A cited token is a documentation file (not a code file) when it ends in a prose extension or
-    # is a bare changelog-style name. Code files (.py / .ts / ...) are excluded — the existing git
-    # symbol/file checks ground them, not the citation check.
-    if _DOC_EXT_RE.search(token):
-        return True
-    return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
-
-
-def _cited_sources(finding: Finding) -> tuple[list[str], list[str]]:
-    # The documentation paths and URLs a finding cites in its desc + support, normalized (trailing
-    # punctuation stripped) and de-duplicated. Returns (doc_paths, urls).
-    text = ' '.join(
-        filter(None, [finding.get('desc'), finding.get('support')]))
-    urls: list[str] = []
-    for u in _URL_RE.findall(text):
-        u = u.rstrip(_CITE_PUNCT)
-        if u not in urls:
-            urls.append(u)
-    paths: list[str] = []
-    for tok in _PATH_TOKEN_RE.findall(text):
-        tok = tok.rstrip(_CITE_PUNCT)
-        if _is_doc_path(tok) and tok not in paths:
-            paths.append(tok)
-    for m in _DOC_BARE_RE.finditer(text):
-        if m.group(0) not in paths:
-            paths.append(m.group(0))
-    return sorted(paths), urls
-
-
-def _cited_in_scope(cited: str, scope: str) -> bool:
-    # Whether a cited doc path or URL appears in the retrieved-command scope (the command text of
-    # the git reads and source retrievals the reviewer actually ran). Lenient: the citation is
-    # trimmed of a leading ./ and trailing punctuation, then matched as a substring, so a citation
-    # written slightly differently from the command still counts. An empty citation is a match.
-    norm = cited.strip()
-    if norm.startswith('./'):
-        norm = norm[2:]
-    norm = norm.rstrip(_CITE_PUNCT)
-    if not norm:
-        return True
-    return norm in scope
-
-
 async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False) -> list[Finding]:
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
@@ -1313,7 +1238,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
         # `git grep` commands are excluded from that scope — a search is not a file open, and a
         # no-match grep read no code from its pathspec — so a location-only finding must be
         # grounded on a `git show`, not on a grep.
-        command_scope = _opened_command_scope(evidence)
+        command_scope = tools.opened_command_scope(evidence)
         ok, reason = True, ''
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
@@ -1388,34 +1313,17 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             # documented in docs/X.md" finding where X.md was never opened is a guess about
             # institutional knowledge, dropped like any other unverified claim. A code-only
             # finding cites no doc/URL and is left to the checks above.
-            doc_paths, urls = _cited_sources(f)
-            if doc_paths or urls:
-                src = f.get('sources') or []
-                # A doc path is proven by the command that opened it (a git
-                # read or a read tool). A URL is proven by a web retrieval:
-                # view-web-page / summarize name it in the command, and
-                # web-search surfaces it in its results. A URL that appears
-                # only in a summarized local file was not fetched, so beyond
-                # the command lines only the web-search output counts.
-                git_scope = _opened_command_scope(evidence)
-                src_cmds = '\n'.join(cmd for cmd, _out in src)
-                search_outs = '\n'.join(
-                    out for cmd, out in src
-                    if cmd.lstrip('$ ').startswith('web-search'))
-                url_scope = src_cmds + '\n' + search_outs
-                for p in doc_paths:
-                    if not _cited_in_scope(p, git_scope + '\n' + src_cmds):
-                        ok, reason = (False,
-                                      f'cites {p} but never retrieved it (no git read or '
-                                      f'summarize/find-in-file/view-web-page of that doc)')
-                        break
-                if ok:
-                    for u in urls:
-                        if not _cited_in_scope(u, url_scope):
-                            ok, reason = (False,
-                                          f'cites {u} but never fetched it '
-                                          f'(no web retrieval of that URL)')
-                            break
+            text = ' '.join(filter(None, [f.get('desc'), f.get('support')]))
+            src_cmds, search_outs = tools.source_scopes(f.get('sources') or [])
+            git_scope = tools.opened_command_scope(evidence)
+            bad = tools.unretrieved_citations(
+                text, git_scope, src_cmds, search_outs)
+            if bad:
+                cited = bad[0]
+                verb = 'fetched' if cited.startswith('http') else 'retrieved'
+                ok, reason = (
+                    False, f'cites {cited} but never {verb} it (no git read or '
+                    f'web retrieval of that source)')
         if ok:
             kept.append(f)
         elif debug:
