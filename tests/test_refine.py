@@ -1425,14 +1425,16 @@ def test_spec_urls_extracts_urls_including_placeholders() -> None:
     ]
 
 
-def test_spec_urls_trims_a_long_run_of_unmatched_parens() -> None:
-    # A URL followed by a long run of unmatched ')' (a markdown link's closing paren plus
-    # prose) trims in one slice: re-counting the parens over the shrinking string on every
-    # strip would take quadratic CPU, and --check has no source-size limit.
+def test_spec_urls_trims_long_suffixes_quickly() -> None:
+    # A URL followed by a long run of trailing punctuation (one rstrip) or of unmatched
+    # ')' (one slice) trims in linear time: re-counting or re-copying the shrinking
+    # string on every strip would take quadratic CPU, and --check has no source-size
+    # limit.
     url = 'https://x.example.com/a'
+    assert refine._spec_urls(url + '.' * 100_000) == [url]
     assert refine._spec_urls(url + ')' * 100_000) == [url]
-    # The trim never removes more than the trailing run allows (parens inside the URL
-    # still balance): the original strip-loop behavior, kept.
+    # The paren trim never removes more than the trailing run allows (parens inside the
+    # URL still balance): the original strip-loop behavior, kept.
     assert refine._spec_urls('https://x.example.com/(a))b)') == \
         ['https://x.example.com/(a))b']
 

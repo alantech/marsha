@@ -512,9 +512,10 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
                 break
             i += 1
         span_end = i
-        url = text[m.start():i]
-        while url and url[-1] in '.,;:!\'"<>`':
-            url = url[:-1]
+        # Trailing sentence punctuation (and the closing backtick of an inline-code
+        # span) is stripped with one rstrip: slicing off one character per iteration
+        # would copy the shrinking string each time (quadratic in a long run).
+        url = text[m.start():i].rstrip('.,;:!\'"<>`')
         # Trim unmatched closing parens (a markdown link's, trailing the URL) with one
         # slice: the loop that re-counted and re-copied the shrinking string per strip
         # was quadratic in a long run of ')'. The strip can never exceed the shorter of

@@ -5,6 +5,7 @@ from asyncio.subprocess import Process
 from collections.abc import Callable
 import os
 import shutil
+import sys
 from typing import cast
 
 
@@ -63,16 +64,91 @@ def write_file_no_follow(filename: str, content: str) -> None:
     # For writes to a user-named path whose symlink-ness was checked earlier in the run: the
     # check and the write are not atomic, so a path swapped for a symlink in between must not
     # be followed — the write would overwrite the symlink's target instead. On Unix the open
-    # itself carries O_NOFOLLOW, so the refusal is atomic. Windows' C runtime has no
-    # no-follow open flag (the reparse-flag WinAPI route is not exposed through os.open), so
-    # the symlink is refused up front there: strictly better than the previous unguarded
-    # write, with a residual race window of one syscall for a concurrently swapped path.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    # itself carries O_NOFOLLOW, so the refusal is atomic. Where os.open has no no-follow
+    # flag (Windows), a symlink present at check time is refused up front, and the write
+    # itself then goes through an atomic no-follow open, so a swap that lands in between
+    # is refused by the open rather than followed.
     if hasattr(os, 'O_NOFOLLOW'):
-        flags |= os.O_NOFOLLOW
-    elif os.path.islink(filename):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        fd = os.open(filename, flags, 0o644)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return
+    if os.path.islink(filename):
         raise OSError(f'refusing to write through a symlink: {filename}')
-    fd = os.open(filename, flags, 0o644)
+    _win32_write_no_follow(filename, content)
+
+
+def _win32_write_no_follow(filename: str, content: str) -> None:
+    # The no-follow write for a platform whose os.open cannot carry the guarantee:
+    # CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT opens a symlink at the final path
+    # component as the reparse point itself — without following it — so a path swapped
+    # for a symlink after the caller's check is opened (and refused) as the reparse
+    # point it is: one atomic open, no check-then-open window. A regular path ignores
+    # the flag and opens as usual (created or truncated, as O_CREAT|O_TRUNC would).
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        generic_write = 0x40000000
+        file_share_all = 0x7
+        create_always = 2
+        file_attribute_normal = 0x80
+        file_flag_open_reparse_point = 0x200000
+        file_attribute_reparse_point = 0x400
+
+        class _file_information(ctypes.Structure):
+            _fields_ = [('dw_file_attributes', wintypes.DWORD),
+                        ('ft_creation_time', wintypes.FILETIME),
+                        ('ft_last_access_time', wintypes.FILETIME),
+                        ('ft_last_write_time', wintypes.FILETIME),
+                        ('dw_volume_serial_number', wintypes.DWORD),
+                        ('n_file_size_high', wintypes.DWORD),
+                        ('n_file_size_low', wintypes.DWORD),
+                        ('n_number_of_links', wintypes.DWORD),
+                        ('n_file_index_high', wintypes.DWORD),
+                        ('n_file_index_low', wintypes.DWORD)]
+
+        kernel32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_file_information)]
+        kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.WriteFile.argtypes = [
+            wintypes.HANDLE, ctypes.c_char_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel32.WriteFile.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.CreateFileW(
+            filename, generic_write, file_share_all, None, create_always,
+            file_attribute_normal | file_flag_open_reparse_point, None)
+        if handle is None or handle >= 0xFFFFFFFF:  # INVALID_HANDLE_VALUE
+            raise OSError(
+                f'could not open {filename} for writing (CreateFileW)')
+        try:
+            info = _file_information()
+            if not kernel32.GetFileInformationByHandle(
+                    handle, ctypes.byref(info)):
+                raise OSError(f'could not inspect {filename} '
+                              '(GetFileInformationByHandle)')
+            if info.dw_file_attributes & file_attribute_reparse_point:
+                raise OSError(
+                    f'refusing to write through a symlink: {filename}')
+            written = wintypes.DWORD(0)
+            data = content.encode('utf-8')
+            if not kernel32.WriteFile(handle, data, len(data),
+                                      ctypes.byref(written), None):
+                raise OSError(f'could not write {filename} (WriteFile)')
+        finally:
+            kernel32.CloseHandle(handle)
+        return
+    # Not really Windows (the no-O_NOFOLLOW fallback off a non-Windows platform):
+    # the plain open is all that is available; the caller already refused a symlink
+    # present at its check.
+    fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(content)
 
