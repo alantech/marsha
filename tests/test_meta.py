@@ -363,3 +363,21 @@ def test_format_marsha_for_llm_list_in_subsection_is_not_the_examples() -> None:
     examples = out.split('### Examples of expected behavior')[1]
     assert 'option one' not in examples  # the subsection list is description, not examples
     assert '* add(1, 2) -> 3' in examples
+
+
+def test_format_marsha_for_llm_void_func_final_list_is_description() -> None:
+    # A void function has no usage-examples list (the validator requires one only for
+    # functions that return), so its final list is description content, not "Examples of
+    # expected behavior".
+    spec = ('# func log(msg: str)\n'
+            'Records the given message to the session audit log. This description is '
+            'long enough to clear the minimum length rule for a marsha function section.\n'
+            '\n'
+            '* the log line carries the timestamp\n'
+            '* the log line carries the message verbatim')
+    meta_obj = asyncio.run(_meta_for(spec))
+    out = format_marsha_for_llm(meta_obj)
+    assert '### Examples of expected behavior' not in out
+    desc = out.split('### Description')[1]
+    assert 'the log line carries the timestamp' in desc
+    assert 'the log line carries the message verbatim' in desc

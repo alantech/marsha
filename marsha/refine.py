@@ -515,8 +515,15 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
         url = text[m.start():i]
         while url and url[-1] in '.,;:!\'"<>`':
             url = url[:-1]
-        while url.endswith(')') and url.count(')') > url.count('('):
-            url = url[:-1]
+        # Trim unmatched closing parens (a markdown link's, trailing the URL) with one
+        # slice: the loop that re-counted and re-copied the shrinking string per strip
+        # was quadratic in a long run of ')'. The strip can never exceed the shorter of
+        # the trailing ')' run and the ')' excess over '('.
+        opens = url.count('(')
+        closes = url.count(')')
+        if closes > opens:
+            trailing = len(url) - len(url.rstrip(')'))
+            url = url[:-min(trailing, closes - opens)]
         if url not in seen and (skip is None or url not in skip):
             seen.add(url)
             urls.append(url)
