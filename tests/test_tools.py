@@ -138,6 +138,38 @@ def test_extract_pending_command_strips_enclosing_backticks() -> None:
     assert inner is not None and inner.args == ['1`2']
 
 
+def test_extract_trailing_command_glued_to_prose() -> None:
+    # Models often glue the command to the end of the last sentence line instead of giving
+    # it its own line; the trailing `$ command` segment of the final line is still read, so
+    # a glued command runs (an unrun command would loop the turn on itself).
+    p = tools.extract_pending_command(
+        'I will verify the endpoint now. $ view-web-page "https://ipwho.is/"')
+    assert p is not None
+    assert p.name == 'view-web-page'
+    assert p.args == ['https://ipwho.is/']
+    assert p.page is None and p.malformed is False
+    paged = tools.extract_pending_command('checking $ PAGE=2 git show HEAD:src/x.py')
+    assert paged is not None
+    assert paged.name == 'git' and paged.page == 2
+    assert paged.args == ['show', 'HEAD:src/x.py']
+
+
+def test_extract_trailing_backtick_wrapped_command() -> None:
+    p = tools.extract_pending_command('checking: `$ calc "1+1"`')
+    assert p is not None and p.name == 'calc' and p.args == ['1+1']
+    # An unclosed backtick span is prose, not a wrapped command.
+    assert tools.extract_pending_command('checking: `$ calc "1+1"') is None
+
+
+def test_extract_dollar_in_prose_is_not_a_command() -> None:
+    # A `$` with no space after it (a price, a variable, a URL fragment) is not a command
+    # position, and a `$` mid-response is never a command.
+    assert tools.extract_pending_command('the price is $5 each.') is None
+    assert tools.extract_pending_command('use $HOME for the home dir.') is None
+    assert tools.extract_pending_command('$ calc "1+1"\nbut really, $ web-search "x"') \
+        is not None
+
+
 def test_build_commands_honors_a_categories_override() -> None:
     # A caller that needs a narrower or repo-independent tool set (e.g. a refine chat outside
     # a git working tree) passes the set explicitly instead of the phase's default.

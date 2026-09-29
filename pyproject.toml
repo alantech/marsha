@@ -19,6 +19,7 @@ dependencies = [
     "openai>=1.0",
     "pycodestyle",
     "pyflakes",
+    "prompt_toolkit>=3.0",
     "pytest",
     "quickjs-ng",
     "rich",

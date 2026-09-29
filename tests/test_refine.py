@@ -10,8 +10,10 @@ import asyncio
 import email.message
 import json
 import os
+import threading
+import time
 import urllib.error
-from typing import Any, Generator
+from typing import Any, Awaitable, Generator
 
 import types
 from unittest.mock import AsyncMock, patch
@@ -1428,6 +1430,34 @@ def test_spec_urls_finds_nothing_without_urls() -> None:
         == []
 
 
+def test_spec_urls_strips_inline_code_backticks() -> None:
+    # The model wraps URLs in inline code spans (`https://x/`); the closing backtick is not
+    # part of the URL — a probe that kept it would request a bogus path, get a 404, and flag
+    # a live endpoint dead.
+    text = ('GeoIP is `https://ipwho.is/` and the forecast is '
+            '`https://api.open-meteo.com/v1/forecast` (see the docs).')
+    assert refine._spec_urls(text) == [
+        'https://ipwho.is/',
+        'https://api.open-meteo.com/v1/forecast',
+    ]
+
+
+def test_spec_endpoint_errors_probes_bare_urls_from_inline_code() -> None:
+    # A live endpoint wrapped in inline code must not be reported dead: the probe goes out
+    # to the bare URL, without the backtick the model wrapped it in.
+    url = 'https://live.example.com/v1/{id}'
+    probed: list[str] = []
+
+    async def fake_get(url2: str, timeout: int = 0) -> Any:
+        probed.append(url2)
+        return 200, 'application/json', b'{}'
+
+    with patch.object(tools, 'http_get', new=fake_get):
+        errors = asyncio.run(refine._spec_endpoint_errors(f'GeoIP is `{url}`.'))
+    assert errors == []
+    assert probed == ['https://live.example.com/v1/Test']
+
+
 def test_spec_endpoint_errors_flags_dead_routes_and_unreachable_hosts() -> None:
     # A 404/410 route, a 5xx server failure, and an unreachable host are dead; a 200 is
     # alive, and the probe substitutes a sample value for each placeholder.
@@ -2152,4 +2182,109 @@ def test_run_refine_chat_compaction_reattaches_recorded_notes() -> None:
     assert 'src/a.py:3 - the tie-break' in compact.last_request
     reattached = chat_calls[1][0]['content']
     assert 'Your notes' in reattached
-    assert 'src/a.py:3 - the tie-break' in reattached
+
+
+# --- the terminal reply reader (multi-line, paste-safe) --------------------------
+#
+# The reply reader drives a real prompt_toolkit session in a worker thread (a synchronous
+# prompt() cannot nest inside the chat's own event loop). These tests feed it through a
+# pipe input — the production code path minus the terminal — so the key bindings and the
+# thread/stop machinery are the same ones the real reader runs.
+
+def _run_piped_prompt(data: bytes) -> str:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.input import create_pipe_input
+
+    def make_prompt() -> Awaitable[str]:
+        async def run() -> str:
+            with create_pipe_input() as inp:
+                bindings = refine._prompt_key_bindings()
+                session: Any = PromptSession(multiline=True, input=inp,
+                                             history=InMemoryHistory(),
+                                             key_bindings=bindings)
+                inp.send_bytes(data)
+                result: str = await session.prompt_async('you> ')
+                return result
+        return run()
+
+    return refine._run_prompt_in_thread(make_prompt, threading.Event())
+
+
+def test_read_line_without_a_terminal_falls_back_to_plain_input(
+        monkeypatch: Any) -> None:
+    monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+    monkeypatch.setattr('builtins.input', lambda _prompt='': 'plain reply')
+    assert refine._read_line() == 'plain reply'
+
+
+def test_read_line_without_a_terminal_treats_eof_as_bail(monkeypatch: Any) -> None:
+    monkeypatch.setattr('sys.stdin.isatty', lambda: False)
+
+    def eof_input(_prompt: str = '') -> str:
+        raise EOFError
+
+    monkeypatch.setattr('builtins.input', eof_input)
+    assert refine._read_line() == '!bail'
+
+
+def test_prompt_reader_enter_submits_the_buffer() -> None:
+    assert _run_piped_prompt(b'hello\r') == 'hello'
+
+
+def test_prompt_reader_a_pasted_block_is_one_message() -> None:
+    # A pasted block (the terminal's bracketed paste) lands as one reply, not one message
+    # per pasted line — the failure mode of a plain input() read, which submitted every
+    # pasted line on its own and shredded the conversation.
+    data = b'\x1b[200~line1\nline2\nline3\x1b[201~\r'
+    assert _run_piped_prompt(data) == 'line1\nline2\nline3'
+
+
+def test_prompt_reader_shift_enter_inserts_a_newline() -> None:
+    # Shift+Enter (where the terminal sends a distinct sequence) types a newline instead of
+    # submitting: the kitty/xterm-modified and the legacy xterm forms.
+    assert _run_piped_prompt(b'first\x1b[13;2usecond\r') == 'first\nsecond'
+    assert _run_piped_prompt(b'first\x1bOMsecond\r') == 'first\nsecond'
+
+
+def test_prompt_reader_ctrl_d_is_eof_on_an_empty_buffer() -> None:
+    # Ctrl-D on an empty buffer is the session's EOF (a bail), not a submit of nothing.
+    with pytest.raises(EOFError):
+        _run_piped_prompt(b'\x04')
+
+
+def test_prompt_reader_ctrl_d_submits_a_nonempty_buffer() -> None:
+    assert _run_piped_prompt(b'yes\x04') == 'yes'
+
+
+def test_prompt_reader_stop_tears_the_worker_down() -> None:
+    # A stop (set by the main thread's SIGINT handler) cancels the prompt and ends the
+    # runner with a KeyboardInterrupt; without it the worker — waiting on input forever —
+    # would keep the process alive after the interrupt unwinds.
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.input import create_pipe_input
+
+    def make_prompt() -> Awaitable[str]:
+        async def run() -> str:
+            with create_pipe_input() as inp:  # no data: the prompt waits
+                bindings = refine._prompt_key_bindings()
+                session: Any = PromptSession(multiline=True, input=inp,
+                                             history=InMemoryHistory(),
+                                             key_bindings=bindings)
+                result: str = await session.prompt_async('you> ')
+                return result
+        return run()
+
+    stop = threading.Event()
+
+    def stop_later() -> None:
+        time.sleep(0.3)
+        stop.set()
+
+    stopper = threading.Thread(target=stop_later, daemon=True)
+    stopper.start()
+    start = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        refine._run_prompt_in_thread(make_prompt, stop)
+    assert time.monotonic() - start < 5

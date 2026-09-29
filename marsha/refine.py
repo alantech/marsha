@@ -17,11 +17,13 @@ import dataclasses
 import json
 import os
 import re
+import signal
 import stat
 import sys
 import tempfile
+import threading
 import urllib.error
-from typing import Any, Callable, cast
+from typing import Any, Awaitable, Callable, NoReturn, cast
 
 from rich.box import DOUBLE
 from rich.console import Console
@@ -477,8 +479,10 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
     A URL runs through a `{placeholder}` group even when the placeholder contains a space
     (`?q={URL-encoded location}` — the brace depth keeps it one URL), and trailing sentence
     punctuation that follows a URL in prose (and an unbalanced closing paren from markdown
-    links) is not part of it. URLs in `skip` (endpoints the person confirmed to keep) are
-    left out."""
+    links) is not part of it — nor is the closing backtick of an inline-code span
+    (`` `https://x/` ``), which the model wraps URLs in habitually and which a probe would
+    otherwise request as part of the path. URLs in `skip` (endpoints the person confirmed
+    to keep) are left out."""
     urls: list[str] = []
     seen: set[str] = set()
     for m in _URL_START_RE.finditer(text):
@@ -494,7 +498,7 @@ def _spec_urls(text: str, skip: set[str] | None = None) -> list[str]:
                 break
             i += 1
         url = text[m.start():i]
-        while url and url[-1] in '.,;:!\'"<>':
+        while url and url[-1] in '.,;:!\'"<>`':
             url = url[:-1]
         while url.endswith(')') and url.count(')') > url.count('('):
             url = url[:-1]
@@ -648,10 +652,146 @@ def _is_bail_token(line: str) -> bool:
 
 
 def _read_line() -> str:
+    """Read one reply from the person (an EOF, real or Ctrl-D on an empty
+    line, bails the session).
+
+    A reply may span multiple lines. With a plain input() a pasted block of
+    text would arrive line by line — the terminal submits each pasted line as
+    its own read — and every line would become its own message to the
+    assistant, shredding the conversation. On a terminal the reply is read
+    with a prompt_toolkit session instead: a pasted block (the terminal's
+    bracketed paste) lands in the buffer as one message, Enter submits
+    whatever is in the buffer, Shift+Enter — where the terminal sends a
+    distinct sequence — inserts a newline while typing, and Ctrl-D submits
+    the buffer or is an EOF when it is empty. Without a terminal (piped
+    stdin, tests) it falls back to the plain line read."""
+    if not sys.stdin.isatty():
+        try:
+            return input('\nyou> ')
+        except EOFError:
+            return '!bail'
     try:
-        return input('\nyou> ')
+        return _prompt_read_line()
     except EOFError:
         return '!bail'
+
+
+# The reply history for the terminal reader (the up arrow recalls earlier
+# replies of this session); built on first use, so headless commands never
+# import prompt_toolkit at all.
+_PROMPT_HISTORY: Any = None
+
+
+def _prompt_key_bindings() -> Any:
+    # The reply's key bindings. Enter submits the whole (possibly multi-line)
+    # buffer — the default for a multiline buffer is to insert a newline and
+    # offer no submit key at all. Shift+Enter, where the terminal distinguishes
+    # it (the kitty/xterm-modified and legacy xterm sequences), inserts a
+    # newline instead. Ctrl-D submits what is there; on an empty buffer it is
+    # an EOF (the session's bail) — the default binding deletes a character.
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+
+    kb = KeyBindings()
+
+    @kb.add('enter')
+    def submit(event: Any) -> None:
+        event.app.current_buffer.validate_and_handle()
+
+    @kb.add('c-d')
+    def eof(event: Any) -> None:
+        if event.app.current_buffer.text:
+            event.app.current_buffer.validate_and_handle()
+        else:
+            event.app.exit(exception=EOFError())
+
+    @kb.add(Keys.Escape, '[', '1', '3', ';', '2', 'u')
+    @kb.add(Keys.Escape, 'O', 'M')
+    def newline(event: Any) -> None:
+        event.app.current_buffer.insert_text('\n')
+
+    return kb
+
+
+def _prompt_session(history: Any) -> Any:
+    from prompt_toolkit import PromptSession
+    return PromptSession(multiline=True, history=history,
+                         key_bindings=_prompt_key_bindings())
+
+
+def _run_prompt_in_thread(make_prompt: Callable[[], Awaitable[str]],
+                          stop: threading.Event) -> str:
+    """Run one prompt on a fresh event loop in a worker thread, blocking until it
+    returns a reply. A synchronous prompt() would call asyncio.run() itself and
+    cannot run inside marsha's own loop, which the chat is running on. `stop`
+    tears the worker down when the main thread is interrupted: without it the
+    (non-daemon) worker would keep the process alive after the main thread's
+    KeyboardInterrupt has unwound (it waits on terminal input forever)."""
+    box: list[str] = []
+    errors: list[BaseException] = []
+
+    def body() -> None:
+        async def wait_stop() -> None:
+            while not stop.is_set():
+                await asyncio.sleep(0.1)
+
+        async def main() -> None:
+            stop_task = asyncio.ensure_future(wait_stop())
+            app_task = asyncio.ensure_future(make_prompt())
+            done, _ = await asyncio.wait(
+                {app_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            stop.set()
+            stop_task.cancel()
+            if app_task in done:
+                try:
+                    box.append(app_task.result())
+                except BaseException as e:
+                    errors.append(e)
+            else:
+                app_task.cancel()
+                try:
+                    await app_task
+                except BaseException:
+                    pass
+
+        try:
+            asyncio.run(main())
+        except BaseException as e:
+            if not box and not errors:
+                errors.append(e)
+
+    thread = threading.Thread(target=body, name='marsha-prompt')
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+    if box:
+        return box[0]
+    raise KeyboardInterrupt
+
+
+def _prompt_read_line() -> str:
+    global _PROMPT_HISTORY
+    if _PROMPT_HISTORY is None:
+        from prompt_toolkit.history import InMemoryHistory
+        _PROMPT_HISTORY = InMemoryHistory()
+    print()
+    stop = threading.Event()
+    previous = signal.getsignal(signal.SIGINT)
+
+    def interrupt(signum: int, frame: Any) -> NoReturn:
+        stop.set()
+        raise KeyboardInterrupt
+
+    # While the prompt runs in its worker thread, a Ctrl-C must both tear that
+    # worker down (stop) and raise in the main thread, exactly like the plain
+    # input() does — otherwise the process hangs at exit on the live worker.
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        return _run_prompt_in_thread(
+            lambda: _prompt_session(_PROMPT_HISTORY).prompt_async('you> '), stop)
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 async def _resolve_window(model: str | None) -> int | None:

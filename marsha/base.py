@@ -239,11 +239,11 @@ def _sigint_handler(signum: int, frame: Any) -> NoReturn:
 def install_sigint_handler() -> None:
     # Restore the classic raise-on-Ctrl+C behavior for the whole run. asyncio's Runner would
     # otherwise install its own handler whose first Ctrl+C only *cancels* the main task and
-    # returns without raising; while a main thread is blocked in a synchronous read (the
-    # refine chat's input()), the event loop can never process that cancellation, so the
-    # interrupt is silently swallowed and the process appears to ignore Ctrl+C. The Runner
-    # installs its handler only when SIGINT is still the default handler, so installing this
-    # one first opts the process out.
+    # returns without raising; while the main thread is blocked in a synchronous read (the
+    # refine chat waits in thread.join() on its prompt's worker thread), the event loop can
+    # never process that cancellation, so the interrupt is silently swallowed and the process
+    # appears to ignore Ctrl+C. The Runner installs its handler only when SIGINT is still the
+    # default handler, so installing this one first opts the process out.
     signal.signal(signal.SIGINT, _sigint_handler)
 
 
