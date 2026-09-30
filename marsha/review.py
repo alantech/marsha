@@ -1483,9 +1483,23 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
     if not findings:
-        # An all-clear --post-review still posts a short note to the PR.
+        # An all-clear --post-review still posts a short note to the PR. Every active reviewer
+        # ran this pass and raised nothing, so every open thread one of them opened is conceded
+        # like on any other pass and resolved — without this, a finding fixed since the last
+        # pass would sit open on the PR until a pass with findings happens to run again.
+        threads = await _fetch_review_threads(repo, pr_num, cwd)
+        active = set(active_numbers or [])
+        closed = 0
+        for label, thread in threads.items():
+            if thread['is_resolved'] or _label_reviewer_number(label) not in active:
+                continue
+            if await _resolve_thread(thread['thread_id'], cwd):
+                closed += 1
         await _post_all_clear(repo, pr_num, cwd)
-        print(f'All clear: posted a no-issues note to PR #{pr_num}.')
+        summary = f'All clear: posted a no-issues note to PR #{pr_num}.'
+        if closed:
+            summary += f' ({closed} thread(s) resolved.)'
+        print(summary)
         return
     # Anchor inline comments on the PR's own diff, not the local one: the local diff is truncated
     # to REVIEW_DIFF_LIMIT and can drift from the PR (a rebased head, a moved base), which is how a

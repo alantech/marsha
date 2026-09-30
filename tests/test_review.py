@@ -2177,6 +2177,44 @@ def test_post_review_all_clear_posts_note() -> None:
     assert 'no issues found' in payload['body']
 
 
+def test_post_review_all_clear_resolves_conceded_threads() -> None:
+    # An all-clear pass raises nothing, so every open thread an active reviewer opened is
+    # conceded and resolved; threads of reviewers that did not run this pass are left alone.
+    threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'nodes': [
+            {'id': 'PRRT_B9', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 55, 'path': 'tools.py', 'line': 2101,
+                 'body': '**[B9] MAJOR**: fixed gap'}]}},
+            {'id': 'PRRT_C5', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 66, 'path': 'tools.py', 'line': 2162,
+                 'body': '**[C5] MAJOR**: fixed gap too'}]}},
+            {'id': 'PRRT_D7', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 77, 'path': 'baz.py', 'line': 9,
+                 'body': '**[D7] MINOR**: reviewer not re-run'}]}},
+        ]}}}}})
+    resolved = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'resolveReviewThread' in joined:
+            m = re.search(r'threadId: "([^"]+)"', joined)
+            resolved.append(m.group(1) if m else None)
+            return (0, '{"data": {}}', '')
+        if 'reviewThreads' in joined:
+            return (0, threads, '')
+        if '/reviews' in joined:
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        # Reviewers #9 and #5 ran this pass and raised nothing; #7 did not.
+        asyncio.run(review.post_review(123, [], '', active_numbers=[9, 5]))
+
+    assert resolved == ['PRRT_B9', 'PRRT_C5']
+
+
 def test_post_review_replies_on_existing_thread() -> None:
     # A finding re-raised under a label that already has a thread is posted as a reply on that
     # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.
