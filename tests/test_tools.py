@@ -1117,10 +1117,11 @@ def test_unretrieved_citations_extraction() -> None:
     assert tools.cited_sources(text) == (['docs/NOTES.md'], ['https://example.com/x'])
     assert tools.unretrieved_citations(text, [], []) == \
         ['docs/NOTES.md', 'https://example.com/x']
-    # A doc read via git show and a URL returned by web-search are both considered read.
+    # A doc read via git show and a URL in a web-search result are both considered read.
     assert tools.unretrieved_citations(
         text, [('$ git show HEAD:docs/NOTES.md', '')],
-        [('$ web-search "x"', 'https://example.com/x')]) == []
+        [('$ web-search "x"',
+          'Search results for: x\n1. Example\nhttps://example.com/x')]) == []
 
 
 def test_unretrieved_citations_requires_a_real_read() -> None:
@@ -1134,7 +1135,8 @@ def test_unretrieved_citations_requires_a_real_read() -> None:
         'see docs/NOTES.md',
         [('$ git ls-files docs/NOTES.md', 'docs/NOTES.md')], []) == ['docs/NOTES.md']
     assert tools.unretrieved_citations(
-        url, [], [('$ web-search "' + url + ' bug"', 'no urls here')]) == [url]
+        url, [], [('$ web-search "' + url + ' bug"',
+                   'Search results for: ' + url + ' bug\nno urls here')]) == [url]
 
 
 def test_unretrieved_citations_config_files_and_paged_reads() -> None:
@@ -1260,6 +1262,29 @@ def test_unretrieved_citations_extensionless_configs() -> None:
         [('$ git show HEAD:Makefile', '.PHONY: format')], []) == []
     assert tools.cited_sources('the Dockerfile copies the repo') == (['Dockerfile'], [])
     assert tools.cited_sources('a license is required') == ([], [])
+
+
+def test_unretrieved_citations_web_search_query_is_not_a_result() -> None:
+    # The web-search output's first line echoes the QUERY; a URL in the query is not a
+    # retrieval — only URLs in the result lines count.
+    url = 'https://example.com/x'
+    out = ('Search results for: ' + url + ' bug\n1. Some title\n'
+           'https://other.com/page')
+    assert tools.unretrieved_citations(
+        'see ' + url, [], [('$ web-search "' + url + ' bug"', out)]) == [url]
+    assert tools.unretrieved_citations(
+        'see https://other.com/page', [], [('$ web-search "q"', out)]) == []
+
+
+def test_cited_url_balanced_parentheses() -> None:
+    # A trailing ')' that balances an opening '(' inside the URL is part of the URL (kept);
+    # a lone ')' is prose punctuation around the link (stripped).
+    u = 'https://en.wikipedia.org/wiki/Foo_(bar)'
+    assert tools.cited_sources('see ' + u) == ([], [u])
+    assert tools.unretrieved_citations(
+        'see ' + u, [], [('$ view-web-page "' + u + '"', 'page')]) == []
+    assert tools.cited_sources('see (https://x.com) here') == \
+        ([], ['https://x.com'])
 
 
 def test_cited_sources_dot_directory_paths_are_one_token() -> None:

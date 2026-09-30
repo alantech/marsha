@@ -248,22 +248,13 @@ async def gh_pr_context(num: int, cwd: str | None = None) -> str:
     repo = await _repo_name(cwd)
     owner, _, name = repo.partition('/')
     if owner and name:
-        query = (
-            'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
-            'reviewThreads(first: 100) { nodes { comments(first: 20) { nodes {'
-            'isMinimized path line body author { login } } } } } } } }'
-            % (owner, name, num))
-        rc, out, err = await _gh(
-            'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
-        if rc == 0 and out.strip():
-            try:
-                data = json.loads(out)
-            except ValueError:
-                data = {}
-            nodes = (((data.get('data') or {}).get('repository')
-                      or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+        nodes = await _all_review_threads(
+            repo, num,
+            'comments(first: 20) { nodes { isMinimized path line body '
+            'author { login } } }', cwd)
+        if nodes:
             rows = []
-            for node in (nodes.get('nodes') or []):
+            for node in nodes:
                 comments = (node.get('comments') or {}).get('nodes') or []
                 for i, c in enumerate(comments):
                     if c.get('isMinimized'):
@@ -664,12 +655,20 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
         rc, out, err = await _gh(
             'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
         if rc != 0 or not out.strip():
+            # A first-page failure yields no threads (callers degrade as before). A
+            # LATER-page failure yields a PARTIAL list: the threads on the lost pages are
+            # invisible to this pass — their findings are not replied to or resolved — so
+            # the failure must not be silent.
+            log(f'review: PR #{pr_num} review-thread fetch failed'
+                + (f' after {len(nodes)} thread(s); later pages are invisible '
+                   f'to this pass' if nodes else '') + f': {err or out}')
             return nodes
         try:
             data = json.loads(out)
         except ValueError as e:
-            log(
-                f'review: could not parse review threads for PR #{pr_num}: {e}')
+            log(f'review: could not parse review threads for PR #{pr_num}'
+                + (f' after {len(nodes)} thread(s); later pages are invisible '
+                   f'to this pass' if nodes else '') + f': {e}')
             return nodes
         rt = (((data.get('data') or {}).get('repository')
                or {}).get('pullRequest') or {}).get('reviewThreads') or {}

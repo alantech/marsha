@@ -2373,6 +2373,34 @@ def test_fetch_review_threads_paginates() -> None:
     assert 'after: "CUR1"' in queries[1]
 
 
+def test_all_review_threads_partial_failure_keeps_first_pages() -> None:
+    # A failed LATER-page fetch returns the threads retrieved so far (not nothing): a transient
+    # failure must not lose the earlier pages, and it is logged, not silent.
+    page1 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1', 'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        if len(calls) == 1:
+            return (0, page1, '')
+        return (1, '', 'boom')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert [n.get('id') for n in nodes] == ['PRRT_1']
+    assert len(calls) == 2
+
+
 def test_resolve_thread_posts_mutation() -> None:
     sent = {}
 

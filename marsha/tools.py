@@ -2205,11 +2205,22 @@ def _path_matches(cited: str, retrieved: str) -> bool:
     return '/' not in cited and cited == retrieved.rsplit('/', 1)[-1]
 
 
+def _cited_url(u: str) -> str:
+    # Trailing punctuation is stripped from a cited/fetched URL, but a ')' that balances an
+    # opening '(' INSIDE the URL is part of the URL, not prose around the link.
+    while u and u[-1] in _CITE_PUNCT:
+        if u[-1] == ')' and u.count('(') >= u.count(')'):
+            break
+        u = u[:-1]
+    return u
+
+
 def retrieved_paths_and_urls(
         evidence: list[tuple[str, str]], sources: list[tuple[str, str]]
 ) -> tuple[set[str], set[str]]:
     # The doc/code paths and URLs actually read: paths from git show/cat-file and summarize /
-    # find-in-file, urls from a view-web-page / summarize target and from web-search result text.
+    # find-in-file, urls from a view-web-page / summarize target and from web-search RESULT
+    # text (the output's first line echoes the QUERY, which is not a retrieval).
     paths: set[str] = set()
     urls: set[str] = set()
     for cmd, _out in evidence:
@@ -2219,10 +2230,11 @@ def retrieved_paths_and_urls(
     for cmd, out in sources:
         t = _command_target(cmd)
         if t:
-            (urls if t.startswith('http') else paths).add(t)
+            (urls if t.startswith('http') else paths).add(_cited_url(t))
         if _command_tool(cmd) == 'web-search':
-            for u in _CITE_URL_RE.findall(out or ''):
-                urls.add(u.rstrip(_CITE_PUNCT))
+            body = '\n'.join((out or '').splitlines()[1:])
+            for u in _CITE_URL_RE.findall(body):
+                urls.add(_cited_url(u))
     return paths, urls
 
 
@@ -2233,13 +2245,13 @@ def cited_sources(text: str) -> tuple[list[str], list[str]]:
     text = text or ''
     urls: list[str] = []
     for u in _CITE_URL_RE.findall(text):
-        u = u.rstrip(_CITE_PUNCT)
+        u = _cited_url(u)
         if u not in urls:
             urls.append(u)
     masked = _CITE_URL_RE.sub(' ', text)
     paths: list[str] = []
     for tok in _CITE_PATH_RE.findall(masked):
-        tok = tok.rstrip(_CITE_PUNCT)
+        tok = _cited_url(tok)
         if _is_cited_doc_path(tok) and tok not in paths:
             paths.append(tok)
     for m in _CITE_DOC_BARE_RE.finditer(masked):
