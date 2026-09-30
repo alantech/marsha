@@ -762,10 +762,12 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
 # The label a posted finding leads with, e.g. "[A2]" in "**[A2] MAJOR**: ...". Only Marsha's
 # comments carry this; a prior thread is matched by it so a re-run can reply or resolve it.
 _POSTED_LABEL_RE = re.compile(r'^\*\*\[([A-Za-z]+\d+)\]')
-# A posted finding's full root body: "**[A2] MAJOR**: <description>" — the label and severity
-# are wrapped in bold, so a closing ** follows the severity.
+# A posted finding's root body leads with "**[A2] MAJOR**: <headline>"; an optional support
+# paragraph may follow after a blank line. We capture only the headline (the first line): the
+# label and severity are wrapped in bold, so a closing ** follows the severity, and the trailing
+# group must not cross a newline or a multi-line body (headline + support) would fail to match.
 _POSTED_FINDING_RE = re.compile(
-    r'^\*\*\[([A-Za-z]+\d+)\]\s*([A-Z]+)\*\*\s*:\s*(.*)$')
+    r'^\*\*\[([A-Za-z]+\d+)\]\s*([A-Z]+)\*\*\s*:\s*([^\n]*)')
 
 
 def _label_reviewer_number(label: str) -> int | None:

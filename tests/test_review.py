@@ -2541,6 +2541,42 @@ def test_fetch_review_threads_parses_labels() -> None:
     assert threads['B2']['is_resolved'] is True
 
 
+def test_fetch_review_threads_multiline_body_keeps_thread_and_replies() -> None:
+    # A posted finding whose root body carries a support paragraph (headline + blank line +
+    # support) must still match: the desc is the headline (first line) only, and — critically —
+    # the thread is NOT dropped from the prior conversations, so its replies (e.g. a user
+    # conceding the point) still reach the archivist. Before the desc group was [^\n]* instead of
+    # (.*)$, a multi-line body failed the regex and the whole thread (plus its replies) was lost,
+    # so a conceded prior thread could never be cleared.
+    body = ('**[G11] MAJOR**: a reviewer with only unsupported findings\n\n'
+            'The reviewer path marks a pass clean without validating the findings it saw.')
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_G11', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 11, 'path': 'foo.py', 'line': 7, 'body': body},
+                {'databaseId': 12, 'path': None, 'line': None,
+                 'body': 'Superseded: no longer relevant. Clearing this thread.'},
+            ]}},
+        ]}}}}})
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        assert a[:2] == ('api', 'graphql')
+        return (0, page, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        threads, complete = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+        convs = asyncio.run(review._prior_conversations('acme/widget', 123))
+
+    assert complete is True
+    assert threads['G11']['desc'] == 'a reviewer with only unsupported findings'
+    # The thread survives into the prior conversations with its reply attached, so the archivist
+    # can see the conceding reply and clear it.
+    assert [c['label'] for c in convs] == ['G11']
+    assert convs[0]['desc'] == 'a reviewer with only unsupported findings'
+    assert convs[0]['replies'] == ['Superseded: no longer relevant. Clearing this thread.']
+
+
 def test_fetch_review_threads_paginates() -> None:
     # Threads beyond the first page are fetched too: a PR with more than 100 threads must still
     # have every thread reachable for reply routing and resolution.
