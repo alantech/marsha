@@ -1164,6 +1164,33 @@ def test_unretrieved_citations_size_type_queries_are_not_reads() -> None:
         [('$ git cat-file -p HEAD:docs/NOTES.md', 'notes')], []) == []
 
 
+def test_unretrieved_citations_metadata_cat_file_forms() -> None:
+    # Only `git cat-file -p` prints content: the existence/size/type forms, short (-e/-s/-t) or
+    # long (--exists/--size/--type), and the stdin-driven --batch modes, do not read the cited
+    # file and must not satisfy its citation.
+    for cmd in ('$ git cat-file -e HEAD:docs/NOTES.md',
+                '$ git cat-file --exists HEAD:docs/NOTES.md',
+                '$ git cat-file -s HEAD:docs/NOTES.md',
+                '$ git cat-file --size HEAD:docs/NOTES.md',
+                '$ git cat-file -t HEAD:docs/NOTES.md',
+                '$ git cat-file --type HEAD:docs/NOTES.md',
+                '$ git cat-file --batch-check HEAD:docs/NOTES.md'):
+        assert tools.unretrieved_citations(
+            'see docs/NOTES.md', [(cmd, '0')], []) == ['docs/NOTES.md'], cmd
+
+
+def test_unretrieved_citations_json_configs() -> None:
+    # A JSON config (package.json, config.json) is a citable source like the other config
+    # formats: naming it in a finding requires having opened it.
+    assert tools.cited_sources('the build flag is in package.json') == \
+        (['package.json'], [])
+    assert tools.unretrieved_citations(
+        'the build flag is in package.json', [], []) == ['package.json']
+    assert tools.unretrieved_citations(
+        'the build flag is in package.json',
+        [('$ git show HEAD:package.json', '{}')], []) == []
+
+
 def test_cited_sources_masks_urls_ending_in_doc_extensions() -> None:
     # A URL ending in a doc extension (https://x/guide.md) is a URL citation only — it is not
     # also read as a local doc path, and fetching the URL satisfies the citation.

@@ -2099,7 +2099,7 @@ def _is_no_findings_response(text: Any) -> bool:
 # A "source" is a doc or a config the codebase's conventions live in (per the proof directive):
 # prose docs plus the config files a reviewer may cite for a convention.
 _CITE_DOC_EXT_RE = re.compile(
-    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml)$', re.I)
+    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json)$', re.I)
 _CITE_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
 _CITE_URL_RE = re.compile(r'https?://\S+')
 _CITE_PATH_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
@@ -2159,7 +2159,10 @@ def _command_target(cmd: str) -> str | None:
         if len(args) >= 2 and args[0] == 'show':
             return _git_object_path(args[-1])
         if len(args) >= 2 and args[0] == 'cat-file':
-            if '-s' in args or '-t' in args:
+            # Only -p prints a blob's content. -e/-s/-t and their long forms
+            # (--exists/--size/--type) report metadata, and the --batch modes
+            # read from stdin, so none of them reads the file a citation names.
+            if '-p' not in args:
                 return None
             return _git_object_path(args[-1])
         return None
