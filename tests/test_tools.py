@@ -1249,6 +1249,29 @@ def test_unretrieved_citations_dotfile_configs() -> None:
     assert tools.cited_sources('the docs use a .md file') == ([], [])
 
 
+def test_unretrieved_citations_extensionless_configs() -> None:
+    # An extensionless config/build file (Makefile, Dockerfile, ...) is a citable convention
+    # source in its exact file spelling; a prose "license" is not a citation.
+    assert tools.cited_sources('per the Makefile, run make format') == (['Makefile'], [])
+    assert tools.unretrieved_citations(
+        'per the Makefile, run make format', [], []) == ['Makefile']
+    assert tools.unretrieved_citations(
+        'per the Makefile, run make format',
+        [('$ git show HEAD:Makefile', '.PHONY: format')], []) == []
+    assert tools.cited_sources('the Dockerfile copies the repo') == (['Dockerfile'], [])
+    assert tools.cited_sources('a license is required') == ([], [])
+
+
+def test_cited_sources_dot_directory_paths_are_one_token() -> None:
+    # A doc under a dot-prefixed directory (.github/workflows/x.md) is ONE citation matching
+    # the retrieved path — not fragments that could never match and false-drop a grounded finding.
+    text = 'the workflow in .github/workflows/ci.md says so'
+    assert tools.cited_sources(text) == (['.github/workflows/ci.md'], [])
+    assert tools.unretrieved_citations(
+        text, [('$ git show HEAD:.github/workflows/ci.md', 'on: push')], []) == []
+    assert tools.unretrieved_citations(text, [], []) == ['.github/workflows/ci.md']
+
+
 def test_cited_sources_strips_angle_bracket_autolinks() -> None:
     # A CommonMark angle-bracket autolink (<https://x>) is a URL citation: the closing
     # bracket is not part of the URL and must not block the retrieval match.

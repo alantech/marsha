@@ -645,31 +645,51 @@ def _label_reviewer_number(label: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | None = None) -> list[dict[str, Any]]:
+    # Every review thread on the PR, paginated 100 per page: a PR whose threads exceed one page
+    # would otherwise silently lose every thread past the first 100 — for reply routing and
+    # thread resolution, a lost thread is a finding that can never be replied to or closed.
+    # `fields` is the per-thread node selection (id, isResolved, comments(first: N) { ... }).
+    owner, _, name = repo.partition('/')
+    if not owner or not name:
+        return []
+    nodes: list[dict[str, Any]] = []
+    after: str | None = None
+    while True:
+        cursor = f', after: "{after}"' if after else ''
+        query = (
+            'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
+            'reviewThreads(first: 100%s) { pageInfo { endCursor hasNextPage } '
+            'nodes { %s } } } } } }' % (owner, name, pr_num, cursor, fields))
+        rc, out, err = await _gh(
+            'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
+        if rc != 0 or not out.strip():
+            return nodes
+        try:
+            data = json.loads(out)
+        except ValueError as e:
+            log(
+                f'review: could not parse review threads for PR #{pr_num}: {e}')
+            return nodes
+        rt = (((data.get('data') or {}).get('repository')
+               or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+        nodes.extend(rt.get('nodes') or [])
+        info = rt.get('pageInfo') or {}
+        if not info.get('hasNextPage') or not info.get('endCursor'):
+            return nodes
+        after = info['endCursor']
+
+
 async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) -> dict[str, dict[str, Any]]:
     # Map a posted finding's [label] (e.g. "A2") -> its review thread, so a re-run can reply on
     # the thread the finding opened, or resolve it if the finding is no longer raised. Only
     # threads whose root comment leads with a [label] (i.e. ones Marsha posted) are matched;
     # human comments and pre-label comments are ignored. Returns
     # label -> {thread_id, root_id, is_resolved, path, line}.
-    owner, _, name = repo.partition('/')
-    if not owner or not name:
-        return {}
-    query = (
-        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
-        'reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) {'
-        'nodes { databaseId path line body } } } } } } }' % (owner, name, pr_num))
-    rc, out, err = await _gh(
-        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
-    if rc != 0 or not out.strip():
-        return {}
-    try:
-        data = json.loads(out)
-    except ValueError as e:
-        log(f'review: could not parse review threads for PR #{pr_num}: {e}')
-        return {}
-    pr = ((data.get('data') or {}).get('repository')
-          or {}).get('pullRequest') or {}
-    nodes = (pr.get('reviewThreads') or {}).get('nodes') or []
+    nodes = await _all_review_threads(
+        repo, pr_num,
+        'id isResolved comments(first: 1) { nodes { databaseId path line body } }',
+        cwd)
     threads: dict[str, dict[str, Any]] = {}
     for node in nodes:
         comments = (node.get('comments') or {}).get('nodes') or []
@@ -697,25 +717,11 @@ async def _prior_conversations(repo: str, pr_num: int, cwd: str | None = None) -
     # was resolved — so the consolidation pass can see a concern's whole history and drop a finding
     # that re-opens an already-settled conversation. Returns
     # [ {label, location, desc, replies, is_resolved} ] (resolved and unresolved alike).
-    owner, _, name = repo.partition('/')
-    if not owner or not name:
-        return []
-    query = (
-        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
-        'reviewThreads(first: 100) { nodes { isResolved comments(first: 8) {'
-        'nodes { path line body } } } } } } }' % (owner, name, pr_num))
-    rc, out, err = await _gh(
-        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
-    if rc != 0 or not out.strip():
-        return []
-    try:
-        data = json.loads(out)
-    except ValueError:
-        return []
-    nodes = (((data.get('data') or {}).get('repository')
-              or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+    nodes = await _all_review_threads(
+        repo, pr_num,
+        'isResolved comments(first: 8) { nodes { path line body } }', cwd)
     convs: list[dict[str, Any]] = []
-    for node in (nodes.get('nodes') or []):
+    for node in nodes:
         comments = (node.get('comments') or {}).get('nodes') or []
         if not comments:
             continue
@@ -742,26 +748,12 @@ async def _prior_findings_by_reviewer(pr_num: int, cwd: str | None = None) -> di
     # finding, whether to re-raise (reusing the exact label) or concede. Returns
     # reviewer_number -> [ {label, severity, location, desc, replies} ].
     repo = await _repo_name(cwd)
-    owner, _, name = repo.partition('/')
-    if not owner or not name:
-        return {}
-    query = (
-        'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
-        'reviewThreads(first: 100) { nodes { isResolved comments(first: 10) {'
-        'nodes { isMinimized path line body } } } } } } }' % (owner, name, pr_num))
-    rc, out, err = await _gh(
-        'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
-    if rc != 0 or not out.strip():
-        return {}
-    try:
-        data = json.loads(out)
-    except ValueError as e:
-        log(f'review: could not parse prior findings for PR #{pr_num}: {e}')
-        return {}
-    nodes = (((data.get('data') or {}).get('repository')
-              or {}).get('pullRequest') or {}).get('reviewThreads') or {}
+    nodes = await _all_review_threads(
+        repo, pr_num,
+        'isResolved comments(first: 10) { nodes { isMinimized path line body } }',
+        cwd)
     by_number: dict[int | None, list[dict[str, Any]]] = {}
-    for node in (nodes.get('nodes') or []):
+    for node in nodes:
         if node.get('isResolved'):
             continue
         comments = (node.get('comments') or {}).get('nodes') or []

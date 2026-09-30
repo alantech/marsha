@@ -2342,6 +2342,37 @@ def test_fetch_review_threads_parses_labels() -> None:
     assert threads['B2']['is_resolved'] is True
 
 
+def test_fetch_review_threads_paginates() -> None:
+    # Threads beyond the first page are fetched too: a PR with more than 100 threads must still
+    # have every thread reachable for reply routing and resolution.
+    page1 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1', 'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+    page2 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR2', 'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_2', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 2, 'path': 'b.py', 'line': 2,
+                 'body': '**[B2] MINOR**: two'}]}},
+        ]}}}}})
+    queries = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        queries.append(' '.join(a))
+        return (0, page1 if len(queries) == 1 else page2, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        threads = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+
+    assert set(threads) == {'A1', 'B2'}
+    assert len(queries) == 2
+    assert 'after: "CUR1"' in queries[1]
+
+
 def test_resolve_thread_posts_mutation() -> None:
     sent = {}
 

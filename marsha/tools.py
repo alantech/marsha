@@ -2100,15 +2100,19 @@ def _is_no_findings_response(text: Any) -> bool:
 # prose docs plus the config files a reviewer may cite for a convention.
 _CITE_DOC_EXT_RE = re.compile(
     r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json)$', re.I)
-_CITE_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
+# A bare config/build file name with no extension that a reviewer may cite as a convention
+# source, matched in its exact file spelling (a prose "license" is not a citation).
+_CITE_DOC_BARE_RE = re.compile(
+    r'\b(?:CHANGELOG|CHANGES|Makefile|Dockerfile|Containerfile|Rakefile|Procfile'
+    r'|Gemfile|Jenkinsfile|Vagrantfile|LICENSE)\b')
 _CITE_URL_RE = re.compile(r'https?://\S+')
-# A cited path is either a name.ext token (optionally with directories) or a dotfile
-# (.flake8, .env, .editorconfig, ...) — the repo's config dotfiles are citable sources.
-# The final component may carry digits (a .flake8 under a directory); a token that is
-# not a doc/config (.md file, 1.2.3) is filtered by _is_cited_doc_path, not here.
+# A cited path is a name.ext token — optionally under dot-prefixed directories, so
+# .github/workflows/x.md is one token, not fragments — or a dotfile (.flake8, .env, ...)
+# that is not itself a directory (a following '/' would make it one). A token that is not
+# a doc/config (a .md file, 1.2.3) is filtered by _is_cited_doc_path, not here.
 _CITE_PATH_RE = re.compile(
-    r'\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,8})?'
-    r'|\b[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,8}\b', re.I)
+    r'(?:\.[A-Za-z0-9_\-]+/)*[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,8}\b'
+    r'|\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,8})?(?!\s*/)', re.I)
 # Trailing sentence punctuation (and a CommonMark angle-bracket autolink's closing '>',
 # which the URL capture swallows) is not part of a cited URL or path.
 _CITE_PUNCT = '.,;:!?)]\'"`>'
