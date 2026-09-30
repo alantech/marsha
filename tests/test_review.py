@@ -1709,7 +1709,7 @@ def test_gh_pr_context_flattens_reviews() -> None:
     })
     repo_payload = json.dumps({'nameWithOwner': 'octo/repo'})
     threads_payload = json.dumps({'data': {'repository': {'pullRequest': {
-        'reviewThreads': {'nodes': [
+        'reviewThreads': {'pageInfo': {'hasNextPage': False}, 'nodes': [
             {'comments': {'nodes': [
                 {'isMinimized': False, 'path': 'x.py', 'line': 3,
                  'body': 'inline finding', 'author': {'login': 'b'}},
@@ -1749,7 +1749,7 @@ def test_gh_pr_context_skips_hidden_comments() -> None:
     })
     repo_payload = json.dumps({'nameWithOwner': 'octo/repo'})
     threads_payload = json.dumps({'data': {'repository': {'pullRequest': {
-        'reviewThreads': {'nodes': [
+        'reviewThreads': {'pageInfo': {'hasNextPage': False}, 'nodes': [
             {'comments': {'nodes': [
                 {'isMinimized': False, 'path': 'x.py', 'line': 3,
                  'body': 'visible inline', 'author': {'login': 'b'}},
@@ -2191,6 +2191,7 @@ def test_post_review_all_clear_resolves_conceded_threads() -> None:
     # An all-clear pass raises nothing, so every open thread an active reviewer opened is
     # conceded and resolved; threads of reviewers that did not run this pass are left alone.
     threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
         'nodes': [
             {'id': 'PRRT_B9', 'isResolved': False, 'comments': {'nodes': [
                 {'databaseId': 55, 'path': 'tools.py', 'line': 2101,
@@ -2239,10 +2240,11 @@ def test_post_review_replies_on_existing_thread() -> None:
          'location': 'baz.py:3', 'desc': 'fresh point'},
     ]
     threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
         'nodes': [
             {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
                 {'databaseId': 999, 'path': 'foo.py', 'line': 2,
-                 'body': '**[A1] MAJOR**: earlier finding'}]}},
+                  'body': '**[A1] MAJOR**: earlier finding'}]}},
         ]}}}}})
     review_payload: Any = None
     reply_payload: Any = None
@@ -2283,6 +2285,7 @@ def test_post_review_resolves_conceded_thread() -> None:
          'location': 'foo.py:2', 'desc': 'still stands'},
     ]
     threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
         'nodes': [
             {'id': 'PRRT_A1', 'isResolved': False, 'comments': {'nodes': [
                 {'databaseId': 11, 'path': 'foo.py', 'line': 2,
@@ -2365,10 +2368,11 @@ def test_fetch_review_threads_parses_labels() -> None:
     # Only threads whose root comment leads with a [label] are matched; the label is the key and
     # the thread id / root databaseId / resolved flag are carried through for reply + resolve.
     payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
         'nodes': [
             {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
                 {'databaseId': 999, 'path': 'foo.py', 'line': 2,
-                 'body': '**[A1] MAJOR**: one'}]}},
+                  'body': '**[A1] MAJOR**: one'}]}},
             {'id': 'PRRT_2', 'isResolved': True, 'comments': {'nodes': [
                 {'databaseId': 1000, 'path': 'foo.py', 'line': 3,
                  'body': '**[B2] MINOR**: two'}]}},
@@ -2543,6 +2547,33 @@ def test_all_review_threads_repeated_cursor_is_incomplete() -> None:
     assert len(calls) == 2  # page 1 (a new cursor), then the repeat is detected and we stop
 
 
+def test_all_review_threads_omitted_hasnextpage_is_incomplete() -> None:
+    # pageInfo is present but omits hasNextPage (a valid-JSON response that is not an explicit
+    # "no more pages"): the list cannot be proven complete, so it is marked incomplete rather than
+    # complete — the irreversible resolution pass must not act on a possibly-truncated list.
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1'},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return (0, page, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes, complete = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert [n.get('id') for n in nodes] == ['PRRT_1']
+    assert complete is False
+    assert len(calls) == 1  # an omitted flag is not a cursor to advance with
+
+
 def test_review_threads_is_fetched_once_and_shared() -> None:
     # All four consumers of prior threads in one review (PR context, the posted-thread map, prior
     # conversations, per-reviewer priors) share a single paginated fetch instead of each walking
@@ -2669,6 +2700,7 @@ def test_prior_findings_by_reviewer_groups_by_number() -> None:
     # Threads are grouped by the reviewer number in the label; resolved threads and unlabeled
     # (human) comments are skipped, and replies are attached to their finding.
     payload = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
         'nodes': [
             {'id': 'T1', 'isResolved': False, 'comments': {'nodes': [
                 {'isMinimized': False, 'path': 'a.py', 'line': 3,

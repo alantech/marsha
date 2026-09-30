@@ -639,11 +639,14 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
     # Every review thread on the PR, paginated 100 per page: a PR whose threads exceed one page
     # would otherwise silently lose every thread past the first 100 — for reply routing and
     # thread resolution, a lost thread is a finding that can never be replied to or closed.
-    # Returns (nodes, complete): complete is False whenever pagination stops early for ANY reason
-    # — a fetch/parse failure (after one retry), or pageInfo that claims "more" without a valid
-    # advancing cursor (a missing endCursor, or a cursor that repeats, which would otherwise loop
-    # forever). Callers never mistake a partial list for the full set — in particular, the
-    # irreversible actions (resolving a thread) wait for a complete list.
+    # Returns (nodes, complete): complete is True ONLY when the API explicitly reports the last
+    # page (hasNextPage is False). It is False whenever pagination stops early for ANY other
+    # reason — a fetch/parse failure (after one retry), a pageInfo that omits the hasNextPage
+    # flag (a possibly-truncated response that cannot prove it is complete), or pageInfo that
+    # claims "more" without a valid advancing cursor (a missing endCursor, or a cursor that
+    # repeats, which would otherwise loop forever). Callers never mistake a partial list for the
+    # full set — in particular, the irreversible actions (resolving a thread) wait for a complete
+    # list.
     # `fields` is the per-thread node selection (id, isResolved, comments(first: N) { ... }).
     owner, _, name = repo.partition('/')
     if not owner or not name:
@@ -680,15 +683,26 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
                or {}).get('pullRequest') or {}).get('reviewThreads') or {}
         nodes.extend(rt.get('nodes') or [])
         info = rt.get('pageInfo') or {}
-        if not info.get('hasNextPage'):
+        has_next = info.get('hasNextPage')
+        if has_next is False:
+            # The API explicitly reports no further page: this is the last one, so the list is
+            # complete. (GitHub always sends the flag; a missing one is handled below, not here.)
             return nodes, True
+        if not has_next:
+            # pageInfo is present but hasNextPage is missing (not an explicit False): a valid-JSON
+            # response that omits the flag cannot prove the list is complete, so do not treat it
+            # as the full set — the irreversible resolution pass waits for a definitive "no more
+            # pages" rather than a guess about a possibly-truncated response.
+            log(f'review: PR #{pr_num} review-thread pageInfo omitted hasNextPage '
+                f'after {len(nodes)} thread(s); the list is treated as incomplete')
+            return nodes, False
         end_cursor = info.get('endCursor')
         if not end_cursor or end_cursor in seen:
-            # pageInfo says "more pages" but offers no cursor that advances past what we already
-            # fetched: a missing endCursor, or one that repeats the previous page's. Treating this
-            # as the complete set would mistake a partial list for the full one (and the
-            # resolution pass acts on it irreversibly); keeping on with a repeated cursor would
-            # loop forever. Stop, and mark the list incomplete so irreversible callers withhold.
+            # hasNextPage is true but no cursor advances past what we already fetched: a missing
+            # endCursor, or one that repeats the previous page's. Treating this as the complete
+            # set would mistake a partial list for the full one (and the resolution pass acts on
+            # it irreversibly); keeping on with a repeated cursor would loop forever. Stop, and
+            # mark the list incomplete so irreversible callers withhold.
             log(f'review: PR #{pr_num} review-thread pagination claimed more pages '
                 f'without a valid advancing cursor after {len(nodes)} thread(s); '
                 f'the list is treated as incomplete')
