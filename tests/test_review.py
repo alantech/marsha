@@ -503,90 +503,6 @@ def test_run_personas_attaches_sources_to_findings() -> None:
     assert base.sources == []
 
 
-def test_run_personas_completed_excludes_failed_reviewers() -> None:
-    # A reviewer that throws is NOT recorded in `completed` (it did not clear the pass), so its
-    # prior threads are never resolved on a failure; a reviewer that runs — even to "NO FINDINGS"
-    # — is recorded. This is what lets post_review resolve only the threads of reviewers that
-    # genuinely ran.
-    base = tools.ToolContext(phase='review', workdir='.', notes=[])
-    completed: set[int] = set()
-
-    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
-                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
-        if 'boom-reviewer' in (mapper.system or ''):
-            raise RuntimeError('boom')
-        return 'NO FINDINGS'
-
-    def fake_get_mapper(system: Any, *a: Any, **k: Any) -> Any:
-        return types.SimpleNamespace(n_results=1, system=system)
-
-    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
-         patch.object(personas, 'get_mapper', new=fake_get_mapper):
-        asyncio.run(personas.run_personas(
-            [('Sage', 'normal-reviewer', 1), ('Eli', 'boom-reviewer', 2)],
-            'msg', 'm', 'review', tool_ctx=base, completed=completed))
-
-    assert completed == {1}  # Sage ran; Eli threw and is not "cleared"
-
-
-def test_run_personas_budget_exhausted_not_completed() -> None:
-    # A reviewer that exhausts its tool budget (its last response is still a `$` command, not a
-    # findings report) was cut off mid-investigation: it is not marked completed (so its prior
-    # threads are never resolved on its account) and it reports no finding.
-    base = tools.ToolContext(phase='review', workdir='.', notes=[])
-    completed: set[int] = set()
-
-    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
-                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
-        return 'Investigating the call graph.\n$ git show HEAD:calc.py'  # still a command
-
-    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
-         patch.object(personas, 'get_mapper',
-                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
-        fs = asyncio.run(personas.run_personas(
-            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
-            completed=completed))
-
-    assert fs == []
-    assert completed == set()  # cut off mid-investigation, not "cleared"
-
-
-def test_run_personas_malformed_output_not_completed() -> None:
-    # A reviewer response that is neither a command, the "NO FINDINGS" all-clear, nor a findings
-    # report is malformed output: it is not marked completed (its prior threads are never resolved
-    # on its account) and it reports no finding. A clean "NO FINDINGS" IS a clean completion.
-    base = tools.ToolContext(phase='review', workdir='.', notes=[])
-    completed: set[int] = set()
-
-    async def malformed_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
-                              max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
-        return 'I think this is roughly fine overall.'  # not a command, no findings, not the phrase
-
-    with patch.object(tools, 'run_with_tools', new=malformed_tools), \
-         patch.object(personas, 'get_mapper',
-                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
-        fs = asyncio.run(personas.run_personas(
-            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
-            completed=completed))
-    assert fs == []
-    assert completed == set()
-
-    completed2: set[int] = set()
-
-    async def all_clear_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
-                              max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
-        return 'NO FINDINGS'
-
-    with patch.object(tools, 'run_with_tools', new=all_clear_tools), \
-         patch.object(personas, 'get_mapper',
-                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
-        fs2 = asyncio.run(personas.run_personas(
-            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
-            completed=completed2))
-    assert fs2 == []
-    assert completed2 == {1}  # an explicit all-clear is a clean completion
-
-
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
@@ -1152,7 +1068,7 @@ def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
 
     with patch.object(review, 'run_personas', new=fake_personas), \
          patch.object(review, 'conventions_gate', new=fake_gate):
-        out, _completed = asyncio.run(review._review_pass(
+        out = asyncio.run(review._review_pass(
             [('Sage', 'body', 1)], 'msg', 'm', 'main', 'main', 1, '',
             tools.ToolContext(phase='review', workdir=repo, notes=[]),
             {}, {}, None, 0, False))
@@ -1242,6 +1158,73 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
          patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
         out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
     assert out == ''
+
+
+def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
+    # The archivist's per-thread verdicts are parsed: a CLEARED line clears that thread, while a
+    # STILL-RAISED or UNCLEAR line (and any label absent from the output) leaves its thread open.
+    class VerdictMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return ('[B9] - CLEARED (tools.py:2101)\n'
+                    '[C5] - STILL-RAISED\n'
+                    '[D7] - UNCLEAR')
+
+    candidates = [
+        {'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
+         'desc': 'fixed gap', 'replies': []},
+        {'label': 'C5', 'thread_id': 'PRRT_C5', 'location': 'tools.py:2162',
+         'desc': 'gap too', 'replies': []},
+        {'label': 'D7', 'thread_id': 'PRRT_D7', 'location': 'baz.py:9',
+         'desc': 'other', 'replies': []},
+    ]
+
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: VerdictMapper()):
+        verdicts = asyncio.run(review._archivist_clearance(
+            candidates, [], 'm', 'main', 'main', repo))
+    assert verdicts['PRRT_B9'] == 'cleared'
+    assert verdicts['PRRT_C5'] == 'still-raised'
+    assert verdicts['PRRT_D7'] == 'unclear'
+
+
+def test_archivist_clearance_fails_closed(repo: Any) -> None:
+    # Resolution is irreversible, so a failed archivist clears nothing: every thread stays open.
+    class BoomMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            raise RuntimeError('boom')
+
+    candidates = [{'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
+                   'desc': 'fixed gap', 'replies': []}]
+
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: BoomMapper()):
+        verdicts = asyncio.run(review._archivist_clearance(
+            candidates, [], 'm', 'main', 'main', repo))
+    assert verdicts == {}  # failed -> nothing cleared
+
+
+def test_archivist_clearance_no_candidates(repo: Any) -> None:
+    # With no open threads to judge there is no archivist call and no verdict.
+    assert asyncio.run(
+        review._archivist_clearance([], [], 'm', 'main', 'main', repo)) == {}
 
 
 # --- the multi-round review loop ---------------------------------------------
@@ -1406,30 +1389,26 @@ def test_per_persona_critique_keeps_unrefuted_reviewer(repo: Any) -> None:
     assert out == findings
 
 
-def test_per_persona_critique_failed_revision_not_completed(repo: Any) -> None:
-    # A reviewer the critic refutes, whose revision fails to complete (run_personas returns no
-    # findings and records no completion), is removed from `completed`: a failed revision must
-    # not resolve its prior findings as conceded.
+def test_per_persona_critique_failed_revision_drops_finding(repo: Any) -> None:
+    # A reviewer the critic refutes, whose revision yields no findings, has the refuted finding
+    # dropped: the revision did not re-establish it, so it does not survive the critique round.
     findings: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                                 'location': 'a.txt:2', 'desc': 'phantomThing is undefined',
                                 'support': '', 'evidence': []}]
-    completed: set[int] = {1}  # Sage completed the initial round
 
     async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, **k: Any) -> Any:
         return '[Sage-A1] - phantomThing is defined at a.txt:3'
 
     async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
-        assert 'completed' in k  # the revision reports completion through the shared set
-        return []  # fails to complete: no findings, no completion recorded
+        return []  # the revision yields no findings
 
     ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
     with patch.object(review, 'critic_gate', new=fake_critic), \
          patch.object(review, 'run_personas', new=fake_panel):
         out = asyncio.run(review._per_persona_critique(
             [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
-            ctx, {}, None, None, False, completed=completed))
+            ctx, {}, None, None, False))
     assert out == []
-    assert completed == set()  # the failed revision removes Sage from "cleared"
 
 
 def test_corroborated_keeps_only_recurring_concerns() -> None:
@@ -2298,8 +2277,9 @@ def test_post_review_all_clear_posts_note() -> None:
 
 
 def test_post_review_all_clear_resolves_conceded_threads() -> None:
-    # An all-clear pass raises nothing, so every open thread an active reviewer opened is
-    # conceded and resolved; threads of reviewers that did not run this pass are left alone.
+    # An all-clear pass raises nothing, so every open thread an active reviewer opened is handed
+    # to the archivist, and the archivist's CLEARED verdicts are resolved. A thread owned by a
+    # reviewer not re-run this pass is never even a candidate, so it is left alone.
     threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
         'pageInfo': {'hasNextPage': False},
         'nodes': [
@@ -2314,6 +2294,7 @@ def test_post_review_all_clear_resolves_conceded_threads() -> None:
                  'body': '**[D7] MINOR**: reviewer not re-run'}]}},
         ]}}}}})
     resolved = []
+    seen_candidates: list[str] = []
 
     async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
@@ -2329,17 +2310,23 @@ def test_post_review_all_clear_resolves_conceded_threads() -> None:
             return (0, '{}', '')
         return (0, '{}', '')
 
-    with patch.object(review, '_gh', new=fake_gh):
+    async def fake_archivist(candidates: Any, findings: Any, *a: Any, **k: Any) -> Any:
+        nonlocal seen_candidates
+        seen_candidates = [c['label'] for c in candidates]
+        return {c['thread_id']: 'cleared' for c in candidates}
+
+    with patch.object(review, '_gh', new=fake_gh), \
+         patch.object(review, '_archivist_clearance', new=fake_archivist):
         # Reviewers #9 and #5 ran this pass and raised nothing; #7 did not.
         asyncio.run(review.post_review(123, [], '', active_numbers=[9, 5]))
 
+    assert seen_candidates == ['B9', 'C5']  # D7 (#7, not re-run) is not a candidate
     assert resolved == ['PRRT_B9', 'PRRT_C5']
 
 
-def test_post_review_all_clear_protects_gate_dropped_labels() -> None:
-    # An all-clear pass must not resolve a thread whose finding was RAISED this pass but dropped
-    # by the evidence gate: the reviewer did not concede it (the gate rejected the re-raise), so
-    # the thread stays open. A thread for a label the reviewer did NOT raise is still resolved.
+def test_post_review_all_clear_archivist_unclear_stays_open() -> None:
+    # An all-clear pass hands every open active thread to the archivist: a thread the archivist
+    # verifies CLEARED is resolved, but one it marks UNCLEAR (it cannot verify the fix) stays open.
     threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
         'pageInfo': {'hasNextPage': False},
         'nodes': [
@@ -2364,13 +2351,15 @@ def test_post_review_all_clear_protects_gate_dropped_labels() -> None:
             return (0, threads, '')
         return (0, '{}', '')
 
-    with patch.object(review, '_gh', new=fake_gh):
-        # Reviewers #9 and #5 ran and raised nothing that survived; C5 (#5) was raised but
-        # dropped by the gate, so it is protected. B9 (#9) was not raised, so it is conceded.
-        asyncio.run(review.post_review(
-            123, [], '', active_numbers=[9, 5], raised_labels={'C5'}))
+    async def fake_archivist(candidates: Any, findings: Any, *a: Any, **k: Any) -> Any:
+        by_label = {c['label']: c['thread_id'] for c in candidates}
+        return {by_label['B9']: 'cleared', by_label['C5']: 'unclear'}
 
-    assert resolved == ['PRRT_B9']  # C5 protected (gate-dropped), B9 conceded
+    with patch.object(review, '_gh', new=fake_gh), \
+         patch.object(review, '_archivist_clearance', new=fake_archivist):
+        asyncio.run(review.post_review(123, [], '', active_numbers=[9, 5]))
+
+    assert resolved == ['PRRT_B9']  # C5 unclear -> left open, B9 verified fixed
 
 
 def test_post_review_replies_on_existing_thread() -> None:
@@ -2425,8 +2414,9 @@ def test_post_review_replies_on_existing_thread() -> None:
 
 
 def test_post_review_resolves_conceded_thread() -> None:
-    # A prior thread whose label the reviewer no longer raises (and whose reviewer ran this pass)
-    # is closed by resolving its thread; threads for reviewers not re-run are left alone.
+    # A prior thread the panel no longer raises (and whose reviewer ran this pass) is handed to
+    # the archivist, whose CLEARED verdict resolves it. A thread the panel re-raises, and threads
+    # for reviewers not re-run (or with no Marsha label), are not candidates at all.
     findings: list[Finding] = [
         {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
          'location': 'foo.py:2', 'desc': 'still stands'},
@@ -2448,6 +2438,7 @@ def test_post_review_resolves_conceded_thread() -> None:
                  'body': 'a human comment with no label'}]}},
         ]}}}}})
     resolved = []
+    seen_candidates: list[str] = []
 
     async def fake_gh(*a: Any, **k: Any) -> Any:
         if a and a[0] == 'repo':
@@ -2463,12 +2454,19 @@ def test_post_review_resolves_conceded_thread() -> None:
             return (0, '{}', '')
         return (0, '{}', '')
 
-    with patch.object(review, '_gh', new=fake_gh):
-        # Reviewer #1 (Sage) and #2 ran this pass; #3 did not. A1 was re-raised (kept), so only
-        # C2 (reviewer #2, conceded) is resolved — D3 (reviewer #3) and the human thread stay.
+    async def fake_archivist(candidates: Any, findings: Any, *a: Any, **k: Any) -> Any:
+        nonlocal seen_candidates
+        seen_candidates = [c['label'] for c in candidates]
+        return {c['thread_id']: 'cleared' for c in candidates}
+
+    with patch.object(review, '_gh', new=fake_gh), \
+         patch.object(review, '_archivist_clearance', new=fake_archivist):
+        # Reviewer #1 (Sage) and #2 ran this pass; #3 did not. A1 was re-raised, so only C2
+        # (reviewer #2, no longer raised) is a candidate — D3 (#3) and the human thread are not.
         asyncio.run(
             review.post_review(123, findings, '', active_numbers=[1, 2]))
 
+    assert seen_candidates == ['C2']
     assert resolved == ['PRRT_C2']
 
 

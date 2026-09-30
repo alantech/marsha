@@ -559,6 +559,25 @@ Use each finding's exact [Name-Label]. Do not restate a reviewer's name, do not 
 findings, do not restate agreement, and write no prose outside those lines.
 '''
 
+# The archivist's output contract. The persona (Ada) carries the role, the method, and the
+# conservative standard (clear only on git-verified ground); this fixes only the machine-readable
+# form of her verdicts. She reports one verdict per open thread, nothing else.
+_ARCHIVIST_CONTRACT = '''
+
+Your output is consumed mechanically, so its form is fixed; here you only report the work you have
+already done.
+
+Reply with exactly one line per open thread you were given, and nothing else, each in exactly this
+form:
+[Label] - CLEARED
+[Label] - STILL-RAISED
+[Label] - UNCLEAR
+
+Use each thread's exact [Label]. Give every thread exactly one of the three verdicts, in that
+order, and no other words. If a thread is CLEARED, prefer the line "[Label] - CLEARED (file:line)"
+with the one file:line of the code you read that proves the concern is gone.
+'''
+
 
 async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
                       model: str | None, base_name: str, base_ref: str, debug: bool = False,
@@ -645,6 +664,97 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
     if not text or text.upper().startswith('NO OBJECTIONS'):
         return ''
     return text
+
+
+# One archivist verdict line: "[A2] - CLEARED (src/x.py:10)" — the label, a dash, then the
+# verdict word (CLEARED, STILL-RAISED, or UNCLEAR), optionally followed by the file:line
+# evidence in parentheses.
+_ARCHIVIST_VERDICT_RE = re.compile(
+    r'^\s*\[([A-Za-z]+\d+)\]\s*-\s*([A-Z]+(?:-[A-Z]+)*)')
+
+
+async def _archivist_clearance(candidates: list[dict[str, Any]],
+                               findings: list[Finding],
+                               model: str | None, base_name: str, base_ref: str,
+                               cwd: str | None, debug: bool = False,
+                               reasoning_effort: str | None = None,
+                               seed: int | None = None) -> dict[str, str]:
+    # The archivist (Ada): for each prior OPEN thread the panel no longer raises by label, judge
+    # CLEARED (the code no longer has the issue, verified with the git tool, or a reply concedes
+    # it), STILL-RAISED (a current finding restates the concern), or UNCLEAR. Resolution of a
+    # thread is irreversible, so the call is conservative: a thread is CLEARED only on a
+    # git-verified verdict; anything it cannot verify — including a call that fails — is left
+    # open. Returns {thread_id: verdict} with verdict in {'cleared', 'still-raised', 'unclear'};
+    # a thread missing from the map, or a failed archivist, is simply not cleared.
+    if not candidates:
+        return {}
+    arch_ctx = tools.ToolContext(
+        phase='review', workdir=cwd, notes=[], require_evidence=False)
+    _name, body = load_persona(os.path.join(
+        personas_dir(), '_review-archivist.md'))
+    system = body + _ARCHIVIST_CONTRACT
+    system += tools.tool_instructions(arch_ctx)
+    # The open threads, each with its location, the concern it raised, and the replies on it
+    # (where a user or the reviewer would plainly concede it).
+    thread_lines: list[str] = []
+    for c in candidates:
+        line = f'- [{c["label"]}] {c["location"]} - {c["desc"]}'.strip()
+        replies = [r for r in (c.get('replies') or []) if (r or '').strip()]
+        if replies:
+            line += '\n  replies:'
+            line += '\n'.join(f'    {r.strip()}' for r in replies)
+        thread_lines.append(line)
+    # The findings the panel raised just now, so the archivist can tell a STILL-RAISED thread
+    # (the concern re-opened under a fresh label or line) from one that is genuinely gone.
+    finding_lines: list[str] = []
+    for f in findings or []:
+        location = f' {f["location"]}' if f['location'] else ''
+        line = f'- [{f["label"]}] {f["severity"]}{location} - {f["desc"]}'
+        if f.get('support'):
+            line += f'\n  support: {f["support"]}'
+        finding_lines.append(line)
+    findings_block = '\n'.join(finding_lines)
+    findings_section = (
+        '\n\n# Findings the panel raised just now\n\n' + (
+            findings_block if findings_block
+            else '(the panel raised no findings this pass)'))
+    user = (
+        f'Judge the open review threads below against the current code '
+        f'(default branch `{base_name}`, diff base ref `{base_ref}`). '
+        f'For each, read the code it points at with the git tool and decide '
+        f'CLEARED, STILL-RAISED, or UNCLEAR, one verdict per thread.\n\n'
+        f'# Open threads to judge\n\n' + '\n\n'.join(thread_lines)
+        + findings_section)
+    mapper = get_mapper(system, n_results=1, stats_stage='review',
+                        model=model, label='review:archivist',
+                        reasoning_effort=reasoning_effort, seed=seed)
+    try:
+        text = await tools.run_with_tools(
+            mapper, user, arch_ctx, debug=debug,
+            max_rounds=REVIEW_MAX_TOOL_ROUNDS)
+    except Exception as e:
+        # A failed archivist must fail closed: not one thread is cleared, so a live finding is
+        # never resolved over an error. log() is a no-op unless --trace, so surface it at debug.
+        if debug:
+            print(
+                f'[Review] archivist failed; no threads resolved this pass: {e}')
+        log(f'review: archivist failed; withholding thread resolution: {e}')
+        return {}
+    by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
+    verdicts: dict[str, str] = {
+        c['thread_id']: 'unclear' for c in candidates}
+    for line in str(text or '').splitlines():
+        m = _ARCHIVIST_VERDICT_RE.match(line)
+        if not m:
+            continue
+        label, word = m.group(1).upper(), m.group(2).upper()
+        thread_id = by_label.get(label)
+        if thread_id is None:
+            continue
+        verdicts[thread_id] = ('cleared' if word == 'CLEARED'
+                               else 'still-raised' if word == 'STILL-RAISED'
+                               else 'unclear')
+    return verdicts
 
 
 # The label a posted finding leads with, e.g. "[A2]" in "**[A2] MAJOR**: ...". Only Marsha's
@@ -1565,36 +1675,80 @@ def _is_review_anchoring_rejection(out: str, err: str) -> bool:
         for e in errors)
 
 
-async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None, raised_labels: set[str] | None = None) -> None:
+async def _archivist_resolution(
+        threads: dict[str, dict[str, Any]], complete: bool,
+        active_numbers: list[int] | None, findings: list[Finding],
+        repo: str, pr_num: int, cwd: str | None, model: str | None,
+        base_name: str, base_ref: str, debug: bool,
+        reasoning_effort: str | None = None) -> int:
+    # Concede a prior finding only on the archivist's git-grounded verdict. Resolution is
+    # irreversible, so it is withheld entirely when the thread list is incomplete, and a thread
+    # is resolved only when the archivist verified with the git tool that the code no longer has
+    # the concern (or a reply concedes it). A thread the panel still raises, or that the
+    # archivist could not verify — including a failed archivist — stays open. Returns the
+    # number of threads resolved.
+    active = set(active_numbers or [])
+    if not complete:
+        log(f'review: PR #{pr_num}: withholding thread resolution, the '
+            f'thread list is incomplete (a page fetch failed)')
+        return 0
+    # Prior OPEN threads the panel no longer raises by label: the archivist's candidates. A
+    # thread the panel re-raised this pass (its label is in `findings`) is being replied to, not
+    # cleared, so it is not a candidate; a thread owned by a reviewer not re-run this pass is
+    # left to that reviewer's own next run.
+    raised = {f['label'] for f in (findings or [])}
+    candidates: list[dict[str, Any]] = []
+    for label, thread in threads.items():
+        if thread['is_resolved'] or label in raised:
+            continue
+        if _label_reviewer_number(label) not in active:
+            continue
+        path, line = thread['path'], thread['line']
+        location = f'{path}:{line}' if path and line is not None else (
+            path or '')
+        candidates.append({
+            'label': label, 'thread_id': thread['thread_id'],
+            'location': location, 'desc': thread['desc'], 'replies': []})
+    if not candidates:
+        return 0
+    # The replies on each candidate (where a user or the reviewer would plainly concede the
+    # concern), so the archivist can clear on an explicit concession as well as on the code.
+    convs = await _prior_conversations(repo, pr_num, cwd)
+    replies_by_label = {c['label']: c['replies'] for c in convs}
+    for cand in candidates:
+        cand['replies'] = replies_by_label.get(cand['label'], [])
+    verdicts = await _archivist_clearance(
+        candidates, findings or [], model, base_name, base_ref, cwd,
+        debug=debug, reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
+    closed = 0
+    for cand in candidates:
+        if verdicts.get(cand['thread_id']) == 'cleared':
+            if await _resolve_thread(cand['thread_id'], cwd):
+                closed += 1
+    return closed
+
+
+async def post_review(pr_num: int, findings: list[Finding], diff_text: str,
+                      cwd: str | None = None,
+                      active_numbers: list[int] | None = None,
+                      model: str | None = None, base_name: str = '',
+                      base_ref: str = '', debug: bool = False,
+                      reasoning_effort: str | None = None) -> None:
     repo = await _repo_name(cwd)
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
     if not findings:
-        # An all-clear --post-review still posts a short note to the PR. Every active reviewer
-        # ran this pass and raised nothing, so every open thread one of them opened is conceded
-        # like on any other pass and resolved — without this, a finding fixed since the last
-        # pass would sit open on the PR until a pass with findings happens to run again.
-        # `active` holds only reviewers that actually ran (a crashed reviewer is not "clear").
-        # A label in `raised_labels` was raised this pass and then dropped by the evidence gate:
-        # the reviewer did not concede it (the gate merely rejected the re-raise), so its thread
-        # is protected from resolution even though it did not survive to `findings`.
-        # Resolution is an irreversible act, so it is withheld when the thread list is
-        # incomplete (a failed page): the threads simply stay open until a complete fetch.
+        # An all-clear --post-review still posts a short note to the PR. The panel re-reviewed
+        # and raised nothing, so every open thread an active reviewer opened is a clearance
+        # candidate: the archivist judges each against the current code and resolves only the
+        # ones it verifies are fixed — without this, a finding fixed since the last pass would
+        # sit open until a pass with findings happens to run again. `active_numbers` holds only
+        # this panel's reviewers, so a changed panel cannot close threads for reviewers it did
+        # not re-run.
         threads, complete = await _fetch_review_threads(repo, pr_num, cwd)
-        active = set(active_numbers or [])
-        protected = set(raised_labels or [])
-        closed = 0
-        if complete:
-            for label, thread in threads.items():
-                if thread['is_resolved'] or label in protected:
-                    continue
-                if _label_reviewer_number(label) not in active:
-                    continue
-                if await _resolve_thread(thread['thread_id'], cwd):
-                    closed += 1
-        else:
-            log(f'review: PR #{pr_num} all-clear: skipping thread resolution, the '
-                f'thread list is incomplete (a page fetch failed)')
+        closed = await _archivist_resolution(
+            threads, complete, active_numbers, [], repo, pr_num, cwd, model,
+            base_name, base_ref, debug, reasoning_effort)
         await _post_all_clear(repo, pr_num, cwd)
         summary = f'All clear: posted a no-issues note to PR #{pr_num}.'
         if closed:
@@ -1686,28 +1840,13 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
         if rc != 0:
             raise Exception(
                 f'Failed to reply to PR #{pr_num} thread {cid}: {err or out}')
-    # Concede: a prior finding the reviewer no longer raises is closed by resolving its thread.
-    # Only threads whose reviewer ran this pass are touched, so a changed panel cannot close
-    # threads for reviewers that were not re-run. A label in `raised_labels` was raised this pass
-    # but dropped by the evidence gate (not in `findings`): the reviewer did not concede it, so its
-    # thread is protected too. Resolving is irreversible (GitHub offers no un-resolve), so the pass
-    # is withheld entirely when the thread list is incomplete: a thread on a lost page cannot be
-    # judged conceded, and this round's resolutions simply wait for a complete fetch.
-    active = set(active_numbers or [])
-    protected = set(raised_labels or [])
-    raised = {f['label'] for f in findings}
-    closed = 0
-    if complete:
-        for label, thread in threads.items():
-            if thread['is_resolved'] or label in raised or label in protected:
-                continue
-            if _label_reviewer_number(label) not in active:
-                continue
-            if await _resolve_thread(thread['thread_id'], cwd):
-                closed += 1
-    else:
-        log(f'review: PR #{pr_num}: skipping thread resolution, the thread list '
-            f'is incomplete (a page fetch failed)')
+    # Concede: a prior finding the panel no longer raises is closed only on the archivist's
+    # git-grounded verdict (see _archivist_resolution) — resolved when the code verifiably no
+    # longer has the concern, withheld when the thread list is incomplete, and left open when the
+    # panel still raises it or the archivist cannot verify it is gone.
+    closed = await _archivist_resolution(
+        threads, complete, active_numbers, findings, repo, pr_num, cwd, model,
+        base_name, base_ref, debug, reasoning_effort)
     summary = (
         f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
         f'{len(replies)} replies, {len(body_findings)} in the review body, '
@@ -1726,8 +1865,7 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
                                 guidance: str, tool_ctx: tools.ToolContext,
                                 prior_labels_by_number: dict[int, set[str]],
                                 reasoning_effort: str | None, seed: int | None,
-                                debug: bool,
-                                completed: set[int] | None = None) -> list[Finding]:
+                                debug: bool) -> list[Finding]:
     # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
     # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
     # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
@@ -1758,18 +1896,11 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
         # A fresh sources ledger too (read_cache is shared, as in run_personas).
         rev_ctx = dataclasses.replace(
             tool_ctx, notes=list(tool_ctx.notes), evidence=[], sources=[])
-        revision_completed: set[int] = set()
         revised = await run_personas(
             [spec], rev_message, model, 'review', debug=debug, loop='review',
             guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=None, prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed,
-            completed=revision_completed)
-        # The initial round marked this reviewer completed, but if its REVISION failed (threw,
-        # was cut off at the budget, or emitted malformed output) it did not cleanly finish the
-        # pass: remove it so a failed revision never resolves its prior findings as conceded.
-        if completed is not None and spec[2] not in revision_completed:
-            completed.discard(spec[2])
+            reasoning_effort=reasoning_effort, seed=seed)
         # A finding the reviewer verified in round 0 but merely re-states in the revision would
         # otherwise sit on an empty revision-round ledger; merge the code it already read so the
         # evidence gate still grounds it.
@@ -1789,40 +1920,30 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
                        prior_block_by_number: dict[int, str],
                        prior_labels_by_number: dict[int, set[str]],
                        reasoning_effort: str | None, seed: int,
-                       debug: bool) -> tuple[list[Finding], set[int]]:
+                       debug: bool) -> list[Finding]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
-    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns
-    # (same-location-collapsed findings, completed) — the findings (before semantic
-    # consolidation, ready for consensus voting or a single-pass consolidation) and the set of
-    # reviewer numbers that actually RAN this pass (did not throw): a reviewer that failed is not
-    # "cleared", so its prior threads must not be resolved on its account.
+    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
+    # same-location-collapsed findings (before semantic consolidation) — ready for consensus
+    # voting across passes, or a single-pass consolidation.
     prior_findings: list[Finding] = []
     prior_preamble: str = ''
     actionable: list[Finding] = []
     evidence_by_number: dict[int | None, list[tuple[str, str]]] = {}
     sources_by_number: dict[int | None, list[tuple[str, str]]] = {}
-    completed: set[int] = set()
     for i in range(rounds + 1):
         user_message = message
         if i > 0:
             user_message += prior_round_block(
                 prior_findings, prior_preamble, 'the conventions review')
             user_message += _REFUTE_CONFIDENCE_RULE
-        round_completed: set[int] = set()
         findings = await run_personas(
             reviewers, user_message, model, 'review',
             debug=debug, loop='review', guidance=guidance,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed,
-            completed=round_completed)
-        # Only the FINAL round's clean completions count as "cleared": a reviewer that ran an
-        # earlier round but then failed or was cut off in a later revision round did not complete
-        # the pass, so it must not be resolved on its account. Reassign (not accumulate) so the
-        # last round to run is authoritative.
-        completed = round_completed
+            reasoning_effort=reasoning_effort, seed=seed)
         # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
         # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
         # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already
@@ -1830,8 +1951,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
         if i == 0 and findings:
             findings = await _per_persona_critique(
                 reviewers, findings, message, model, base_name, base_ref, guidance,
-                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug,
-                completed=completed)
+                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug)
         # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
         # verifies with git in an early round and may re-state the finding in a later round without
         # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
@@ -1865,7 +1985,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             _label_reviewer_number(f['label']), list(f.get('evidence') or []))
         f['sources'] = sources_by_number.get(
             _label_reviewer_number(f['label']), list(f.get('sources') or []))
-    return dedup_by_location(actionable), completed
+    return dedup_by_location(actionable)
 
 
 async def run_review(args: Any) -> int:
@@ -1976,22 +2096,15 @@ async def run_review(args: Any) -> int:
         # re-found across runs, a sampling fluke is not. Each pass uses a fresh scratchpad and a
         # distinct seed so a seed-honoring provider samples independently.
         passes: list[list[Finding]] = []
-        completed: set[int] = set()
         for i in range(consensus_n):
             pass_ctx = tools.ToolContext(
                 phase='review', workdir=cwd, notes=[], require_evidence=True)
-            pass_findings, pass_completed = await _review_pass(
+            passes.append(await _review_pass(
                 reviewers, message, model, base_name, base_ref, rounds, guidance,
                 pass_ctx, prior_block_by_number, prior_labels_by_number,
-                reasoning_effort, REVIEW_SEED + i, args.debug)
-            passes.append(pass_findings)
-            completed |= pass_completed
+                reasoning_effort, REVIEW_SEED + i, args.debug))
         threshold = consensus_n // 2 + 1
         union = dedup_findings([f for p in passes for f in p])
-        # Every label any pass raised (corroborated or not): a reviewer that raised a finding —
-        # even one the consensus vote or the evidence gate later dropped — did not CONCEDE it, so
-        # its prior thread must not be resolved on this pass.
-        raised_labels = {f['label'] for f in union}
         actionable = _corroborated(union, passes, threshold)
         # A corroborated finding is raised by several independent passes, each with its OWN git
         # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
@@ -2016,13 +2129,10 @@ async def run_review(args: Any) -> int:
     else:
         tool_ctx = tools.ToolContext(
             phase='review', workdir=cwd, notes=[], require_evidence=True)
-        actionable, completed = await _review_pass(
+        actionable = await _review_pass(
             reviewers, message, model, base_name, base_ref, rounds, guidance,
             tool_ctx, prior_block_by_number, prior_labels_by_number,
             reasoning_effort, REVIEW_SEED, args.debug)
-        # Every label the panel raised: a reviewer that raised a finding — even one the evidence
-        # gate later dropped — did not concede it, so its prior thread must not be resolved.
-        raised_labels = {f['label'] for f in actionable}
 
     # Deterministic anti-hallucination gate (before consolidation): drop a finding whose concrete
     # references do not hold up — a named symbol or cited file the reviewer never actually read,
@@ -2084,12 +2194,9 @@ async def run_review(args: Any) -> int:
     print(render_findings(actionable, base_name))
 
     if args.post_review:
-        # Only reviewers that actually RAN this pass (did not throw) "cleared" it: a crashed
-        # reviewer neither conceded nor re-raised its prior findings, so resolving its threads on a
-        # failure would close a legitimate open finding as if it had been settled. `completed`
-        # holds exactly the numbers that ran.
-        active_numbers = sorted(completed)
+        active_numbers = [num for _n, _b, num in reviewers]
         await post_review(
             args.pr, actionable, full_diff, cwd, active_numbers=active_numbers,
-            raised_labels=raised_labels)
+            model=model, base_name=base_name, base_ref=base_ref, debug=args.debug,
+            reasoning_effort=reasoning_effort)
     return 0

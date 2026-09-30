@@ -381,14 +381,6 @@ def prior_round_block(findings: list[Finding], preamble: str,
     return block
 
 
-def _is_clean_no_findings(text: Any) -> bool:
-    # A well-formed all-clear: the reviewer reported no finding using the contract's exact phrase
-    # (modulo surrounding whitespace and a trailing period). Malformed output — prose that is
-    # neither the all-clear nor a findings report — does NOT count as a clean "no findings", so a
-    # reviewer that emits it is not treated as having cleared the pass.
-    return str(text or '').strip().rstrip('.').upper() == 'NO FINDINGS'
-
-
 async def run_personas(
         reviewers: list[tuple[str, str, int]],
         user_message: str,
@@ -403,7 +395,6 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
-        completed: set[int] | None = None,
 ) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
@@ -458,28 +449,8 @@ async def run_personas(
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
             return []
-        if tools.extract_pending_command(text) is not None:
-            # The reviewer exhausted its tool budget: its last response is still a `$` command,
-            # not a findings report, so it was cut off mid-investigation. It did not cleanly finish
-            # the pass, so it is not "cleared" (its prior threads must not be resolved on its
-            # account), and a half-finished command is not a finding to report.
-            log(f'personas: {label} exhausted its tool budget; not treated as completed')
-            return []
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
-        # A clean completion is a well-formed response: the explicit all-clear ("NO FINDINGS") or
-        # at least one parseable finding. A non-command response that is neither is malformed
-        # output — the reviewer did not cleanly "clear" the pass, so it is not marked completed
-        # (its prior threads must not be resolved on its account) and it reports no finding.
-        if not findings and not _is_clean_no_findings(text):
-            log(f'personas: {label} returned malformed output; not treated as completed')
-            return []
-        if completed is not None:
-            # This reviewer ran without throwing and finished with a well-formed response: it
-            # genuinely "cleared" this pass, so its prior threads may be resolved as conceded. A
-            # reviewer that threw, was cut off at the budget, or emitted malformed output is NOT
-            # added, so none of those ever resolves its prior findings as if it had conceded them.
-            completed.add(review_number)
         # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
         # unverified claim, so it is not reported.
         findings = drop_unsupported(findings)
