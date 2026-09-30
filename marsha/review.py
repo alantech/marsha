@@ -250,10 +250,7 @@ async def gh_pr_context(num: int, cwd: str | None = None) -> str:
     if owner and name:
         # A partial list (a failed later page, logged by the fetcher) is still better context
         # than none for the reviewer.
-        nodes, _complete = await _all_review_threads(
-            repo, num,
-            'comments(first: 20) { nodes { isMinimized path line body '
-            'author { login } } }', cwd)
+        nodes, _complete = await _review_threads(repo, num, cwd)
         if nodes:
             rows = []
             for node in nodes:
@@ -642,15 +639,18 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
     # Every review thread on the PR, paginated 100 per page: a PR whose threads exceed one page
     # would otherwise silently lose every thread past the first 100 — for reply routing and
     # thread resolution, a lost thread is a finding that can never be replied to or closed.
-    # Returns (nodes, complete): complete is False when a fetch/parse failure (after one retry)
-    # stopped pagination early, so callers never mistake a partial list for the full set — in
-    # particular, the irreversible actions (resolving a thread) wait for a complete list.
+    # Returns (nodes, complete): complete is False whenever pagination stops early for ANY reason
+    # — a fetch/parse failure (after one retry), or pageInfo that claims "more" without a valid
+    # advancing cursor (a missing endCursor, or a cursor that repeats, which would otherwise loop
+    # forever). Callers never mistake a partial list for the full set — in particular, the
+    # irreversible actions (resolving a thread) wait for a complete list.
     # `fields` is the per-thread node selection (id, isResolved, comments(first: N) { ... }).
     owner, _, name = repo.partition('/')
     if not owner or not name:
         return [], False
     nodes: list[dict[str, Any]] = []
     after: str | None = None
+    seen: set[str] = set()
     while True:
         cursor = f', after: "{after}"' if after else ''
         query = (
@@ -680,9 +680,50 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
                or {}).get('pullRequest') or {}).get('reviewThreads') or {}
         nodes.extend(rt.get('nodes') or [])
         info = rt.get('pageInfo') or {}
-        if not info.get('hasNextPage') or not info.get('endCursor'):
+        if not info.get('hasNextPage'):
             return nodes, True
-        after = info['endCursor']
+        end_cursor = info.get('endCursor')
+        if not end_cursor or end_cursor in seen:
+            # pageInfo says "more pages" but offers no cursor that advances past what we already
+            # fetched: a missing endCursor, or one that repeats the previous page's. Treating this
+            # as the complete set would mistake a partial list for the full one (and the
+            # resolution pass acts on it irreversibly); keeping on with a repeated cursor would
+            # loop forever. Stop, and mark the list incomplete so irreversible callers withhold.
+            log(f'review: PR #{pr_num} review-thread pagination claimed more pages '
+                f'without a valid advancing cursor after {len(nodes)} thread(s); '
+                f'the list is treated as incomplete')
+            return nodes, False
+        seen.add(end_cursor)
+        after = end_cursor
+
+
+# The union of every per-thread field any caller in a review needs, so the PR's threads are
+# fetched ONCE and shared. A superset (comments(first: 20)) satisfies the smaller first: N each
+# caller used to request, so every caller can select from one shared node list.
+_REVIEW_THREAD_FIELDS = (
+    'id isResolved comments(first: 20) { nodes { isMinimized databaseId path '
+    'line body author { login } } }')
+# A per-run cache of the PR's full review-thread list, keyed (repo, pr_num). Without it one review
+# makes four separate paginated walks of the SAME threads (PR context, the posted-thread map,
+# prior conversations, per-reviewer priors). A single `marsha review` process reviews one PR, so
+# the cache never holds more than that PR; tests clear it between cases (autouse fixture).
+_review_threads_cache: dict[tuple[str, int],
+                            tuple[list[dict[str, Any]], bool]] = {}
+
+
+async def _review_threads(repo: str, pr_num: int, cwd: str | None = None) -> tuple[list[dict[str, Any]], bool]:
+    # The PR's full review-thread list (union fields), fetched once per run and shared by every
+    # caller that needs prior threads. Returns (nodes, complete); complete is False when the
+    # fetch was truncated (a failed page, or malformed/non-advancing pagination), so irreversible
+    # callers withhold their actions on a partial list.
+    key = (repo, pr_num)
+    hit = _review_threads_cache.get(key)
+    if hit is not None:
+        return hit
+    nodes, complete = await _all_review_threads(
+        repo, pr_num, _REVIEW_THREAD_FIELDS, cwd)
+    _review_threads_cache[key] = (nodes, complete)
+    return nodes, complete
 
 
 async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) -> tuple[dict[str, dict[str, Any]], bool]:
@@ -692,10 +733,7 @@ async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) 
     # human comments and pre-label comments are ignored. Returns
     # (label -> {thread_id, root_id, is_resolved, path, line}, complete) — complete is False
     # when a failed page left the map partial, so the caller can withhold irreversible actions.
-    nodes, complete = await _all_review_threads(
-        repo, pr_num,
-        'id isResolved comments(first: 1) { nodes { databaseId path line body } }',
-        cwd)
+    nodes, complete = await _review_threads(repo, pr_num, cwd)
     threads: dict[str, dict[str, Any]] = {}
     for node in nodes:
         comments = (node.get('comments') or {}).get('nodes') or []
@@ -726,9 +764,7 @@ async def _prior_conversations(repo: str, pr_num: int, cwd: str | None = None) -
     # A partial list (a failed later page, logged by the fetcher) is still better context than
     # none: the consolidation pass drops what it sees as settled, and an unseen settled
     # conversation costs one noisy re-raise that the next pass dedups — not an irreversible act.
-    nodes, _complete = await _all_review_threads(
-        repo, pr_num,
-        'isResolved comments(first: 8) { nodes { path line body } }', cwd)
+    nodes, _complete = await _review_threads(repo, pr_num, cwd)
     convs: list[dict[str, Any]] = []
     for node in nodes:
         comments = (node.get('comments') or {}).get('nodes') or []
@@ -760,10 +796,7 @@ async def _prior_findings_by_reviewer(pr_num: int, cwd: str | None = None) -> di
     # A partial list (a failed later page, logged by the fetcher) is still better context than
     # none: a reviewer shown SOME of its priors re-raises at most the unseen ones, and the next
     # pass dedups them — not an irreversible act.
-    nodes, _complete = await _all_review_threads(
-        repo, pr_num,
-        'isResolved comments(first: 10) { nodes { isMinimized path line body } }',
-        cwd)
+    nodes, _complete = await _review_threads(repo, pr_num, cwd)
     by_number: dict[int | None, list[dict[str, Any]]] = {}
     for node in nodes:
         if node.get('isResolved'):

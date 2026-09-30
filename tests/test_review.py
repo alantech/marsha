@@ -49,6 +49,16 @@ def _critic_quiet() -> Any:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _clear_review_threads_cache() -> Generator[None, None, None]:
+    # `_review_threads` caches the PR's thread list per (repo, pr) for the duration of a run so
+    # the four callers share one paginated fetch. Reset it so a warm cache never leaks one
+    # test's threads into the next (all tests run in one pytest process).
+    review._review_threads_cache.clear()
+    yield
+    review._review_threads_cache.clear()
+
+
 def _git(cwd: Any, *args: Any) -> Any:
     subprocess.run(['git', *args], cwd=cwd, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2480,6 +2490,93 @@ def test_all_review_threads_retries_a_failed_page() -> None:
     assert [n.get('id') for n in nodes] == ['PRRT_1', 'PRRT_2']
     assert complete is True
     assert len(calls) == 3
+
+
+def test_all_review_threads_missing_endcursor_is_incomplete() -> None:
+    # pageInfo claims "more pages" but provides no endCursor: the list must be marked incomplete
+    # (never complete), and pagination must stop rather than re-fetch the first page forever.
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return (0, page, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes, complete = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert [n.get('id') for n in nodes] == ['PRRT_1']
+    assert complete is False
+    assert len(calls) == 1  # no cursor to advance with, so no second page is fetched
+
+
+def test_all_review_threads_repeated_cursor_is_incomplete() -> None:
+    # pageInfo keeps claiming more pages with the SAME cursor: pagination must stop (incomplete)
+    # rather than loop forever re-fetching the identical page.
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1', 'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return (0, page, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes, complete = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert complete is False
+    assert len(calls) == 2  # page 1 (a new cursor), then the repeat is detected and we stop
+
+
+def test_review_threads_is_fetched_once_and_shared() -> None:
+    # All four consumers of prior threads in one review (PR context, the posted-thread map, prior
+    # conversations, per-reviewer priors) share a single paginated fetch instead of each walking
+    # every page. A single-page PR therefore costs exactly one reviewThreads query.
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'C', 'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1, 'isMinimized': False,
+                 'body': '**[A1] MAJOR**: one', 'author': {'login': 'marsha'}}]}},
+        ]}}}}})
+    thread_queries: list[str] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        joined = ' '.join(a)
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        if 'reviewThreads' in joined:
+            thread_queries.append(joined)
+            return (0, page, '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        ctx = asyncio.run(review.gh_pr_context(123))
+        threads, complete = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+        convs = asyncio.run(review._prior_conversations('acme/widget', 123))
+        by_number = asyncio.run(review._prior_findings_by_reviewer(123))
+
+    assert len(thread_queries) == 1  # four consumers, one shared paginated fetch
+    assert complete is True
+    assert 'A1' in threads
+    assert any('one' in (c['desc'] or '') for c in convs)
+    assert by_number.get(1)  # reviewer #1 owns [A1]
+    assert 'one' in ctx
 
 
 def test_resolve_thread_posts_mutation() -> None:
