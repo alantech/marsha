@@ -1220,6 +1220,47 @@ def test_unretrieved_citations_quoted_arguments() -> None:
         [], [('$ find-in-file "pattern" "docs/NOTES.md"', 'the note')]) == []
 
 
+def test_unretrieved_citations_git_show_forms() -> None:
+    # Only `git show <ref>:<path>` reads a doc's content: `git show <commit>` and
+    # `git show <commit> -- <path>` (commit info or a diff) do not satisfy a citation.
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show --stat HEAD -- docs/NOTES.md', 'docs/NOTES.md | 1 +')],
+        []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show HEAD -- docs/NOTES.md', '+a note')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show HEAD:docs/NOTES.md', 'a note')], []) == []
+
+
+def test_unretrieved_citations_dotfile_configs() -> None:
+    # A repo config dotfile (.flake8, .env) is a citable source like the other config
+    # formats, while a bare extension mention in prose (a ".md file") is not a citation.
+    assert tools.cited_sources('the flake8 config is in .flake8') == (['.flake8'], [])
+    assert tools.unretrieved_citations(
+        'the flake8 config is in .flake8', [], []) == ['.flake8']
+    assert tools.unretrieved_citations(
+        'the flake8 config is in .flake8',
+        [('$ git show HEAD:.flake8', '[flake8]')], []) == []
+    assert tools.cited_sources('per config/.flake8 the limit is 79') == \
+        (['config/.flake8'], [])
+    assert tools.cited_sources('the docs use a .md file') == ([], [])
+
+
+def test_cited_sources_strips_angle_bracket_autolinks() -> None:
+    # A CommonMark angle-bracket autolink (<https://x>) is a URL citation: the closing
+    # bracket is not part of the URL and must not block the retrieval match.
+    url = 'https://spec.commonmark.org/0.31.2/#autolinks'
+    assert tools.cited_sources(f'see <{url}> for the rule') == ([], [url])
+    assert tools.unretrieved_citations(
+        f'see <{url}> for the rule', [], []) == [url]
+    assert tools.unretrieved_citations(
+        f'see <{url}> for the rule',
+        [], [('$ view-web-page "' + url + '"', 'the spec')]) == []
+
+
 def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])

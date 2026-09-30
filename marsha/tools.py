@@ -2102,20 +2102,34 @@ _CITE_DOC_EXT_RE = re.compile(
     r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json)$', re.I)
 _CITE_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
 _CITE_URL_RE = re.compile(r'https?://\S+')
-_CITE_PATH_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
-_CITE_PUNCT = '.,;:!?)]\'"`'
+# A cited path is either a name.ext token (optionally with directories) or a dotfile
+# (.flake8, .env, .editorconfig, ...) — the repo's config dotfiles are citable sources.
+# The final component may carry digits (a .flake8 under a directory); a token that is
+# not a doc/config (.md file, 1.2.3) is filtered by _is_cited_doc_path, not here.
+_CITE_PATH_RE = re.compile(
+    r'\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,8})?'
+    r'|\b[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,8}\b', re.I)
+# Trailing sentence punctuation (and a CommonMark angle-bracket autolink's closing '>',
+# which the URL capture swallows) is not part of a cited URL or path.
+_CITE_PUNCT = '.,;:!?)]\'"`>'
 # A finding's path:line location is not a citation, so it is stripped before extraction.
 _CITE_FINDING_LOC_RE = re.compile(
     r'(\[(?:MAJOR|MINOR|NIT|NITPICK)\]\s+)\S+:\d+')
 
 
 def _is_cited_doc_path(token: str) -> bool:
-    # A cited token is a documentation file (not a code file) when it ends in a prose extension or
-    # is a bare changelog-style name. Code files (.py / .ts / ...) are excluded — the git symbol /
-    # file checks ground those, not the citation check.
+    # A cited token is a documentation file (not a code file) when it ends in a prose extension,
+    # is a bare changelog-style name, or is a dotfile — a repo's config dotfiles (.flake8, .env,
+    # .editorconfig, ...) are convention sources a reviewer may cite. A final component under 4
+    # chars (a ".md file" mention in prose) is a bare extension, not a file citation. Code files
+    # (.py / .ts / ...) are excluded — the git symbol / file checks ground those, not the
+    # citation check.
+    last = token.rsplit('/', 1)[-1]
+    if last.startswith('.'):
+        return len(last) >= 4
     if _CITE_DOC_EXT_RE.search(token):
         return True
-    return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
+    return last in ('CHANGELOG', 'CHANGES')
 
 
 def _command_tokens(cmd: str) -> list[str]:
@@ -2157,7 +2171,13 @@ def _command_target(cmd: str) -> str | None:
     tool, args = toks[0], toks[1:]
     if tool == 'git':
         if len(args) >= 2 and args[0] == 'show':
-            return _git_object_path(args[-1])
+            a = args[-1]
+            # Only `git show <ref>:<path>` reads the object's content. The other forms
+            # (`git show <commit>`, `git show --stat`, `git show <commit> -- <path>`)
+            # report commit info or a diff, not the file a citation names.
+            if ':' not in a or '://' in a:
+                return None
+            return _git_object_path(a)
         if len(args) >= 2 and args[0] == 'cat-file':
             # Only -p prints a blob's content. -e/-s/-t and their long forms
             # (--exists/--size/--type) report metadata, and the --batch modes
