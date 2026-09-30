@@ -1406,6 +1406,32 @@ def test_per_persona_critique_keeps_unrefuted_reviewer(repo: Any) -> None:
     assert out == findings
 
 
+def test_per_persona_critique_failed_revision_not_completed(repo: Any) -> None:
+    # A reviewer the critic refutes, whose revision fails to complete (run_personas returns no
+    # findings and records no completion), is removed from `completed`: a failed revision must
+    # not resolve its prior findings as conceded.
+    findings: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                                'location': 'a.txt:2', 'desc': 'phantomThing is undefined',
+                                'support': '', 'evidence': []}]
+    completed: set[int] = {1}  # Sage completed the initial round
+
+    async def fake_critic(findings: Any, tool_ctx: Any, model: Any, base_name: Any, base_ref: Any, **k: Any) -> Any:
+        return '[Sage-A1] - phantomThing is defined at a.txt:3'
+
+    async def fake_panel(reviewers: Any, message: Any, model: Any, stage: Any, **k: Any) -> Any:
+        assert 'completed' in k  # the revision reports completion through the shared set
+        return []  # fails to complete: no findings, no completion recorded
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+         patch.object(review, 'run_personas', new=fake_panel):
+        out = asyncio.run(review._per_persona_critique(
+            [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
+            ctx, {}, None, None, False, completed=completed))
+    assert out == []
+    assert completed == set()  # the failed revision removes Sage from "cleared"
+
+
 def test_corroborated_keeps_only_recurring_concerns() -> None:
     # A concern restated across a majority of passes survives; a one-pass fluke is dropped.
     def f(label: str, loc: str, desc: str) -> Any:

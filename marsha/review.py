@@ -1726,7 +1726,8 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
                                 guidance: str, tool_ctx: tools.ToolContext,
                                 prior_labels_by_number: dict[int, set[str]],
                                 reasoning_effort: str | None, seed: int | None,
-                                debug: bool) -> list[Finding]:
+                                debug: bool,
+                                completed: set[int] | None = None) -> list[Finding]:
     # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
     # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
     # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
@@ -1757,11 +1758,18 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
         # A fresh sources ledger too (read_cache is shared, as in run_personas).
         rev_ctx = dataclasses.replace(
             tool_ctx, notes=list(tool_ctx.notes), evidence=[], sources=[])
+        revision_completed: set[int] = set()
         revised = await run_personas(
             [spec], rev_message, model, 'review', debug=debug, loop='review',
             guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=None, prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            completed=revision_completed)
+        # The initial round marked this reviewer completed, but if its REVISION failed (threw,
+        # was cut off at the budget, or emitted malformed output) it did not cleanly finish the
+        # pass: remove it so a failed revision never resolves its prior findings as conceded.
+        if completed is not None and spec[2] not in revision_completed:
+            completed.discard(spec[2])
         # A finding the reviewer verified in round 0 but merely re-states in the revision would
         # otherwise sit on an empty revision-round ledger; merge the code it already read so the
         # evidence gate still grounds it.
@@ -1822,7 +1830,8 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
         if i == 0 and findings:
             findings = await _per_persona_critique(
                 reviewers, findings, message, model, base_name, base_ref, guidance,
-                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug)
+                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug,
+                completed=completed)
         # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
         # verifies with git in an early round and may re-state the finding in a later round without
         # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
