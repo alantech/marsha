@@ -719,10 +719,12 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
             findings_block if findings_block
             else '(the panel raised no findings this pass)'))
     user = (
-        f'Judge the open review threads below against the current code '
-        f'(default branch `{base_name}`, diff base ref `{base_ref}`). '
-        f'For each, read the code it points at with the git tool and decide '
-        f'CLEARED, STILL-RAISED, or UNCLEAR, one verdict per thread.\n\n'
+        f'Judge the open review threads below against the code as it is in the '
+        f'current checkout (default branch `{base_name}`); `{base_ref}` is only '
+        f'the diff base and is not the code under test. For each thread, read '
+        f'the code it points at in the checkout with the git tool '
+        f'(`git show HEAD:<path>`) and decide CLEARED, STILL-RAISED, or '
+        f'UNCLEAR, one verdict per thread.\n\n'
         f'# Open threads to judge\n\n' + '\n\n'.join(thread_lines)
         + findings_section)
     mapper = get_mapper(system, n_results=1, stats_stage='review',
