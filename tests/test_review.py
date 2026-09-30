@@ -2371,6 +2371,8 @@ def test_fetch_review_threads_paginates() -> None:
     assert set(threads) == {'A1', 'B2'}
     assert len(queries) == 2
     assert 'after: "CUR1"' in queries[1]
+    for q in queries:  # the fake never validates the query; a brace slip would 400 live
+        assert q.count('{') == q.count('}')
 
 
 def test_all_review_threads_partial_failure_keeps_first_pages() -> None:
@@ -2398,7 +2400,43 @@ def test_all_review_threads_partial_failure_keeps_first_pages() -> None:
             'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
 
     assert [n.get('id') for n in nodes] == ['PRRT_1']
-    assert len(calls) == 2
+    assert len(calls) == 3  # page 1, the failed page 2, and its one retry
+
+
+def test_all_review_threads_retries_a_failed_page() -> None:
+    # A failed page is retried once before the pass gives up on the rest of the threads, so a
+    # transient failure does not truncate the thread list.
+    page1 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1', 'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}})
+    page2 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR2', 'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_2', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 2, 'path': 'b.py', 'line': 2,
+                 'body': '**[B2] MINOR**: two'}]}},
+        ]}}}}})
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        if len(calls) == 1:
+            return (0, page1, '')
+        if len(calls) == 2:
+            return (1, '', 'boom')
+        return (0, page2, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert [n.get('id') for n in nodes] == ['PRRT_1', 'PRRT_2']
+    assert len(calls) == 3
 
 
 def test_resolve_thread_posts_mutation() -> None:

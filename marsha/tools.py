@@ -2099,7 +2099,8 @@ def _is_no_findings_response(text: Any) -> bool:
 # A "source" is a doc or a config the codebase's conventions live in (per the proof directive):
 # prose docs plus the config files a reviewer may cite for a convention.
 _CITE_DOC_EXT_RE = re.compile(
-    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json)$', re.I)
+    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json|xml'
+    r'|properties|gradle)$', re.I)
 # A bare config/build file name with no extension that a reviewer may cite as a convention
 # source, matched in its exact file spelling (a prose "license" is not a citation).
 _CITE_DOC_BARE_RE = re.compile(
@@ -2111,8 +2112,8 @@ _CITE_URL_RE = re.compile(r'https?://\S+')
 # that is not itself a directory (a following '/' would make it one). A token that is not
 # a doc/config (a .md file, 1.2.3) is filtered by _is_cited_doc_path, not here.
 _CITE_PATH_RE = re.compile(
-    r'(?:\.[A-Za-z0-9_\-]+/)*[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,8}\b'
-    r'|\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,8})?(?!\s*/)', re.I)
+    r'(?:\.[A-Za-z0-9_\-]+/)*[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,10}\b'
+    r'|\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,10})?(?!\s*/)', re.I)
 # Trailing sentence punctuation (and a CommonMark angle-bracket autolink's closing '>',
 # which the URL capture swallows) is not part of a cited URL or path.
 _CITE_PUNCT = '.,;:!?)]\'"`>'

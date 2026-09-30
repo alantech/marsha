@@ -1191,6 +1191,16 @@ def test_unretrieved_citations_json_configs() -> None:
     assert tools.unretrieved_citations(
         'the build flag is in package.json',
         [('$ git show HEAD:package.json', '{}')], []) == []
+    # XML, properties, and gradle build files are convention sources too.
+    assert tools.cited_sources('the plugin is in pom.xml') == (['pom.xml'], [])
+    assert tools.cited_sources('the property is in application.properties') == \
+        (['application.properties'], [])
+    assert tools.cited_sources('the task is in build.gradle') == (['build.gradle'], [])
+    assert tools.unretrieved_citations(
+        'the plugin is in pom.xml', [], []) == ['pom.xml']
+    assert tools.unretrieved_citations(
+        'the plugin is in pom.xml',
+        [('$ git show HEAD:pom.xml', '<project/>')], []) == []
 
 
 def test_cited_sources_masks_urls_ending_in_doc_extensions() -> None:

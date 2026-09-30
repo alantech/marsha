@@ -651,9 +651,14 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
         query = (
             'query { repository(owner: "%s", name: "%s") { pullRequest(number: %d) {'
             'reviewThreads(first: 100%s) { pageInfo { endCursor hasNextPage } '
-            'nodes { %s } } } } } }' % (owner, name, pr_num, cursor, fields))
+            'nodes { %s } } } } }' % (owner, name, pr_num, cursor, fields))
         rc, out, err = await _gh(
             'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
+        if rc != 0 or not out.strip():
+            # One retry: a transient failure on a later page would otherwise leave every
+            # thread on the rest of the pages invisible to this pass (unreplied, unresolved).
+            rc, out, err = await _gh(
+                'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
         if rc != 0 or not out.strip():
             # A first-page failure yields no threads (callers degrade as before). A
             # LATER-page failure yields a PARTIAL list: the threads on the lost pages are
