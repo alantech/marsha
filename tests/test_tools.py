@@ -1137,6 +1137,62 @@ def test_unretrieved_citations_requires_a_real_read() -> None:
         url, [], [('$ web-search "' + url + ' bug"', 'no urls here')]) == [url]
 
 
+def test_unretrieved_citations_config_files_and_paged_reads() -> None:
+    # A repo config file (pyproject.toml, setup.cfg, ...) is a citable source like a doc, and a
+    # paged `git show` (PAGE=<n>) is a real read of the cited file.
+    cfg = 'the lint convention is in pyproject.toml'
+    assert tools.cited_sources(cfg) == (['pyproject.toml'], [])
+    assert tools.unretrieved_citations(cfg, [], []) == ['pyproject.toml']
+    assert tools.unretrieved_citations(
+        cfg, [('$ git show HEAD:pyproject.toml', '[tool.ruff]')], []) == []
+    assert tools.unretrieved_citations(
+        'see docs/big.md',
+        [('$ PAGE=2 git show HEAD:docs/big.md', 'page two')], []) == []
+
+
+def test_unretrieved_citations_size_type_queries_are_not_reads() -> None:
+    # `git cat-file -s/-t` reports a blob's size or type without reading its content, so it does
+    # not satisfy a citation of that file.
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -s HEAD:docs/NOTES.md', '1234')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -t HEAD:docs/NOTES.md', 'blob')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -p HEAD:docs/NOTES.md', 'notes')], []) == []
+
+
+def test_cited_sources_masks_urls_ending_in_doc_extensions() -> None:
+    # A URL ending in a doc extension (https://x/guide.md) is a URL citation only — it is not
+    # also read as a local doc path, and fetching the URL satisfies the citation.
+    url = 'https://example.com/guide.md'
+    assert tools.cited_sources(f'see {url} for the pattern') == ([], [url])
+    assert tools.unretrieved_citations(
+        f'see {url} for the pattern', [], []) == [url]
+    assert tools.unretrieved_citations(
+        f'see {url} for the pattern',
+        [], [('$ view-web-page "' + url + '"', 'the guide')]) == []
+    # A real local path beside the URL is still extracted.
+    assert tools.cited_sources(f'see {url} and docs/NOTES.md') == \
+        (['docs/NOTES.md'], [url])
+
+
+def test_unretrieved_citations_quoted_arguments() -> None:
+    # The documented usage quotes URLs and patterns ($ view-web-page "https://url"), so a
+    # quoted fetch must satisfy the citation exactly like an unquoted one, and a quoted
+    # find-in-file target is the path, not a fragment of it.
+    url = 'https://docs.python.org/3/'
+    assert tools.unretrieved_citations(
+        f'see {url}', [], [('$ view-web-page "' + url + '"', 'the docs')]) == []
+    assert tools.unretrieved_citations(
+        f'see {url}', [], [('$ summarize "' + url + '"', 'the docs')]) == []
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [], [('$ find-in-file "pattern" "docs/NOTES.md"', 'the note')]) == []
+
+
 def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
     mapper = ScriptedMapper([doc_with_cmd, DOC])

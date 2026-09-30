@@ -2096,7 +2096,10 @@ def _is_no_findings_response(text: Any) -> bool:
 # git checks ground those. The match is deliberately lenient (a citation written slightly
 # differently from the command still counts as retrieved): the failure it must avoid is a FALSE
 # DROP of a real, grounded finding, not a false pass.
-_CITE_DOC_EXT_RE = re.compile(r'\.(?:md|markdown|txt|rst|adoc|org)$', re.I)
+# A "source" is a doc or a config the codebase's conventions live in (per the proof directive):
+# prose docs plus the config files a reviewer may cite for a convention.
+_CITE_DOC_EXT_RE = re.compile(
+    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml)$', re.I)
 _CITE_DOC_BARE_RE = re.compile(r'\b(?:CHANGELOG|CHANGES)\b')
 _CITE_URL_RE = re.compile(r'https?://\S+')
 _CITE_PATH_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z]{1,8}\b')
@@ -2115,24 +2118,50 @@ def _is_cited_doc_path(token: str) -> bool:
     return token.rsplit('/', 1)[-1] in ('CHANGELOG', 'CHANGES')
 
 
+def _command_tokens(cmd: str) -> list[str]:
+    # The tokens of a `$ <tool> <args>` command line: the leading `$` and any `PAGE=N` page
+    # prefix are removed and the rest is shlex-split, so a paged read is matched like its
+    # unpaged form and a quoted argument (the documented usage quotes URLs and search
+    # patterns) is one token. A naive split would leave the quotes on the target, and a
+    # quoted fetched URL would then not be recognized as fetched.
+    s = cmd.strip()
+    if not s.startswith('$'):
+        return []
+    rest = s[1:].strip()
+    m = re.match(r'PAGE=\d+\s+(.*)$', rest)
+    if m:
+        rest = m.group(1)
+    try:
+        return shlex.split(rest)
+    except ValueError:
+        return rest.split()
+
+
 def _command_tool(cmd: str) -> str | None:
-    # The tool name of a `$ <tool> ...` command line (a page prefix like `3$` is stripped).
-    parts = re.sub(r'^(?:\d+\$|\$)\s*', '', cmd.strip()).split()
-    return parts[0] if parts else None
+    toks = _command_tokens(cmd)
+    return toks[0] if toks else None
+
+
+def _git_object_path(arg: str) -> str:
+    # Strip a `REF:` prefix (HEAD:docs/x.md -> docs/x.md) from a git show / cat-file argument.
+    return arg.split(':', 1)[1] if (':' in arg and '://' not in arg) else arg
 
 
 def _command_target(cmd: str) -> str | None:
-    # The path or URL a content-READ command targets, else None. Reads are git show / git
-    # cat-file, summarize, find-in-file, and view-web-page. Listing/search commands (git grep,
-    # git ls-files, list-tree, web-search) do not read a file's content, so they yield None.
-    parts = re.sub(r'^(?:\d+\$|\$)\s*', '', cmd.strip()).split()
-    if not parts:
+    # The path or URL a content-READ command targets, else None. Reads are git show, git
+    # cat-file (not -s/-t, which report size/type), summarize, find-in-file, and view-web-page.
+    # Listing/search commands (git grep, git ls-files, list-tree, web-search) read no content.
+    toks = _command_tokens(cmd)
+    if not toks:
         return None
-    tool, args = parts[0], parts[1:]
+    tool, args = toks[0], toks[1:]
     if tool == 'git':
-        if len(args) >= 2 and args[0] in ('show', 'cat-file'):
-            a = args[-1]
-            return a.split(':', 1)[1] if (':' in a and '://' not in a) else a
+        if len(args) >= 2 and args[0] == 'show':
+            return _git_object_path(args[-1])
+        if len(args) >= 2 and args[0] == 'cat-file':
+            if '-s' in args or '-t' in args:
+                return None
+            return _git_object_path(args[-1])
         return None
     if tool in ('summarize', 'view-web-page'):
         return args[0] if args else None
@@ -2172,18 +2201,21 @@ def retrieved_paths_and_urls(
 
 def cited_sources(text: str) -> tuple[list[str], list[str]]:
     # The doc paths and URLs cited in `text`, normalized (trailing punctuation stripped) and
-    # de-duplicated. Returns (doc_paths, urls).
+    # de-duplicated. Returns (doc_paths, urls). URLs are masked before path extraction so a URL
+    # ending in a doc extension (e.g. .../guide.md) is not also read as a local path.
+    text = text or ''
     urls: list[str] = []
-    for u in _CITE_URL_RE.findall(text or ''):
+    for u in _CITE_URL_RE.findall(text):
         u = u.rstrip(_CITE_PUNCT)
         if u not in urls:
             urls.append(u)
+    masked = _CITE_URL_RE.sub(' ', text)
     paths: list[str] = []
-    for tok in _CITE_PATH_RE.findall(text or ''):
+    for tok in _CITE_PATH_RE.findall(masked):
         tok = tok.rstrip(_CITE_PUNCT)
         if _is_cited_doc_path(tok) and tok not in paths:
             paths.append(tok)
-    for m in _CITE_DOC_BARE_RE.finditer(text or ''):
+    for m in _CITE_DOC_BARE_RE.finditer(masked):
         if m.group(0) not in paths:
             paths.append(m.group(0))
     return sorted(paths), urls
