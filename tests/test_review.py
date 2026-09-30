@@ -503,6 +503,32 @@ def test_run_personas_attaches_sources_to_findings() -> None:
     assert base.sources == []
 
 
+def test_run_personas_completed_excludes_failed_reviewers() -> None:
+    # A reviewer that throws is NOT recorded in `completed` (it did not clear the pass), so its
+    # prior threads are never resolved on a failure; a reviewer that runs — even to "NO FINDINGS"
+    # — is recorded. This is what lets post_review resolve only the threads of reviewers that
+    # genuinely ran.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[])
+    completed: set[int] = set()
+
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        if 'boom-reviewer' in (mapper.system or ''):
+            raise RuntimeError('boom')
+        return 'NO FINDINGS'
+
+    def fake_get_mapper(system: Any, *a: Any, **k: Any) -> Any:
+        return types.SimpleNamespace(n_results=1, system=system)
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper', new=fake_get_mapper):
+        asyncio.run(personas.run_personas(
+            [('Sage', 'normal-reviewer', 1), ('Eli', 'boom-reviewer', 2)],
+            'msg', 'm', 'review', tool_ctx=base, completed=completed))
+
+    assert completed == {1}  # Sage ran; Eli threw and is not "cleared"
+
+
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
@@ -1068,7 +1094,7 @@ def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
 
     with patch.object(review, 'run_personas', new=fake_personas), \
          patch.object(review, 'conventions_gate', new=fake_gate):
-        out = asyncio.run(review._review_pass(
+        out, _completed = asyncio.run(review._review_pass(
             [('Sage', 'body', 1)], 'msg', 'm', 'main', 'main', 1, '',
             tools.ToolContext(phase='review', workdir=repo, notes=[]),
             {}, {}, None, 0, False))
@@ -2226,6 +2252,43 @@ def test_post_review_all_clear_resolves_conceded_threads() -> None:
     assert resolved == ['PRRT_B9', 'PRRT_C5']
 
 
+def test_post_review_all_clear_protects_gate_dropped_labels() -> None:
+    # An all-clear pass must not resolve a thread whose finding was RAISED this pass but dropped
+    # by the evidence gate: the reviewer did not concede it (the gate rejected the re-raise), so
+    # the thread stays open. A thread for a label the reviewer did NOT raise is still resolved.
+    threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_B9', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 55, 'path': 'tools.py', 'line': 1,
+                 'body': '**[B9] MAJOR**: not raised this pass'}]}},
+            {'id': 'PRRT_C5', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 66, 'path': 'tools.py', 'line': 2,
+                 'body': '**[C5] MAJOR**: raised then gate-dropped'}]}},
+        ]}}}}})
+    resolved = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'resolveReviewThread' in joined:
+            m = re.search(r'threadId: "([^"]+)"', joined)
+            resolved.append(m.group(1) if m else None)
+            return (0, '{"data": {}}', '')
+        if 'reviewThreads' in joined:
+            return (0, threads, '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        # Reviewers #9 and #5 ran and raised nothing that survived; C5 (#5) was raised but
+        # dropped by the gate, so it is protected. B9 (#9) was not raised, so it is conceded.
+        asyncio.run(review.post_review(
+            123, [], '', active_numbers=[9, 5], raised_labels={'C5'}))
+
+    assert resolved == ['PRRT_B9']  # C5 protected (gate-dropped), B9 conceded
+
+
 def test_post_review_replies_on_existing_thread() -> None:
     # A finding re-raised under a label that already has a thread is posted as a reply on that
     # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.
@@ -2572,6 +2635,33 @@ def test_all_review_threads_omitted_hasnextpage_is_incomplete() -> None:
     assert [n.get('id') for n in nodes] == ['PRRT_1']
     assert complete is False
     assert len(calls) == 1  # an omitted flag is not a cursor to advance with
+
+
+def test_all_review_threads_graphql_errors_incomplete() -> None:
+    # A GraphQL response carrying BOTH partial data and a top-level errors list (partial success)
+    # did not return the full connection: its pageInfo cannot prove completeness, so the list is
+    # marked incomplete rather than complete.
+    page = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'C', 'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_1', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 1, 'path': 'a.py', 'line': 1,
+                 'body': '**[A1] MAJOR**: one'}]}},
+        ]}}}}, 'errors': [{'message': 'rate limited'}]})
+    calls = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return (0, page, '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        nodes, complete = asyncio.run(review._all_review_threads(
+            'acme/widget', 123,
+            'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
+
+    assert [n.get('id') for n in nodes] == ['PRRT_1']
+    assert complete is False
+    assert len(calls) == 1  # a partial (error) response is not retried as a missing page
 
 
 def test_review_threads_is_fetched_once_and_shared() -> None:

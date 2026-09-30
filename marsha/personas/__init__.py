@@ -395,6 +395,7 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
+        completed: set[int] | None = None,
 ) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
@@ -449,6 +450,12 @@ async def run_personas(
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
             return []
+        if completed is not None:
+            # This reviewer ran without throwing (whether or not it found anything): it genuinely
+            # "cleared" this pass, so its prior threads may be resolved as conceded. A reviewer
+            # that threw (the except path above) is NOT added, so a failure never resolves its
+            # prior findings as if it had conceded them.
+            completed.add(review_number)
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
         # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,

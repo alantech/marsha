@@ -581,6 +581,16 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
     # The code the reviewer already retrieved, so the critic verifies against it and probes only
     # what it still needs instead of re-deriving every finding from scratch (the per-persona call
     # passes one reviewer's ledger, so this is exactly the code that reviewer read).
+    # Show each finding WITH its support (where a cited source for a general-knowledge claim would
+    # be named) so the critic can tell a grounded claim from an ungrounded assertion.
+    finding_lines: list[str] = []
+    for f in findings:
+        location = f' {f["location"]}' if f['location'] else ''
+        line = f'- [{f["name"]}-{f["label"]}] {f["severity"]}{location} - {f["desc"]}'
+        if f.get('support'):
+            line += f'\n  support: {f["support"]}'
+        finding_lines.append(line)
+    findings_block = '\n'.join(finding_lines)
     evidence_lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     for f in findings:
@@ -591,14 +601,31 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
     evidence_block = ('\n\n# Code the reviewer already read\n\n'
                       + '\n\n'.join(evidence_lines)
                       if evidence_lines else '')
+    # The non-git sources the reviewers actually retrieved (docs opened, URLs viewed/searched), so
+    # the critic can check a general-knowledge claim is backed by one of them.
+    source_lines: list[str] = []
+    seen_src: set[tuple[str, str]] = set()
+    for f in findings:
+        for cmd, out in (f.get('sources') or []):
+            if (cmd, out) not in seen_src:
+                seen_src.add((cmd, out))
+                source_lines.append(f'$ {cmd}\n{out}')
+    sources_block = ('\n\n# Sources the reviewers retrieved (docs/URLs)\n\n'
+                     + '\n\n'.join(source_lines)
+                     if source_lines else '')
     user = (
         f'Falsify the findings below against the actual code (default branch `{base_name}`, '
         f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
         f'symbols as whole words, with no language-specific definition keyword assumed, and read '
-        f'the cited lines with `git show HEAD:<path>`. Use the code the reviewer already read '
-        f'below as your starting point and probe only what you still need. Report, in the fixed '
-        f'form, only the findings the code plainly contradicts.\n\n# Findings under review\n\n'
-        + format_findings(findings) + evidence_block)
+        f'the cited lines with `git show HEAD:<path>`. A finding whose claim rests on general '
+        f'knowledge (a performance characteristic, a security property, a known-bad pattern, or a '
+        f'style best practice) must name, in its support, a source the reviewer actually retrieved '
+        f'(listed under "Sources the reviewers retrieved"); if such a claim names no retrieved '
+        f'source, it is an ungrounded assertion — refute it. Use the code the reviewer already '
+        f'read below as your starting point and probe only what you still need. Report, in the '
+        f'fixed form, only the findings the code plainly contradicts or that rest on an ungrounded '
+        f'general-knowledge claim.\n\n# Findings under review\n\n'
+        + findings_block + evidence_block + sources_block)
     mapper = get_mapper(system, n_results=1, stats_stage='review',
                         model=model, label='review:critic',
                         reasoning_effort=reasoning_effort, seed=seed)
@@ -682,6 +709,15 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
         rt = (((data.get('data') or {}).get('repository')
                or {}).get('pullRequest') or {}).get('reviewThreads') or {}
         nodes.extend(rt.get('nodes') or [])
+        # A GraphQL response may carry BOTH partial data and a top-level errors list (partial
+        # success): the server returned what it could plus the errors. Such a response did not
+        # return the full connection, so its pageInfo cannot be trusted to say the list is
+        # complete. Keep the partial nodes (some context beats none, as with a failed later page)
+        # but mark the list incomplete so irreversible callers withhold.
+        if data.get('errors'):
+            log(f'review: PR #{pr_num} review-thread fetch returned GraphQL errors '
+                f'after {len(nodes)} thread(s); the list is treated as incomplete')
+            return nodes, False
         info = rt.get('pageInfo') or {}
         has_next = info.get('hasNextPage')
         if has_next is False:
@@ -1529,7 +1565,7 @@ def _is_review_anchoring_rejection(out: str, err: str) -> bool:
         for e in errors)
 
 
-async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None) -> None:
+async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd: str | None = None, active_numbers: list[int] | None = None, raised_labels: set[str] | None = None) -> None:
     repo = await _repo_name(cwd)
     if not repo:
         raise Exception('Could not resolve the repository owner/name.')
@@ -1538,14 +1574,21 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
         # ran this pass and raised nothing, so every open thread one of them opened is conceded
         # like on any other pass and resolved — without this, a finding fixed since the last
         # pass would sit open on the PR until a pass with findings happens to run again.
+        # `active` holds only reviewers that actually ran (a crashed reviewer is not "clear").
+        # A label in `raised_labels` was raised this pass and then dropped by the evidence gate:
+        # the reviewer did not concede it (the gate merely rejected the re-raise), so its thread
+        # is protected from resolution even though it did not survive to `findings`.
         # Resolution is an irreversible act, so it is withheld when the thread list is
         # incomplete (a failed page): the threads simply stay open until a complete fetch.
         threads, complete = await _fetch_review_threads(repo, pr_num, cwd)
         active = set(active_numbers or [])
+        protected = set(raised_labels or [])
         closed = 0
         if complete:
             for label, thread in threads.items():
-                if thread['is_resolved'] or _label_reviewer_number(label) not in active:
+                if thread['is_resolved'] or label in protected:
+                    continue
+                if _label_reviewer_number(label) not in active:
                     continue
                 if await _resolve_thread(thread['thread_id'], cwd):
                     closed += 1
@@ -1645,16 +1688,18 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
                 f'Failed to reply to PR #{pr_num} thread {cid}: {err or out}')
     # Concede: a prior finding the reviewer no longer raises is closed by resolving its thread.
     # Only threads whose reviewer ran this pass are touched, so a changed panel cannot close
-    # threads for reviewers that were not re-run. Resolving is irreversible (GitHub offers no
-    # un-resolve), so the pass is withheld entirely when the thread list is incomplete: a thread
-    # on a lost page cannot be judged conceded, and this round's resolutions simply wait for a
-    # complete fetch.
+    # threads for reviewers that were not re-run. A label in `raised_labels` was raised this pass
+    # but dropped by the evidence gate (not in `findings`): the reviewer did not concede it, so its
+    # thread is protected too. Resolving is irreversible (GitHub offers no un-resolve), so the pass
+    # is withheld entirely when the thread list is incomplete: a thread on a lost page cannot be
+    # judged conceded, and this round's resolutions simply wait for a complete fetch.
     active = set(active_numbers or [])
+    protected = set(raised_labels or [])
     raised = {f['label'] for f in findings}
     closed = 0
     if complete:
         for label, thread in threads.items():
-            if thread['is_resolved'] or label in raised:
+            if thread['is_resolved'] or label in raised or label in protected:
                 continue
             if _label_reviewer_number(label) not in active:
                 continue
@@ -1735,17 +1780,21 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
                        guidance: str, tool_ctx: tools.ToolContext,
                        prior_block_by_number: dict[int, str],
                        prior_labels_by_number: dict[int, set[str]],
-                       reasoning_effort: str | None, seed: int, debug: bool) -> list[Finding]:
+                       reasoning_effort: str | None, seed: int,
+                       debug: bool) -> tuple[list[Finding], set[int]]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
-    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
-    # same-location-collapsed findings (before semantic consolidation) — ready for consensus
-    # voting across passes, or a single-pass consolidation.
+    # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns
+    # (same-location-collapsed findings, completed) — the findings (before semantic
+    # consolidation, ready for consensus voting or a single-pass consolidation) and the set of
+    # reviewer numbers that actually RAN this pass (did not throw): a reviewer that failed is not
+    # "cleared", so its prior threads must not be resolved on its account.
     prior_findings: list[Finding] = []
     prior_preamble: str = ''
     actionable: list[Finding] = []
     evidence_by_number: dict[int | None, list[tuple[str, str]]] = {}
     sources_by_number: dict[int | None, list[tuple[str, str]]] = {}
+    completed: set[int] = set()
     for i in range(rounds + 1):
         user_message = message
         if i > 0:
@@ -1758,7 +1807,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed, completed=completed)
         # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
         # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
         # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already
@@ -1800,7 +1849,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             _label_reviewer_number(f['label']), list(f.get('evidence') or []))
         f['sources'] = sources_by_number.get(
             _label_reviewer_number(f['label']), list(f.get('sources') or []))
-    return dedup_by_location(actionable)
+    return dedup_by_location(actionable), completed
 
 
 async def run_review(args: Any) -> int:
@@ -1911,15 +1960,22 @@ async def run_review(args: Any) -> int:
         # re-found across runs, a sampling fluke is not. Each pass uses a fresh scratchpad and a
         # distinct seed so a seed-honoring provider samples independently.
         passes: list[list[Finding]] = []
+        completed: set[int] = set()
         for i in range(consensus_n):
             pass_ctx = tools.ToolContext(
                 phase='review', workdir=cwd, notes=[], require_evidence=True)
-            passes.append(await _review_pass(
+            pass_findings, pass_completed = await _review_pass(
                 reviewers, message, model, base_name, base_ref, rounds, guidance,
                 pass_ctx, prior_block_by_number, prior_labels_by_number,
-                reasoning_effort, REVIEW_SEED + i, args.debug))
+                reasoning_effort, REVIEW_SEED + i, args.debug)
+            passes.append(pass_findings)
+            completed |= pass_completed
         threshold = consensus_n // 2 + 1
         union = dedup_findings([f for p in passes for f in p])
+        # Every label any pass raised (corroborated or not): a reviewer that raised a finding —
+        # even one the consensus vote or the evidence gate later dropped — did not CONCEDE it, so
+        # its prior thread must not be resolved on this pass.
+        raised_labels = {f['label'] for f in union}
         actionable = _corroborated(union, passes, threshold)
         # A corroborated finding is raised by several independent passes, each with its OWN git
         # evidence; `dedup_findings` kept only the first pass's ledger. Merge every pass's evidence
@@ -1944,10 +2000,13 @@ async def run_review(args: Any) -> int:
     else:
         tool_ctx = tools.ToolContext(
             phase='review', workdir=cwd, notes=[], require_evidence=True)
-        actionable = await _review_pass(
+        actionable, completed = await _review_pass(
             reviewers, message, model, base_name, base_ref, rounds, guidance,
             tool_ctx, prior_block_by_number, prior_labels_by_number,
             reasoning_effort, REVIEW_SEED, args.debug)
+        # Every label the panel raised: a reviewer that raised a finding — even one the evidence
+        # gate later dropped — did not concede it, so its prior thread must not be resolved.
+        raised_labels = {f['label'] for f in actionable}
 
     # Deterministic anti-hallucination gate (before consolidation): drop a finding whose concrete
     # references do not hold up — a named symbol or cited file the reviewer never actually read,
@@ -2009,7 +2068,12 @@ async def run_review(args: Any) -> int:
     print(render_findings(actionable, base_name))
 
     if args.post_review:
-        active_numbers = [num for _n, _b, num in reviewers]
+        # Only reviewers that actually RAN this pass (did not throw) "cleared" it: a crashed
+        # reviewer neither conceded nor re-raised its prior findings, so resolving its threads on a
+        # failure would close a legitimate open finding as if it had been settled. `completed`
+        # holds exactly the numbers that ran.
+        active_numbers = sorted(completed)
         await post_review(
-            args.pr, actionable, full_diff, cwd, active_numbers=active_numbers)
+            args.pr, actionable, full_diff, cwd, active_numbers=active_numbers,
+            raised_labels=raised_labels)
     return 0
