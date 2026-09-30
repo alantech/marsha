@@ -551,6 +551,42 @@ def test_run_personas_budget_exhausted_not_completed() -> None:
     assert completed == set()  # cut off mid-investigation, not "cleared"
 
 
+def test_run_personas_malformed_output_not_completed() -> None:
+    # A reviewer response that is neither a command, the "NO FINDINGS" all-clear, nor a findings
+    # report is malformed output: it is not marked completed (its prior threads are never resolved
+    # on its account) and it reports no finding. A clean "NO FINDINGS" IS a clean completion.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[])
+    completed: set[int] = set()
+
+    async def malformed_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                              max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        return 'I think this is roughly fine overall.'  # not a command, no findings, not the phrase
+
+    with patch.object(tools, 'run_with_tools', new=malformed_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        fs = asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
+            completed=completed))
+    assert fs == []
+    assert completed == set()
+
+    completed2: set[int] = set()
+
+    async def all_clear_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                              max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        return 'NO FINDINGS'
+
+    with patch.object(tools, 'run_with_tools', new=all_clear_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        fs2 = asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
+            completed=completed2))
+    assert fs2 == []
+    assert completed2 == {1}  # an explicit all-clear is a clean completion
+
+
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
