@@ -529,6 +529,28 @@ def test_run_personas_completed_excludes_failed_reviewers() -> None:
     assert completed == {1}  # Sage ran; Eli threw and is not "cleared"
 
 
+def test_run_personas_budget_exhausted_not_completed() -> None:
+    # A reviewer that exhausts its tool budget (its last response is still a `$` command, not a
+    # findings report) was cut off mid-investigation: it is not marked completed (so its prior
+    # threads are never resolved on its account) and it reports no finding.
+    base = tools.ToolContext(phase='review', workdir='.', notes=[])
+    completed: set[int] = set()
+
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None, debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        return 'Investigating the call graph.\n$ git show HEAD:calc.py'  # still a command
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+         patch.object(personas, 'get_mapper',
+                      new=lambda *a, **k: types.SimpleNamespace(n_results=1)):
+        fs = asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', tool_ctx=base,
+            completed=completed))
+
+    assert fs == []
+    assert completed == set()  # cut off mid-investigation, not "cleared"
+
+
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 

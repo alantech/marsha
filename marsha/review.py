@@ -1801,13 +1801,20 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             user_message += prior_round_block(
                 prior_findings, prior_preamble, 'the conventions review')
             user_message += _REFUTE_CONFIDENCE_RULE
+        round_completed: set[int] = set()
         findings = await run_personas(
             reviewers, user_message, model, 'review',
             debug=debug, loop='review', guidance=guidance,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed, completed=completed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            completed=round_completed)
+        # Only the FINAL round's clean completions count as "cleared": a reviewer that ran an
+        # earlier round but then failed or was cut off in a later revision round did not complete
+        # the pass, so it must not be resolved on its account. Reassign (not accumulate) so the
+        # last round to run is authoritative.
+        completed = round_completed
         # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
         # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
         # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already

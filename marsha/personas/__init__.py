@@ -450,11 +450,19 @@ async def run_personas(
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
             return []
+        if tools.extract_pending_command(text) is not None:
+            # The reviewer exhausted its tool budget: its last response is still a `$` command,
+            # not a findings report, so it was cut off mid-investigation. It did not cleanly finish
+            # the pass, so it is not "cleared" (its prior threads must not be resolved on its
+            # account), and a half-finished command is not a finding to report.
+            log(f'personas: {label} exhausted its tool budget; not treated as completed')
+            return []
         if completed is not None:
-            # This reviewer ran without throwing (whether or not it found anything): it genuinely
-            # "cleared" this pass, so its prior threads may be resolved as conceded. A reviewer
-            # that threw (the except path above) is NOT added, so a failure never resolves its
-            # prior findings as if it had conceded them.
+            # This reviewer ran without throwing and finished cleanly (whether or not it found
+            # anything): it genuinely "cleared" this pass, so its prior threads may be resolved as
+            # conceded. A reviewer that threw (the except path above) or was cut off at the budget
+            # (above) is NOT added, so a failure never resolves its prior findings as if it had
+            # conceded them.
             completed.add(review_number)
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
