@@ -2312,6 +2312,45 @@ def test_post_review_resolves_conceded_thread() -> None:
     assert resolved == ['PRRT_C2']
 
 
+def test_post_review_skips_resolution_on_incomplete_threads() -> None:
+    # Resolving a thread is irreversible: when a page fetch fails and the thread list is
+    # incomplete, the concede pass is withheld entirely — nothing is resolved this round, even
+    # a thread that is visible and conceded.
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'foo.py:2', 'desc': 'still stands'},
+    ]
+    page1 = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'endCursor': 'CUR1', 'hasNextPage': True},
+        'nodes': [
+            {'id': 'PRRT_C2', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 22, 'path': 'bar.py', 'line': 5,
+                 'body': '**[C2] MINOR**: conceded point'}]}},
+        ]}}}}})
+    resolved = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'resolveReviewThread' in joined:
+            m = re.search(r'threadId: "([^"]+)"', joined)
+            resolved.append(m.group(1) if m else None)
+            return (0, '{"data": {}}', '')
+        if 'reviewThreads' in joined:
+            if 'after:' in joined:
+                return (1, '', 'boom')  # page 2 and its retry both fail
+            return (0, page1, '')
+        if '/reviews' in joined:
+            return (0, '{}', '')
+        return (0, '{}', '')
+
+    with patch.object(review, '_gh', new=fake_gh):
+        asyncio.run(review.post_review(123, findings, '', active_numbers=[1, 2]))
+
+    assert resolved == []
+
+
 def test_fetch_review_threads_parses_labels() -> None:
     # Only threads whose root comment leads with a [label] are matched; the label is the key and
     # the thread id / root databaseId / resolved flag are carried through for reply + resolve.
@@ -2333,8 +2372,9 @@ def test_fetch_review_threads_parses_labels() -> None:
         return (0, payload, '')
 
     with patch.object(review, '_gh', new=fake_gh):
-        threads = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+        threads, complete = asyncio.run(review._fetch_review_threads('acme/widget', 123))
 
+    assert complete is True
     assert set(threads) == {'A1', 'B2'}
     assert threads['A1'] == {'thread_id': 'PRRT_1', 'root_id': 999,
                              'is_resolved': False, 'path': 'foo.py', 'line': 2,
@@ -2366,8 +2406,9 @@ def test_fetch_review_threads_paginates() -> None:
         return (0, page1 if len(queries) == 1 else page2, '')
 
     with patch.object(review, '_gh', new=fake_gh):
-        threads = asyncio.run(review._fetch_review_threads('acme/widget', 123))
+        threads, complete = asyncio.run(review._fetch_review_threads('acme/widget', 123))
 
+    assert complete is True
     assert set(threads) == {'A1', 'B2'}
     assert len(queries) == 2
     assert 'after: "CUR1"' in queries[1]
@@ -2395,11 +2436,12 @@ def test_all_review_threads_partial_failure_keeps_first_pages() -> None:
         return (1, '', 'boom')
 
     with patch.object(review, '_gh', new=fake_gh):
-        nodes = asyncio.run(review._all_review_threads(
+        nodes, complete = asyncio.run(review._all_review_threads(
             'acme/widget', 123,
             'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
 
     assert [n.get('id') for n in nodes] == ['PRRT_1']
+    assert complete is False  # callers must not treat the partial list as the full set
     assert len(calls) == 3  # page 1, the failed page 2, and its one retry
 
 
@@ -2431,11 +2473,12 @@ def test_all_review_threads_retries_a_failed_page() -> None:
         return (0, page2, '')
 
     with patch.object(review, '_gh', new=fake_gh):
-        nodes = asyncio.run(review._all_review_threads(
+        nodes, complete = asyncio.run(review._all_review_threads(
             'acme/widget', 123,
             'id isResolved comments(first: 1) { nodes { databaseId path line body } }'))
 
     assert [n.get('id') for n in nodes] == ['PRRT_1', 'PRRT_2']
+    assert complete is True
     assert len(calls) == 3
 
 

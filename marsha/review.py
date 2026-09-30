@@ -248,7 +248,9 @@ async def gh_pr_context(num: int, cwd: str | None = None) -> str:
     repo = await _repo_name(cwd)
     owner, _, name = repo.partition('/')
     if owner and name:
-        nodes = await _all_review_threads(
+        # A partial list (a failed later page, logged by the fetcher) is still better context
+        # than none for the reviewer.
+        nodes, _complete = await _all_review_threads(
             repo, num,
             'comments(first: 20) { nodes { isMinimized path line body '
             'author { login } } }', cwd)
@@ -636,14 +638,17 @@ def _label_reviewer_number(label: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | None = None) -> list[dict[str, Any]]:
+async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | None = None) -> tuple[list[dict[str, Any]], bool]:
     # Every review thread on the PR, paginated 100 per page: a PR whose threads exceed one page
     # would otherwise silently lose every thread past the first 100 — for reply routing and
     # thread resolution, a lost thread is a finding that can never be replied to or closed.
+    # Returns (nodes, complete): complete is False when a fetch/parse failure (after one retry)
+    # stopped pagination early, so callers never mistake a partial list for the full set — in
+    # particular, the irreversible actions (resolving a thread) wait for a complete list.
     # `fields` is the per-thread node selection (id, isResolved, comments(first: N) { ... }).
     owner, _, name = repo.partition('/')
     if not owner or not name:
-        return []
+        return [], False
     nodes: list[dict[str, Any]] = []
     after: str | None = None
     while True:
@@ -660,37 +665,34 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
             rc, out, err = await _gh(
                 'api', 'graphql', '-f', f'query={query}', cwd=cwd, timeout=120)
         if rc != 0 or not out.strip():
-            # A first-page failure yields no threads (callers degrade as before). A
-            # LATER-page failure yields a PARTIAL list: the threads on the lost pages are
-            # invisible to this pass — their findings are not replied to or resolved — so
-            # the failure must not be silent.
             log(f'review: PR #{pr_num} review-thread fetch failed'
                 + (f' after {len(nodes)} thread(s); later pages are invisible '
                    f'to this pass' if nodes else '') + f': {err or out}')
-            return nodes
+            return nodes, False
         try:
             data = json.loads(out)
         except ValueError as e:
             log(f'review: could not parse review threads for PR #{pr_num}'
                 + (f' after {len(nodes)} thread(s); later pages are invisible '
                    f'to this pass' if nodes else '') + f': {e}')
-            return nodes
+            return nodes, False
         rt = (((data.get('data') or {}).get('repository')
                or {}).get('pullRequest') or {}).get('reviewThreads') or {}
         nodes.extend(rt.get('nodes') or [])
         info = rt.get('pageInfo') or {}
         if not info.get('hasNextPage') or not info.get('endCursor'):
-            return nodes
+            return nodes, True
         after = info['endCursor']
 
 
-async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) -> dict[str, dict[str, Any]]:
+async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) -> tuple[dict[str, dict[str, Any]], bool]:
     # Map a posted finding's [label] (e.g. "A2") -> its review thread, so a re-run can reply on
     # the thread the finding opened, or resolve it if the finding is no longer raised. Only
     # threads whose root comment leads with a [label] (i.e. ones Marsha posted) are matched;
     # human comments and pre-label comments are ignored. Returns
-    # label -> {thread_id, root_id, is_resolved, path, line}.
-    nodes = await _all_review_threads(
+    # (label -> {thread_id, root_id, is_resolved, path, line}, complete) — complete is False
+    # when a failed page left the map partial, so the caller can withhold irreversible actions.
+    nodes, complete = await _all_review_threads(
         repo, pr_num,
         'id isResolved comments(first: 1) { nodes { databaseId path line body } }',
         cwd)
@@ -713,7 +715,7 @@ async def _fetch_review_threads(repo: str, pr_num: int, cwd: str | None = None) 
             'line': root.get('line'),
             'desc': (fm.group(3).strip() if fm else ''),
         }
-    return threads
+    return threads, complete
 
 
 async def _prior_conversations(repo: str, pr_num: int, cwd: str | None = None) -> list[dict[str, Any]]:
@@ -721,7 +723,10 @@ async def _prior_conversations(repo: str, pr_num: int, cwd: str | None = None) -
     # was resolved — so the consolidation pass can see a concern's whole history and drop a finding
     # that re-opens an already-settled conversation. Returns
     # [ {label, location, desc, replies, is_resolved} ] (resolved and unresolved alike).
-    nodes = await _all_review_threads(
+    # A partial list (a failed later page, logged by the fetcher) is still better context than
+    # none: the consolidation pass drops what it sees as settled, and an unseen settled
+    # conversation costs one noisy re-raise that the next pass dedups — not an irreversible act.
+    nodes, _complete = await _all_review_threads(
         repo, pr_num,
         'isResolved comments(first: 8) { nodes { path line body } }', cwd)
     convs: list[dict[str, Any]] = []
@@ -752,7 +757,10 @@ async def _prior_findings_by_reviewer(pr_num: int, cwd: str | None = None) -> di
     # finding, whether to re-raise (reusing the exact label) or concede. Returns
     # reviewer_number -> [ {label, severity, location, desc, replies} ].
     repo = await _repo_name(cwd)
-    nodes = await _all_review_threads(
+    # A partial list (a failed later page, logged by the fetcher) is still better context than
+    # none: a reviewer shown SOME of its priors re-raises at most the unseen ones, and the next
+    # pass dedups them — not an irreversible act.
+    nodes, _complete = await _all_review_threads(
         repo, pr_num,
         'isResolved comments(first: 10) { nodes { isMinimized path line body } }',
         cwd)
@@ -1483,14 +1491,20 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
         # ran this pass and raised nothing, so every open thread one of them opened is conceded
         # like on any other pass and resolved — without this, a finding fixed since the last
         # pass would sit open on the PR until a pass with findings happens to run again.
-        threads = await _fetch_review_threads(repo, pr_num, cwd)
+        # Resolution is an irreversible act, so it is withheld when the thread list is
+        # incomplete (a failed page): the threads simply stay open until a complete fetch.
+        threads, complete = await _fetch_review_threads(repo, pr_num, cwd)
         active = set(active_numbers or [])
         closed = 0
-        for label, thread in threads.items():
-            if thread['is_resolved'] or _label_reviewer_number(label) not in active:
-                continue
-            if await _resolve_thread(thread['thread_id'], cwd):
-                closed += 1
+        if complete:
+            for label, thread in threads.items():
+                if thread['is_resolved'] or _label_reviewer_number(label) not in active:
+                    continue
+                if await _resolve_thread(thread['thread_id'], cwd):
+                    closed += 1
+        else:
+            log(f'review: PR #{pr_num} all-clear: skipping thread resolution, the '
+                f'thread list is incomplete (a page fetch failed)')
         await _post_all_clear(repo, pr_num, cwd)
         summary = f'All clear: posted a no-issues note to PR #{pr_num}.'
         if closed:
@@ -1506,8 +1520,11 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
         anchorable = diff_new_lines(diff_text)
     # Prior threads keyed by the [label] of their root finding. A finding re-raised under a label
     # that already has a thread replies there (the reviewer still stands by it) rather than
-    # opening a new top-level comment, so the PR reads as one thread per point.
-    threads = await _fetch_review_threads(repo, pr_num, cwd)
+    # opening a new top-level comment, so the PR reads as one thread per point. complete is
+    # False when a failed page left the map partial (the fetcher logged it); replies on the
+    # VISIBLE threads are still safe, but the irreversible resolution below waits for a
+    # complete list.
+    threads, complete = await _fetch_review_threads(repo, pr_num, cwd)
     # A reviewer's label can collide with an unrelated prior thread (e.g. a new finding that took
     # a position a closed finding used). Reassign any such label so a reply never lands on the
     # wrong thread, and so the old thread can be resolved by the concede pass below.
@@ -1581,17 +1598,24 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str, cwd:
                 f'Failed to reply to PR #{pr_num} thread {cid}: {err or out}')
     # Concede: a prior finding the reviewer no longer raises is closed by resolving its thread.
     # Only threads whose reviewer ran this pass are touched, so a changed panel cannot close
-    # threads for reviewers that were not re-run.
+    # threads for reviewers that were not re-run. Resolving is irreversible (GitHub offers no
+    # un-resolve), so the pass is withheld entirely when the thread list is incomplete: a thread
+    # on a lost page cannot be judged conceded, and this round's resolutions simply wait for a
+    # complete fetch.
     active = set(active_numbers or [])
     raised = {f['label'] for f in findings}
     closed = 0
-    for label, thread in threads.items():
-        if thread['is_resolved'] or label in raised:
-            continue
-        if _label_reviewer_number(label) not in active:
-            continue
-        if await _resolve_thread(thread['thread_id'], cwd):
-            closed += 1
+    if complete:
+        for label, thread in threads.items():
+            if thread['is_resolved'] or label in raised:
+                continue
+            if _label_reviewer_number(label) not in active:
+                continue
+            if await _resolve_thread(thread['thread_id'], cwd):
+                closed += 1
+    else:
+        log(f'review: PR #{pr_num}: skipping thread resolution, the thread list '
+            f'is incomplete (a page fetch failed)')
     summary = (
         f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
         f'{len(replies)} replies, {len(body_findings)} in the review body, '
