@@ -12,6 +12,15 @@ conceding it ("fixed", "agreed, will change", "good point, done"). The bar is hi
 closing a thread is permanent: GitHub offers no un-resolve, and a thread you clear wrongly is a
 real finding silenced forever.
 
+The line a thread cites is where the concern was OBSERVED, not where it was necessarily FIXED. A
+concern is usually cleared by changing the code that IMPLEMENTS the behavior the concern is about —
+a different function, or even a different file from the one cited. Before you decide, trace the
+concern to where that behavior actually lives: read the function the cited line calls, `git grep`
+the relevant symbol, and open the file that defines it. You may call a thread CLEARED only after
+you have read the code that implements the concern — not merely the cited line. A fix in a file the
+thread does not cite is expected; find it and verify it there, and let what you read show in your
+evidence.
+
 A thread is STILL-RAISED when a finding the panel just raised restates the same concern, even if
 under a different label or at a shifted line — match the substance of the concern, not the words or
 the line number. You never clear or dismiss a thread that a current finding re-opens; that is the

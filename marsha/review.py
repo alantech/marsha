@@ -740,15 +740,27 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
         '\n\n# Findings the panel raised just now\n\n' + (
             findings_block if findings_block
             else '(the panel raised no findings this pass)'))
+    # The files this PR changed, so Ada can spot when a concern was fixed in a file the thread
+    # does not cite (the cited line is where the concern was seen, not where it was fixed).
+    # Best-effort: if the list cannot be computed, the hint is simply omitted.
+    try:
+        changed = await changed_files(base_ref, 'HEAD', cwd)
+    except Exception:
+        changed = ''
+    changed_section = (
+        "\n\n# Files this PR changed (a thread's fix may live in one of these, even when the "
+        'thread cites a different line)\n\n' + changed
+        if changed.strip() else '')
     user = (
         f'Judge the open review threads below against the code as it is in the '
         f'current checkout (default branch `{base_name}`); `{base_ref}` is only '
         f'the diff base and is not the code under test. For each thread, read '
         f'the code it points at in the checkout with the git tool '
         f'(`git show HEAD:<path>`) and decide CLEARED, STILL-RAISED, or '
-        f'UNCLEAR, one verdict per thread.\n\n'
+        f'UNCLEAR, one verdict per thread. The cited line is where the concern was seen; the fix '
+        f'may be elsewhere, so trace it to the code that implements the concern.\n\n'
         f'# Open threads to judge\n\n' + '\n\n'.join(thread_lines)
-        + findings_section)
+        + findings_section + changed_section)
     # Run the archivist, retrying once if it returns no recognized verdict: a flaky response that
     # announces a tool call without issuing the command would otherwise end the loop at round 0
     # with no evidence and no verdict, leaving every thread open (fail-closed is safe, but a
