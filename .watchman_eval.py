@@ -78,6 +78,12 @@ def main() -> int:
         '--retries', type=int, default=3,
         help='Retry a fixture this many times if its watchman call fails (transient error)')
     args = parser.parse_args()
+    if not 1 <= args.threshold <= 100:
+        # A threshold outside 1..100 is meaningless: a negative (or zero) threshold makes
+        # `correct * 100 < total * threshold` always false, so the suite would pass at any
+        # accuracy. Reject it before scoring (and before any provider call).
+        parser.error(f'--threshold must be an integer between 1 and 100 '
+                     f'(got {args.threshold})')
 
     # Select the provider in-process so get_mapper/resolve_provider pick it up for the watchman.
     from marsha.config import set_cli_provider

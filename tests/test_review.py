@@ -1326,6 +1326,20 @@ def test_watchman_validate_fails_closed(repo: Any) -> None:
     assert out == {}  # failed -> nothing validated
 
 
+def test_watchman_validate_unrecognized_word_is_no_verdict(repo: Any) -> None:
+    # A response that names the thread but uses a word that is neither VALIDATED nor NOT-VALIDATED
+    # is not a recognized verdict: the thread is 'no-verdict', not a spurious 'not-validated' (which
+    # the eval would otherwise score as a correct negative on a cheating fixture).
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    evidence = [('git show HEAD:src/calc.py', 'def compute_total(a, b):\n    return a + b')]
+    with patch.object(review, 'get_mapper',
+                      new=lambda *a, **k: _watchman_mapper('[A1] - MAYBE')()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'no-verdict'}
+
+
 def test_archivist_clearance_downgrades_unvalidated_clear(repo: Any) -> None:
     # The archivist clears a thread, but the watchman does not validate the clearance (no basis in
     # the record), so the clear is downgraded to UNCLEAR and the thread stays open.
@@ -1365,6 +1379,54 @@ def test_archivist_clearance_downgrades_unvalidated_clear(repo: Any) -> None:
         verdicts = asyncio.run(review._archivist_clearance(
             candidates, [], 'm', 'main', 'main', repo))
     assert verdicts['PRRT_B9'] == 'unclear'  # cleared by archivist, rejected by watchman
+
+
+def test_archivist_clearance_retries_on_no_verdict(repo: Any) -> None:
+    # The archivist's first response is a tool-call intent with no command and no verdict line (the
+    # r29 flake): it is retried once with a fresh ledger, and the retry's verdict is used — so the
+    # thread is cleared (and watchman-validated) rather than left open by the flake.
+    instances: list[Any] = []
+
+    class FlakyArchivist:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            self.flaky = len(instances) == 0  # the first instance (attempt 1) is the flake
+            instances.append(self)
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            if self.flaky:
+                return 'I need to inspect the file before deciding.'
+            return '[B9] - CLEARED (tools.py:2101)'
+
+    class WatchmanMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return '[B9] - VALIDATED'
+
+    def fake_get_mapper(system: Any, **k: Any) -> Any:
+        if 'watchman' in (k.get('label') or ''):
+            return WatchmanMapper()
+        return FlakyArchivist()
+
+    candidates = [{'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
+                   'desc': 'fixed gap', 'replies': []}]
+
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=fake_get_mapper):
+        verdicts = asyncio.run(review._archivist_clearance(
+            candidates, [], 'm', 'main', 'main', repo))
+    assert len(instances) == 2  # the no-verdict first response triggered exactly one retry
+    assert verdicts['PRRT_B9'] == 'cleared'  # the retry's verdict is honored (validated)
 
 
 # --- the multi-round review loop ---------------------------------------------

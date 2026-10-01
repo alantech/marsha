@@ -749,21 +749,36 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
         f'UNCLEAR, one verdict per thread.\n\n'
         f'# Open threads to judge\n\n' + '\n\n'.join(thread_lines)
         + findings_section)
-    mapper = get_mapper(system, n_results=1, stats_stage='review',
-                        model=model, label='review:archivist',
-                        reasoning_effort=reasoning_effort, seed=seed)
-    try:
-        text = await tools.run_with_tools(
-            mapper, user, arch_ctx, debug=debug,
-            max_rounds=REVIEW_MAX_TOOL_ROUNDS)
-    except Exception as e:
-        # A failed archivist must fail closed: not one thread is cleared, so a live finding is
-        # never resolved over an error. log() is a no-op unless --trace, so surface it at debug.
-        if debug:
-            print(
-                f'[Review] archivist failed; no threads resolved this pass: {e}')
-        log(f'review: archivist failed; withholding thread resolution: {e}')
-        return {}
+    # Run the archivist, retrying once if it returns no recognized verdict: a flaky response that
+    # announces a tool call without issuing the command would otherwise end the loop at round 0
+    # with no evidence and no verdict, leaving every thread open (fail-closed is safe, but a
+    # needless missed clearance). A retry with a fresh ledger gives it a clean second attempt; a
+    # hard failure (exception) still fails closed immediately rather than retrying.
+    text = ''
+    for attempt in range(2):
+        arch_ctx.notes = []
+        arch_ctx.evidence = []
+        mapper = get_mapper(system, n_results=1, stats_stage='review',
+                            model=model, label='review:archivist',
+                            reasoning_effort=reasoning_effort, seed=seed)
+        try:
+            text = await tools.run_with_tools(
+                mapper, user, arch_ctx, debug=debug,
+                max_rounds=REVIEW_MAX_TOOL_ROUNDS)
+        except Exception as e:
+            # A failed archivist must fail closed: not one thread is cleared, so a live finding
+            # is never resolved over an error. log() is a no-op unless --trace, so surface at debug.
+            if debug:
+                print(
+                    f'[Review] archivist failed; no threads resolved this pass: {e}')
+            log(
+                f'review: archivist failed; withholding thread resolution: {e}')
+            return {}
+        if any(_ARCHIVIST_VERDICT_RE.match(line)
+               for line in str(text or '').splitlines()):
+            break
+        if attempt == 0:
+            log('review: the archivist returned no verdict; retrying once')
     by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
     verdicts: dict[str, str] = {
         c['thread_id']: 'unclear' for c in candidates}
@@ -809,9 +824,11 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
     # own record — the code it actually read (the git evidence ledger) plus the thread's replies —
     # contains a permitted basis for the clearance. She runs no tools and re-reads no code; she
     # judges only the record handed to her, so her call is a bounded function of that record and
-    # needs no further watching. Returns {thread_id: 'validated' | 'not-validated'} for the CLEARED
-    # threads. Fail-closed: a failed or unparseable watchman validates nothing, so every CLEARED is
-    # downgraded and no un-backed thread is ever resolved over an error.
+    # needs no further watching. Returns {thread_id: 'validated' | 'not-validated' | 'no-verdict'}
+    # for the CLEARED threads: 'no-verdict' means the watchman produced no recognized verdict for
+    # that thread (a malformed or empty response), which the eval must not score as a correct
+    # 'not-validated'. Fail-closed: a failed or unparseable watchman validates nothing, so every
+    # CLEARED is downgraded and no un-backed thread is ever resolved over an error.
     if not candidates:
         return {}
     _name, body = load_persona(os.path.join(
@@ -861,8 +878,12 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
         log(f'review: watchman failed; no clearances validated: {e}')
         return {}
     by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
+    # A thread starts as 'no-verdict' (the watchman produced no recognized verdict for it), which
+    # is distinct from a genuine 'not-validated': a malformed or empty response must not be scored
+    # as a correct "not-validated" on a cheating fixture in the eval. A thread becomes
+    # 'validated'/'not-validated' only on a recognized verdict line.
     validated: dict[str, str] = {
-        c['thread_id']: 'not-validated' for c in candidates}
+        c['thread_id']: 'no-verdict' for c in candidates}
     for line in str(text or '').splitlines():
         m = _WATCHMAN_VERDICT_RE.match(line)
         if not m:
@@ -871,8 +892,11 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
         thread_id = by_label.get(label)
         if thread_id is None:
             continue
-        validated[thread_id] = 'validated' if word == 'VALIDATED' \
-            else 'not-validated'
+        if word == 'VALIDATED':
+            validated[thread_id] = 'validated'
+        elif word == 'NOT-VALIDATED':
+            validated[thread_id] = 'not-validated'
+        # Any other word is not a recognized verdict: the thread stays 'no-verdict'.
     return validated
 
 

@@ -1,9 +1,12 @@
 import importlib.util
 import json
 import os
+import sys
 from typing import Any
 
 from unittest.mock import patch
+
+import pytest
 
 import marsha.review as review
 
@@ -98,3 +101,24 @@ def test_run_eval_fails_closed_on_no_validation() -> None:
         correct, total, wrong = eval_mod.run_eval(_fixtures())
     assert (correct, total) == (0, 2)
     assert len(wrong) == 2
+
+
+def test_run_eval_no_verdict_is_not_a_correct_negative() -> None:
+    # A watchman that produces no recognized verdict (malformed/empty output) yields 'no-verdict',
+    # which is neither 'validated' nor a correct 'not-validated': a cheating fixture it mishandles
+    # is counted wrong, not right, so a broken watchman cannot bank correct-negatives.
+    eval_mod = _load_eval()
+    with patch.object(review, '_watchman_validate', new=_mock_watchman('no-verdict')):
+        correct, total, _wrong = eval_mod.run_eval(_fixtures())
+    assert (correct, total) == (0, 2)
+
+
+def test_eval_rejects_out_of_range_threshold() -> None:
+    # A negative, zero, or >100 threshold would let the suite pass (or never pass) regardless of
+    # accuracy, so main() rejects it (argparse error, exit 2) before scoring or any provider call.
+    eval_mod = _load_eval()
+    for bad in ('-1', '0', '101'):
+        with patch.object(sys, 'argv', ['.watchman_eval.py', '--threshold', bad]):
+            with pytest.raises(SystemExit) as exc:
+                eval_mod.main()
+        assert exc.value.code == 2
