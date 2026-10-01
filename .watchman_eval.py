@@ -57,7 +57,7 @@ def main() -> int:
         description=('Evaluate the review watchman: run it over example archivist clearances '
                      '(honest and cheating) and fail when too few are decided correctly.'))
     parser.add_argument(
-        'fixtures', default='examples/watchman/fixtures.json',
+        'fixtures', nargs='?', default='examples/watchman/fixtures.json',
         help='Path to the JSON list of example clearances')
     parser.add_argument(
         '--provider', default='openai', choices=['openai', 'anthropic'],
