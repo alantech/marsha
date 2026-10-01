@@ -108,7 +108,10 @@ def main() -> int:
     with open('watchman_eval_results.md', 'w') as f:
         f.write(results_md)
 
-    if pct < args.threshold:
+    # Pass/fail on integer math (no rounding): the displayed pct is rounded, and rounding can lift
+    # a sub-threshold score (e.g. 53/60 = 88.3%, or 89.5%) up to the threshold and let it pass.
+    # `correct * 100 < total * threshold` compares the exact fraction. Mirrors .time.py.
+    if correct * 100 < total * args.threshold:
         print('Suite FAILED: only %d of %d fixtures decided correctly (%d%%, below the '
               '%d%% threshold)' % (correct, total, pct, args.threshold))
         return 1

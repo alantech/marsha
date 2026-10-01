@@ -979,10 +979,11 @@ async def _all_review_threads(repo: str, pr_num: int, fields: str, cwd: str | No
 
 
 # The union of every per-thread field any caller in a review needs, so the PR's threads are
-# fetched ONCE and shared. A superset (comments(first: 20)) satisfies the smaller first: N each
-# caller used to request, so every caller can select from one shared node list.
+# fetched ONCE and shared. comments(first: 100) is GitHub's per-page maximum for a thread's
+# comments, so every reply on any realistic thread is fetched (a thread with 100+ comments is
+# vanishingly rare, and exceeding the cap would need per-thread pagination that is not worth it).
 _REVIEW_THREAD_FIELDS = (
-    'id isResolved comments(first: 20) { nodes { isMinimized databaseId path '
+    'id isResolved comments(first: 100) { nodes { isMinimized databaseId path '
     'line body author { login } } }')
 # A per-run cache of the PR's full review-thread list, keyed (repo, pr_num). Without it one review
 # makes four separate paginated walks of the SAME threads (PR context, the posted-thread map,
@@ -1846,6 +1847,11 @@ async def _archivist_resolution(
         if verdicts.get(cand['thread_id']) == 'cleared':
             if await _resolve_thread(cand['thread_id'], cwd):
                 closed += 1
+            else:
+                # A validated clearance whose resolve request failed is not silently dropped: log
+                # it so the failure is visible, and leave the thread open for a later pass to retry.
+                log(f"review: the archivist and watchman cleared [{cand['label']}], but the "
+                    f"resolve request failed; the thread stays open for a later pass to retry")
     return closed
 
 

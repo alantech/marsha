@@ -36,10 +36,17 @@ jobs:
       - name: Run watchman eval
         id: run
         run: |
-          make watchman-eval provider=openai n_jobs=${{ github.event.inputs.n_jobs || 8 }} threshold=${{ github.event.inputs.threshold || 90 }}
+          # The workflow_dispatch inputs are untrusted: validate they are plain integers BEFORE
+          # they reach the shell (a non-numeric value, e.g. a newline + command, fails here rather
+          # than running with the API secret present). They are then passed as quoted arguments.
+          case "$N_JOBS" in ''|*[!0-9]*) echo "n_jobs must be a positive integer, got: $N_JOBS"; exit 1;; esac
+          case "$THRESHOLD" in ''|*[!0-9]*) echo "threshold must be an integer, got: $THRESHOLD"; exit 1;; esac
+          make watchman-eval provider=openai n_jobs="$N_JOBS" threshold="$THRESHOLD"
           results=$(echo $(cat watchman_eval_results.md) | tr '\n' ' ' | sed "s/# Watchman eval results //")
-          echo "results=$results" >> $GITHUB_OUTPUT
+          echo "results=$results" >> "$GITHUB_OUTPUT"
         env:
+          N_JOBS: ${{ github.event.inputs.n_jobs || 8 }}
+          THRESHOLD: ${{ github.event.inputs.threshold || 90 }}
           OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
       - name: Show results
         if: ${{ always() }}
