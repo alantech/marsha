@@ -873,11 +873,14 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
         if (cmd, out) not in seen:
             seen.add((cmd, out))
             evidence_lines.append(f'$ {cmd}\n{out}')
+    evidence_content = ('\n\n'.join(evidence_lines) if evidence_lines
+                        else '(the archivist read no code — it ran no git command)')
+    # The record is trusted (real git reads) but unbounded: many reads across the archivist's
+    # session can push the single watchman prompt past the context budget. The watchman is a
+    # one-shot tool-less call that bypasses the per-result pagination the tool loop applies, so
+    # bound the record to the review context limit here.
     evidence_block = ('\n\n# Code the archivist actually read\n\n'
-                      + '\n\n'.join(evidence_lines)
-                      if evidence_lines
-                      else '\n\n# Code the archivist actually read\n\n'
-                           '(the archivist read no code — it ran no git command)')
+                      + tools.truncate(evidence_content, limit=REVIEW_CONTEXT_LIMIT))
     # The thread text (its desc and replies) is untrusted PR data, wrapped so a malicious comment
     # cannot inject instructions into the clearance decision; the evidence block is the archivist's
     # real git reads (trusted) and is left unwrapped.
@@ -904,25 +907,32 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
         log(f'review: watchman failed; no clearances validated: {e}')
         return {}
     by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
-    # A thread starts as 'no-verdict' (the watchman produced no recognized verdict for it), which
-    # is distinct from a genuine 'not-validated': a malformed or empty response must not be scored
-    # as a correct "not-validated" on a cheating fixture in the eval. A thread becomes
-    # 'validated'/'not-validated' only on a recognized verdict line.
-    validated: dict[str, str] = {
-        c['thread_id']: 'no-verdict' for c in candidates}
+    # A thread starts with no recognized verdicts, which is distinct from a genuine
+    # 'not-validated': a malformed or empty response must not be scored as a correct
+    # "not-validated" on a cheating fixture in the eval. The watchman may name a thread more than
+    # once, so collect the set of recognized verdicts per thread and resolve it at the end: a
+    # thread is 'validated' only if that set is exactly {'validated'} — any conflict (both words
+    # seen) or absence is 'no-verdict', which fails closed since a clearance is honored only when
+    # the verdict is exactly 'validated'.
+    verdicts: dict[str, set[str]] = {c['thread_id']: set() for c in candidates}
     for line in str(text or '').splitlines():
         m = _WATCHMAN_VERDICT_RE.match(line)
         if not m:
             continue
         label, word = m.group(1).upper(), m.group(2).upper()
         thread_id = by_label.get(label)
-        if thread_id is None:
+        if thread_id is None or word not in ('VALIDATED', 'NOT-VALIDATED'):
             continue
-        if word == 'VALIDATED':
+        verdicts[thread_id].add('validated' if word ==
+                                'VALIDATED' else 'not-validated')
+    validated: dict[str, str] = {}
+    for thread_id, words in verdicts.items():
+        if words == {'validated'}:
             validated[thread_id] = 'validated'
-        elif word == 'NOT-VALIDATED':
+        elif words == {'not-validated'}:
             validated[thread_id] = 'not-validated'
-        # Any other word is not a recognized verdict: the thread stays 'no-verdict'.
+        else:
+            validated[thread_id] = 'no-verdict'
     return validated
 
 

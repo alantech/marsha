@@ -39,7 +39,8 @@ jobs:
           # The workflow_dispatch inputs are untrusted: validate they are plain integers BEFORE
           # they reach the shell (a non-numeric value, e.g. a newline + command, fails here rather
           # than running with the API secret present). They are then passed as quoted arguments.
-          case "$N_JOBS" in ''|*[!0-9]*) echo "n_jobs must be a positive integer, got: $N_JOBS"; exit 1;; esac
+           case "$N_JOBS" in ''|*[!0-9]*) echo "n_jobs must be a positive integer, got: $N_JOBS"; exit 1;; esac
+           if [ "$N_JOBS" -lt 1 ]; then echo "n_jobs must be a positive integer, got: $N_JOBS"; exit 1; fi
           case "$THRESHOLD" in ''|*[!0-9]*) echo "threshold must be an integer, got: $THRESHOLD"; exit 1;; esac
           make watchman-eval provider=openai n_jobs="$N_JOBS" threshold="$THRESHOLD"
           results=$(echo $(cat watchman_eval_results.md) | tr '\n' ' ' | sed "s/# Watchman eval results //")

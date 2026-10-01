@@ -83,7 +83,11 @@ def main() -> int:
         # `correct * 100 < total * threshold` always false, so the suite would pass at any
         # accuracy. Reject it before scoring (and before any provider call).
         parser.error(f'--threshold must be an integer between 1 and 100 '
-                     f'(got {args.threshold})')
+                      f'(got {args.threshold})')
+    if args.n_jobs < 1:
+        # A non-positive n_jobs is meaningless: it would silently run every fixture sequentially
+        # (the n_jobs > 1 branch is skipped), so reject it rather than masking a bad value.
+        parser.error(f'--n_jobs must be an integer of at least 1 (got {args.n_jobs})')
 
     # Select the provider in-process so get_mapper/resolve_provider pick it up for the watchman.
     from marsha.config import set_cli_provider

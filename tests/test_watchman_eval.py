@@ -122,3 +122,15 @@ def test_eval_rejects_out_of_range_threshold() -> None:
             with pytest.raises(SystemExit) as exc:
                 eval_mod.main()
         assert exc.value.code == 2
+
+
+def test_eval_rejects_non_positive_n_jobs() -> None:
+    # A zero or negative n_jobs is meaningless (it would silently run sequentially), so main()
+    # rejects it (argparse error, exit 2) before scoring or any provider call — mirroring the
+    # threshold guard and the workflow's positive-integer check on the same value.
+    eval_mod = _load_eval()
+    for bad in ('0', '-1'):
+        with patch.object(sys, 'argv', ['.watchman_eval.py', '--n_jobs', bad]):
+            with pytest.raises(SystemExit) as exc:
+                eval_mod.main()
+        assert exc.value.code == 2

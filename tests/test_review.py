@@ -1334,10 +1334,57 @@ def test_watchman_validate_unrecognized_word_is_no_verdict(repo: Any) -> None:
                    'desc': 'compute_total drops the x term', 'replies': []}]
     evidence = [('git show HEAD:src/calc.py', 'def compute_total(a, b):\n    return a + b')]
     with patch.object(review, 'get_mapper',
-                      new=lambda *a, **k: _watchman_mapper('[A1] - MAYBE')()):
+                       new=lambda *a, **k: _watchman_mapper('[A1] - MAYBE')()):
         out = asyncio.run(review._watchman_validate(
             candidates, evidence, 'm', 'main', 'main', repo))
     assert out == {'PRRT_A1': 'no-verdict'}
+
+
+def test_watchman_validate_conflicting_verdicts_is_no_verdict(repo: Any) -> None:
+    # If the watchman names a thread with both VALIDATED and NOT-VALIDATED (a self-conflict), the
+    # verdicts do not resolve to a single word, so the thread is 'no-verdict', not 'validated'
+    # (last-wins would have honored the clearance). A clearance is honored only on exactly
+    # {'validated'}.
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    evidence = [('git show HEAD:src/calc.py', 'def compute_total(a, b):\n    return a + b')]
+    reply = '[A1] - VALIDATED\n[A1] - NOT-VALIDATED'
+    with patch.object(review, 'get_mapper', new=lambda *a, **k: _watchman_mapper(reply)()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'no-verdict'}
+
+
+def test_watchman_validate_truncates_large_evidence(repo: Any) -> None:
+    # The watchman is a single tool-less call that bypasses the tool loop's per-result
+    # pagination, so its (unbounded) evidence record is truncated to the review context limit
+    # before the prompt is built; an oversized read must not push the prompt unboundedly large.
+    captured: list[str] = []
+
+    class CapturingMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            captured.append(str(a[0]))
+            return '[A1] - VALIDATED'
+
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    big_read = 'x' * (review.REVIEW_CONTEXT_LIMIT * 2)
+    evidence = [('git show HEAD:src/calc.py', big_read)]
+    with patch.object(review, 'get_mapper', new=lambda *a, **k: CapturingMapper()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'validated'}
+    assert len(captured) == 1
+    # The oversized read was truncated, so the prompt carries the truncation marker rather than
+    # the full unbounded read.
+    assert '…[truncated]' in captured[0]
+    assert big_read not in captured[0]
 
 
 def test_archivist_clearance_downgrades_unvalidated_clear(repo: Any) -> None:
