@@ -578,6 +578,23 @@ order, and no other words. If a thread is CLEARED, prefer the line "[Label] - CL
 with the one file:line of the code you read that proves the concern is gone.
 '''
 
+# The watchman's output contract. The persona (Iris) carries the role and the standard (validate a
+# clearance only when the record shows a permitted basis); this fixes the machine-readable form.
+# She reports one verdict per CLEARED thread she was handed, nothing else.
+_WATCHMAN_CONTRACT = '''
+
+Your output is consumed mechanically, so its form is fixed; here you only report the work you have
+already done.
+
+Reply with exactly one line per thread you were handed, and nothing else, each in exactly this
+form:
+[Label] - VALIDATED
+[Label] - NOT-VALIDATED
+
+Use each thread's exact [Label]. Give every thread exactly one of the two verdicts, in the order
+you were given them, and no other words.
+'''
+
 
 async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
                       model: str | None, base_name: str, base_ref: str, debug: bool = False,
@@ -672,6 +689,11 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
 _ARCHIVIST_VERDICT_RE = re.compile(
     r'^\s*\[([A-Za-z]+\d+)\]\s*-\s*([A-Z]+(?:-[A-Z]+)*)')
 
+# One watchman verdict line: "[A2] - VALIDATED" or "[A2] - NOT-VALIDATED" — the same label/dash
+# shape as the archivist's, with the watchman's two verdict words.
+_WATCHMAN_VERDICT_RE = re.compile(
+    r'^\s*\[([A-Za-z]+\d+)\]\s*-\s*([A-Z]+(?:-[A-Z]+)*)')
+
 
 async def _archivist_clearance(candidates: list[dict[str, Any]],
                                findings: list[Finding],
@@ -756,7 +778,102 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
         verdicts[thread_id] = ('cleared' if word == 'CLEARED'
                                else 'still-raised' if word == 'STILL-RAISED'
                                else 'unclear')
+    # Watch the watchman: the archivist's CLEARED is only as good as the basis in its own record.
+    # Before any thread is honored, the watchman (Iris) checks, for each CLEARED, that the record
+    # the archivist actually produced (the code it read, plus the thread's replies) contains a
+    # permitted basis — a git read showing the concern gone, or a plainly conceding reply. A
+    # CLEARED the watchman cannot validate is downgraded to UNCLEAR, so a clearance without a
+    # verifiable basis never resolves a thread. Still-raised and unclear threads are untouched:
+    # they are not cleared, so there is nothing to watch.
+    cleared = [c for c in candidates
+               if verdicts.get(c['thread_id']) == 'cleared']
+    if cleared:
+        validated = await _watchman_validate(
+            cleared, arch_ctx.evidence, model, base_name, base_ref, cwd,
+            debug=debug, reasoning_effort=reasoning_effort, seed=seed)
+        for c in cleared:
+            if validated.get(c['thread_id']) != 'validated':
+                verdicts[c['thread_id']] = 'unclear'
+                log(f"review: the watchman did not validate the archivist's "
+                    f"clearance of [{c['label']}]; leaving the thread open")
     return verdicts
+
+
+async def _watchman_validate(candidates: list[dict[str, Any]],
+                             evidence: list[tuple[str, str]],
+                             model: str | None, base_name: str, base_ref: str,
+                             cwd: str | None, debug: bool = False,
+                             reasoning_effort: str | None = None,
+                             seed: int | None = None) -> dict[str, str]:
+    # The watchman (Iris): for each thread the archivist marked CLEARED, check that the archivist's
+    # own record — the code it actually read (the git evidence ledger) plus the thread's replies —
+    # contains a permitted basis for the clearance. She runs no tools and re-reads no code; she
+    # judges only the record handed to her, so her call is a bounded function of that record and
+    # needs no further watching. Returns {thread_id: 'validated' | 'not-validated'} for the CLEARED
+    # threads. Fail-closed: a failed or unparseable watchman validates nothing, so every CLEARED is
+    # downgraded and no un-backed thread is ever resolved over an error.
+    if not candidates:
+        return {}
+    _name, body = load_persona(os.path.join(
+        personas_dir(), '_review-watchman.md'))
+    system = body + _WATCHMAN_CONTRACT
+    # Each CLEARED thread the archivist cleared, with the code it points at and the replies on it
+    # (a plainly conceding reply is itself a permitted basis).
+    thread_lines: list[str] = []
+    for c in candidates:
+        line = f'- [{c["label"]}] {c["location"]} - {c["desc"]}'.strip()
+        replies = [r for r in (c.get('replies') or []) if (r or '').strip()]
+        if replies:
+            line += '\n  replies:'
+            line += '\n'.join(f'    {r.strip()}' for r in replies)
+        thread_lines.append(line)
+    # The code the archivist actually read (its git evidence ledger), the record the watchman
+    # checks the clearance against. The outputs are the real tool results, not the archivist's
+    # claim, so the watchman audits what was genuinely retrieved.
+    evidence_lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for cmd, out in (evidence or []):
+        if (cmd, out) not in seen:
+            seen.add((cmd, out))
+            evidence_lines.append(f'$ {cmd}\n{out}')
+    evidence_block = ('\n\n# Code the archivist actually read\n\n'
+                      + '\n\n'.join(evidence_lines)
+                      if evidence_lines
+                      else '\n\n# Code the archivist actually read\n\n'
+                           '(the archivist read no code — it ran no git command)')
+    user = (
+        f'The archivist cleared the review threads below. For each, decide whether its clearance '
+        f'is backed by a permitted basis in the record (default branch `{base_name}`, diff base '
+        f'ref `{base_ref}`): the code the archivist actually read shows the concern is gone, or a '
+        f'reply plainly concedes it. Judge only the record shown — do not assume what the archivist '
+        f'might have read.\n\n'
+        f'# Cleared threads to check\n\n' + '\n\n'.join(thread_lines)
+        + evidence_block)
+    mapper = get_mapper(system, n_results=1, stats_stage='review',
+                        model=model, label='review:watchman',
+                        reasoning_effort=reasoning_effort, seed=seed)
+    try:
+        text = await mapper.run(user)
+    except Exception as e:
+        # A failed watchman fails closed: it validates nothing, so no CLEARED is honored.
+        if debug:
+            print(f'[Review] watchman failed; no clearances validated: {e}')
+        log(f'review: watchman failed; no clearances validated: {e}')
+        return {}
+    by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
+    validated: dict[str, str] = {
+        c['thread_id']: 'not-validated' for c in candidates}
+    for line in str(text or '').splitlines():
+        m = _WATCHMAN_VERDICT_RE.match(line)
+        if not m:
+            continue
+        label, word = m.group(1).upper(), m.group(2).upper()
+        thread_id = by_label.get(label)
+        if thread_id is None:
+            continue
+        validated[thread_id] = 'validated' if word == 'VALIDATED' \
+            else 'not-validated'
+    return validated
 
 
 # The label a posted finding leads with, e.g. "[A2]" in "**[A2] MAJOR**: ...". Only Marsha's

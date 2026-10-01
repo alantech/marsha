@@ -1163,6 +1163,8 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
 def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
     # The archivist's per-thread verdicts are parsed: a CLEARED line clears that thread, while a
     # STILL-RAISED or UNCLEAR line (and any label absent from the output) leaves its thread open.
+    # The CLEARED thread is then handed to the watchman, which must validate it for the clear to
+    # hold; STILL-RAISED and UNCLEAR threads are never sent to the watchman.
     class VerdictMapper:
         system = ''
         model = 'm'
@@ -1175,20 +1177,37 @@ def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
                     '[C5] - STILL-RAISED\n'
                     '[D7] - UNCLEAR')
 
+    class WatchmanMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return '[B9] - VALIDATED'
+
+    def fake_get_mapper(system: Any, **k: Any) -> Any:
+        # Archivist and watchman both go through get_mapper; dispatch on the label so each gets
+        # its own fixed reply.
+        if 'watchman' in (k.get('label') or ''):
+            return WatchmanMapper()
+        return VerdictMapper()
+
     candidates = [
         {'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
-         'desc': 'fixed gap', 'replies': []},
+          'desc': 'fixed gap', 'replies': []},
         {'label': 'C5', 'thread_id': 'PRRT_C5', 'location': 'tools.py:2162',
-         'desc': 'gap too', 'replies': []},
+          'desc': 'gap too', 'replies': []},
         {'label': 'D7', 'thread_id': 'PRRT_D7', 'location': 'baz.py:9',
-         'desc': 'other', 'replies': []},
+          'desc': 'other', 'replies': []},
     ]
 
     async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
         return messages
 
     with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
-         patch.object(review, 'get_mapper', new=lambda *a, **k: VerdictMapper()):
+         patch.object(review, 'get_mapper', new=fake_get_mapper):
         verdicts = asyncio.run(review._archivist_clearance(
             candidates, [], 'm', 'main', 'main', repo))
     assert verdicts['PRRT_B9'] == 'cleared'
@@ -1225,6 +1244,127 @@ def test_archivist_clearance_no_candidates(repo: Any) -> None:
     # With no open threads to judge there is no archivist call and no verdict.
     assert asyncio.run(
         review._archivist_clearance([], [], 'm', 'main', 'main', repo)) == {}
+
+
+def _watchman_mapper(reply: str) -> Any:
+    # A fixed-reply mapper for the watchman's single tool-less call.
+    class WatchmanMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return reply
+
+    return WatchmanMapper
+
+
+def test_watchman_validate_honest_clear(repo: Any) -> None:
+    # A clearance whose record shows a permitted basis (the archivist read the cited code and it
+    # no longer has the concern) is validated.
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    evidence = [('git show HEAD:src/calc.py', 'def compute_total(a, b):\n    return a + b')]
+    with patch.object(review, 'get_mapper',
+                      new=lambda *a, **k: _watchman_mapper('[A1] - VALIDATED')()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'validated'}
+
+
+def test_watchman_validate_concession_reply(repo: Any) -> None:
+    # A plainly conceding reply is itself a permitted basis, even with no code read.
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term',
+                   'replies': ['Good point, fixed in the last commit.']}]
+    evidence: list[tuple[str, str]] = []
+    with patch.object(review, 'get_mapper',
+                      new=lambda *a, **k: _watchman_mapper('[A1] - VALIDATED')()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'validated'}
+
+
+def test_watchman_validate_cheat_clear(repo: Any) -> None:
+    # A clearance with no supporting basis in the record (the archivist read unrelated code and
+    # there is no concession) is not validated.
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    evidence = [('git show HEAD:README.md', '# readme\nunrelated content')]
+    with patch.object(review, 'get_mapper',
+                      new=lambda *a, **k: _watchman_mapper('[A1] - NOT-VALIDATED')()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'not-validated'}
+
+
+def test_watchman_validate_no_candidates(repo: Any) -> None:
+    # With no CLEARED threads there is no watchman call and nothing to validate.
+    assert asyncio.run(review._watchman_validate(
+        [], [], 'm', 'main', 'main', repo)) == {}
+
+
+def test_watchman_validate_fails_closed(repo: Any) -> None:
+    # A failed watchman validates nothing, so no clearance is honored (fail-closed).
+    class BoomMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            raise RuntimeError('boom')
+
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'a.py:1',
+                   'desc': 'x', 'replies': []}]
+    with patch.object(review, 'get_mapper', new=lambda *a, **k: BoomMapper()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, [('git show HEAD:a.py', 'x')], 'm', 'main', 'main', repo))
+    assert out == {}  # failed -> nothing validated
+
+
+def test_archivist_clearance_downgrades_unvalidated_clear(repo: Any) -> None:
+    # The archivist clears a thread, but the watchman does not validate the clearance (no basis in
+    # the record), so the clear is downgraded to UNCLEAR and the thread stays open.
+    class ArchivistMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return '[B9] - CLEARED (tools.py:2101)'
+
+    class WatchmanMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return '[B9] - NOT-VALIDATED'
+
+    def fake_get_mapper(system: Any, **k: Any) -> Any:
+        if 'watchman' in (k.get('label') or ''):
+            return WatchmanMapper()
+        return ArchivistMapper()
+
+    candidates = [{'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
+                   'desc': 'fixed gap', 'replies': []}]
+
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=fake_get_mapper):
+        verdicts = asyncio.run(review._archivist_clearance(
+            candidates, [], 'm', 'main', 'main', repo))
+    assert verdicts['PRRT_B9'] == 'unclear'  # cleared by archivist, rejected by watchman
 
 
 # --- the multi-round review loop ---------------------------------------------

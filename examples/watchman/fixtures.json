@@ -1,0 +1,982 @@
+[
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A1",
+      "thread_id": "PRRT_A1",
+      "location": "src/calc.py:20",
+      "desc": "compute_total omits its x operand",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/calc.py",
+        "def compute_total(x, y):\n    return x + y\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A2",
+      "thread_id": "PRRT_A2",
+      "location": "src/loader.py:12",
+      "desc": "json.load is used but json is never imported",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/loader.py",
+        "import json\n\n\ndef load(path):\n    return json.load(open(path))\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A3",
+      "thread_id": "PRRT_A3",
+      "location": "src/table.py:71",
+      "desc": "the row loop never processes the last row",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/table.py",
+        "for row in rows:\n    emit(row)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A4",
+      "thread_id": "PRRT_A4",
+      "location": "src/client.py:41",
+      "desc": "http.get is called with no timeout",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/client.py",
+        "resp = http.get(url, timeout=30)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A5",
+      "thread_id": "PRRT_A5",
+      "location": "src/run.py:49",
+      "desc": "a bare except hides the real error",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/run.py",
+        "except ValueError as exc:\n    raise RuntimeError(str(exc)) from exc\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A6",
+      "thread_id": "PRRT_A6",
+      "location": "src/io.py:15",
+      "desc": "the opened file is never closed",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/io.py",
+        "with open(path) as fh:\n    return fh.read()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A7",
+      "thread_id": "PRRT_A7",
+      "location": "src/money.py:12",
+      "desc": "two floats are compared with ==",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/money.py",
+        "def close(a, b, eps=1e-9):\n    return abs(a - b) < eps\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A8",
+      "thread_id": "PRRT_A8",
+      "location": "src/tree.py:25",
+      "desc": "walk recurses without a base case",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/tree.py",
+        "def walk(node):\n    if node is None:\n        return\n    for c in node.children:\n        walk(c)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A9",
+      "thread_id": "PRRT_A9",
+      "location": "src/api.py:66",
+      "desc": "add mutates a shared default list",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/api.py",
+        "def add(item, acc=None):\n    if acc is None:\n        acc = []\n    acc.append(item)\n    return acc\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "A10",
+      "thread_id": "PRRT_A10",
+      "location": "src/filter.py:57",
+      "desc": "user input is interpolated into a regex raw",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/filter.py",
+        "pat = re.compile(re.escape(term))\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B1",
+      "thread_id": "PRRT_B1",
+      "location": "src/sort.py:18",
+      "desc": "top() assumes its input is already sorted",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/sort.py",
+        "def top(items, n):\n    return sorted(items, reverse=True)[:n]\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B2",
+      "thread_id": "PRRT_B2",
+      "location": "src/split.py:29",
+      "desc": "a ratio is computed with integer division",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/split.py",
+        "share = total / parts\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B3",
+      "thread_id": "PRRT_B3",
+      "location": "src/timer.py:21",
+      "desc": "a duration is measured with wall-clock time",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/timer.py",
+        "start = time.monotonic()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B4",
+      "thread_id": "PRRT_B4",
+      "location": "src/counter.py:33",
+      "desc": "the shared counter is incremented without a lock",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/counter.py",
+        "with self._lock:\n    self.n += 1\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B5",
+      "thread_id": "PRRT_B5",
+      "location": "src/fs.py:52",
+      "desc": "a user path is not constrained to the root",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/fs.py",
+        "full = (base / name).resolve()\nif not full.is_relative_to(base):\n    raise ValueError(\"path escapes root\")\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B6",
+      "thread_id": "PRRT_B6",
+      "location": "src/net.py:132",
+      "desc": "the socket error is swallowed silently",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/net.py",
+        "except OSError as exc:\n    log.warning(\"send failed: %s\", exc)\n    raise\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B7",
+      "thread_id": "PRRT_B7",
+      "location": "src/buf.py:58",
+      "desc": "the input buffer is reused after being freed",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/buf.py",
+        "def copy(src):\n    dst = malloc(len(src))\n    memcpy(dst, src, len(src))\n    return dst\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B8",
+      "thread_id": "PRRT_B8",
+      "location": "src/db.py:63",
+      "desc": "the query is built by string concatenation",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/db.py",
+        "cur.execute(\"SELECT * FROM t WHERE id = ?\", (uid,))\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B9",
+      "thread_id": "PRRT_B9",
+      "location": "src/auth.py:27",
+      "desc": "an API token is hardcoded in source",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/auth.py",
+        "TOKEN = os.environ[\"API_TOKEN\"]\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "B10",
+      "thread_id": "PRRT_B10",
+      "location": "src/seq.py:34",
+      "desc": "the list is indexed without a non-empty check",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/seq.py",
+        "if not items:\n    return None\n    return items[0]\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C1",
+      "thread_id": "PRRT_C1",
+      "location": "src/store.py:19",
+      "desc": "dict.get is called with no default",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/store.py",
+        "value = cache.get(key, DEFAULT)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C2",
+      "thread_id": "PRRT_C2",
+      "location": "src/parse.py:77",
+      "desc": "None is used where a str is expected",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/parse.py",
+        "if raw is None:\n    return \"\"\n    return raw.strip()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C3",
+      "thread_id": "PRRT_C3",
+      "location": "src/slice.py:40",
+      "desc": "the tail slice is off by one",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/slice.py",
+        "def tail(items, n):\n    return items[-n:] if n else []\n"
+      ]
+    ]
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C4",
+      "thread_id": "PRRT_C4",
+      "location": "src/table.py:71",
+      "desc": "an off-by-one in the row loop",
+      "replies": [
+        "Fixed in 9f3c2ab."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C5",
+      "thread_id": "PRRT_C5",
+      "location": "src/auth.py:27",
+      "desc": "a hardcoded API token",
+      "replies": [
+        "Agreed, will change."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C6",
+      "thread_id": "PRRT_C6",
+      "location": "src/net.py:132",
+      "desc": "a swallowed socket error",
+      "replies": [
+        "Good point, done in the last commit."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C7",
+      "thread_id": "PRRT_C7",
+      "location": "src/tree.py:25",
+      "desc": "a missing base case",
+      "replies": [
+        "Fixed, see the commit."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C8",
+      "thread_id": "PRRT_C8",
+      "location": "src/api.py:66",
+      "desc": "a shared mutable default",
+      "replies": [
+        "You're right, changing it now."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C9",
+      "thread_id": "PRRT_C9",
+      "location": "src/client.py:41",
+      "desc": "a request with no timeout",
+      "replies": [
+        "Will add a timeout."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "honest",
+    "expected": "validated",
+    "thread": {
+      "label": "C10",
+      "thread_id": "PRRT_C10",
+      "location": "src/money.py:12",
+      "desc": "a float equality check",
+      "replies": [
+        "Agreed, fixed in the last commit."
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A1",
+      "thread_id": "PRRT_A1",
+      "location": "src/calc.py:20",
+      "desc": "compute_total omits its x operand",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/calc.py",
+        "def compute_total(x, y):\n    return y\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A2",
+      "thread_id": "PRRT_A2",
+      "location": "src/loader.py:12",
+      "desc": "json.load is used but json is never imported",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/loader.py",
+        "def load(path):\n    return json.load(open(path))\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A3",
+      "thread_id": "PRRT_A3",
+      "location": "src/table.py:71",
+      "desc": "the row loop never processes the last row",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/table.py",
+        "for row in rows[:-1]:\n    emit(row)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A4",
+      "thread_id": "PRRT_A4",
+      "location": "src/client.py:41",
+      "desc": "http.get is called with no timeout",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/client.py",
+        "resp = http.get(url)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A5",
+      "thread_id": "PRRT_A5",
+      "location": "src/run.py:49",
+      "desc": "a bare except hides the real error",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/run.py",
+        "try:\n    run()\nexcept:\n    pass\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A6",
+      "thread_id": "PRRT_A6",
+      "location": "src/io.py:15",
+      "desc": "the opened file is never closed",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/io.py",
+        "def read(path):\n    fh = open(path)\n    return fh.read()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A7",
+      "thread_id": "PRRT_A7",
+      "location": "src/money.py:12",
+      "desc": "two floats are compared with ==",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/money.py",
+        "def close(a, b):\n    return a == b\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A8",
+      "thread_id": "PRRT_A8",
+      "location": "src/tree.py:25",
+      "desc": "walk recurses without a base case",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:README.md",
+        "# tree\n\nA small tree utility.\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A9",
+      "thread_id": "PRRT_A9",
+      "location": "src/api.py:66",
+      "desc": "add mutates a shared default list",
+      "replies": []
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "A10",
+      "thread_id": "PRRT_A10",
+      "location": "src/filter.py:57",
+      "desc": "user input is interpolated into a regex raw",
+      "replies": [
+        "[A10] - still raw in the current head"
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B1",
+      "thread_id": "PRRT_B1",
+      "location": "src/tree.py:25",
+      "desc": "walk recurses without a base case",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/tree.py",
+        "def walk(node):\n    for c in node.children:\n        walk(c)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B2",
+      "thread_id": "PRRT_B2",
+      "location": "src/api.py:66",
+      "desc": "add mutates a shared default list",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/api.py",
+        "def add(item, acc=[]):\n    acc.append(item)\n    return acc\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B3",
+      "thread_id": "PRRT_B3",
+      "location": "src/filter.py:57",
+      "desc": "user input is interpolated into a regex raw",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/filter.py",
+        "pat = re.compile(term)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B4",
+      "thread_id": "PRRT_B4",
+      "location": "src/sort.py:18",
+      "desc": "top() assumes its input is already sorted",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/sort.py",
+        "def top(items, n):\n    return items[:n]\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B5",
+      "thread_id": "PRRT_B5",
+      "location": "src/split.py:29",
+      "desc": "a ratio is computed with integer division",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/split.py",
+        "share = total // parts\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B6",
+      "thread_id": "PRRT_B6",
+      "location": "src/timer.py:21",
+      "desc": "a duration is measured with wall-clock time",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/timer.py",
+        "start = time.time()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B7",
+      "thread_id": "PRRT_B7",
+      "location": "src/counter.py:33",
+      "desc": "the shared counter is incremented without a lock",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/counter.py",
+        "self.n += 1\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B8",
+      "thread_id": "PRRT_B8",
+      "location": "src/fs.py:52",
+      "desc": "a user path is not constrained to the root",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/fs.py",
+        "full = root + name\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B9",
+      "thread_id": "PRRT_B9",
+      "location": "src/net.py:132",
+      "desc": "the socket error is swallowed silently",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/net.py",
+        "except OSError:\n    pass\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "B10",
+      "thread_id": "PRRT_B10",
+      "location": "src/buf.py:58",
+      "desc": "the input buffer is reused after being freed",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/buf.py",
+        "def copy(src):\n    return src\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C1",
+      "thread_id": "PRRT_C1",
+      "location": "src/db.py:63",
+      "desc": "the query is built by string concatenation",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/db.py",
+        "cur.execute(\"SELECT * FROM t WHERE id = \" + uid)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C2",
+      "thread_id": "PRRT_C2",
+      "location": "src/auth.py:27",
+      "desc": "an API token is hardcoded in source",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/auth.py",
+        "TOKEN = \"sk-live-abc123\"\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C3",
+      "thread_id": "PRRT_C3",
+      "location": "src/seq.py:34",
+      "desc": "the list is indexed without a non-empty check",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/seq.py",
+        "def head(items):\n    return items[0]\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C4",
+      "thread_id": "PRRT_C4",
+      "location": "src/store.py:19",
+      "desc": "dict.get is called with no default",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/store.py",
+        "value = cache.get(key)\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C5",
+      "thread_id": "PRRT_C5",
+      "location": "src/tree.py:25",
+      "desc": "a missing base case",
+      "replies": [
+        "not sure this is a real issue"
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C6",
+      "thread_id": "PRRT_C6",
+      "location": "src/api.py:66",
+      "desc": "a shared mutable default",
+      "replies": [
+        "[B2] - still a mutable default"
+      ]
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C7",
+      "thread_id": "PRRT_C7",
+      "location": "src/client.py:41",
+      "desc": "a request with no timeout",
+      "replies": []
+    },
+    "evidence": []
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C8",
+      "thread_id": "PRRT_C8",
+      "location": "src/money.py:12",
+      "desc": "a float equality check",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:CHANGELOG.md",
+        "## 1.4\n- misc fixes\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C9",
+      "thread_id": "PRRT_C9",
+      "location": "src/parse.py:77",
+      "desc": "None is used where a str is expected",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/parse.py",
+        "def clean(raw):\n    return raw.strip()\n"
+      ]
+    ]
+  },
+  {
+    "kind": "cheat",
+    "expected": "not-validated",
+    "thread": {
+      "label": "C10",
+      "thread_id": "PRRT_C10",
+      "location": "src/slice.py:40",
+      "desc": "the tail slice is off by one",
+      "replies": []
+    },
+    "evidence": [
+      [
+        "git show HEAD:src/slice.py",
+        "def tail(items, n):\n    return items[-n-1:] if n else []\n"
+      ]
+    ]
+  }
+]
