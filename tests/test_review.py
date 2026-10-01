@@ -2502,6 +2502,48 @@ def test_post_review_all_clear_archivist_unclear_stays_open() -> None:
     assert resolved == ['PRRT_B9']  # C5 unclear -> left open, B9 verified fixed
 
 
+def test_post_review_all_clear_failed_resolve_surfaced(capsys: Any) -> None:
+    # A validated clearance whose resolve request fails is counted and surfaced in the normal-run
+    # summary (log() is a no-op without --trace), not dropped silently.
+    threads = json.dumps({'data': {'repository': {'pullRequest': {'reviewThreads': {
+        'pageInfo': {'hasNextPage': False},
+        'nodes': [
+            {'id': 'PRRT_B9', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 55, 'path': 'tools.py', 'line': 1,
+                 'body': '**[B9] MAJOR**: resolve fails'}]}},
+            {'id': 'PRRT_C5', 'isResolved': False, 'comments': {'nodes': [
+                {'databaseId': 66, 'path': 'tools.py', 'line': 2,
+                 'body': '**[C5] MAJOR**: resolve ok'}]}},
+        ]}}}}})
+    resolved: list[str] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        if a and a[0] == 'repo':
+            return (0, '{"nameWithOwner": "acme/widget"}', '')
+        joined = ' '.join(a)
+        if 'resolveReviewThread' in joined:
+            m = re.search(r'threadId: "([^"]+)"', joined)
+            tid = m.group(1) if m else ''
+            if tid == 'PRRT_B9':
+                return (1, '', 'boom')  # the resolve request fails for B9
+            resolved.append(tid)
+            return (0, '{"data": {}}', '')
+        if 'reviewThreads' in joined:
+            return (0, threads, '')
+        return (0, '{}', '')
+
+    async def fake_archivist(candidates: Any, findings: Any, *a: Any, **k: Any) -> Any:
+        return {c['thread_id']: 'cleared' for c in candidates}
+
+    with patch.object(review, '_gh', new=fake_gh), \
+         patch.object(review, '_archivist_clearance', new=fake_archivist):
+        asyncio.run(review.post_review(123, [], '', active_numbers=[9, 5]))
+
+    out = capsys.readouterr().out
+    assert resolved == ['PRRT_C5']  # B9's resolve failed, so only C5 was resolved
+    assert 'not resolvable' in out  # the failed clearance is surfaced, not silent
+
+
 def test_post_review_replies_on_existing_thread() -> None:
     # A finding re-raised under a label that already has a thread is posted as a reply on that
     # thread (not a new top-level comment); a fresh label at an in-diff line is a new inline.

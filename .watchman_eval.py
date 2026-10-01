@@ -84,6 +84,12 @@ def main() -> int:
     set_cli_provider(args.provider)
 
     fixtures = json.load(open(args.fixtures))
+    if not fixtures:
+        # An empty fixture list would make the threshold check vacuous (0 of 0: correct*100 <
+        # total*threshold is 0 < 0, False) and let the suite pass having evaluated nothing.
+        print('Suite FAILED: the fixture file is empty; an evaluation over zero fixtures '
+              'would vacuously meet the threshold')
+        return 1
     correct, total, wrong = run_eval(
         fixtures, model=args.model, seed=args.seed, n_jobs=args.n_jobs,
         max_retries=args.retries)

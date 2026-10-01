@@ -1802,18 +1802,19 @@ async def _archivist_resolution(
         active_numbers: list[int] | None, findings: list[Finding],
         repo: str, pr_num: int, cwd: str | None, model: str | None,
         base_name: str, base_ref: str, debug: bool,
-        reasoning_effort: str | None = None) -> int:
+        reasoning_effort: str | None = None) -> tuple[int, int]:
     # Concede a prior finding only on the archivist's git-grounded verdict. Resolution is
     # irreversible, so it is withheld entirely when the thread list is incomplete, and a thread
     # is resolved only when the archivist verified with the git tool that the code no longer has
     # the concern (or a reply concedes it). A thread the panel still raises, or that the
-    # archivist could not verify — including a failed archivist — stays open. Returns the
-    # number of threads resolved.
+    # archivist could not verify — including a failed archivist — stays open. Returns
+    # (resolved, failed): the threads resolved, and the validated clearances whose resolve
+    # request failed (the caller surfaces `failed`, since log() is a no-op without --trace).
     active = set(active_numbers or [])
     if not complete:
         log(f'review: PR #{pr_num}: withholding thread resolution, the '
             f'thread list is incomplete (a page fetch failed)')
-        return 0
+        return 0, 0
     # Prior OPEN threads the panel no longer raises by label: the archivist's candidates. A
     # thread the panel re-raised this pass (its label is in `findings`) is being replied to, not
     # cleared, so it is not a candidate; a thread owned by a reviewer not re-run this pass is
@@ -1832,7 +1833,7 @@ async def _archivist_resolution(
             'label': label, 'thread_id': thread['thread_id'],
             'location': location, 'desc': thread['desc'], 'replies': []})
     if not candidates:
-        return 0
+        return 0, 0
     # The replies on each candidate (where a user or the reviewer would plainly concede the
     # concern), so the archivist can clear on an explicit concession as well as on the code.
     convs = await _prior_conversations(repo, pr_num, cwd)
@@ -1843,16 +1844,19 @@ async def _archivist_resolution(
         candidates, findings or [], model, base_name, base_ref, cwd,
         debug=debug, reasoning_effort=reasoning_effort, seed=REVIEW_SEED)
     closed = 0
+    failed = 0
     for cand in candidates:
         if verdicts.get(cand['thread_id']) == 'cleared':
             if await _resolve_thread(cand['thread_id'], cwd):
                 closed += 1
             else:
-                # A validated clearance whose resolve request failed is not silently dropped: log
-                # it so the failure is visible, and leave the thread open for a later pass to retry.
+                failed += 1
+                # A validated clearance whose resolve request failed is not silently dropped: it is
+                # counted so the caller surfaces it in a normal run (log() alone is a no-op without
+                # --trace), and the thread stays open for a later pass to retry.
                 log(f"review: the archivist and watchman cleared [{cand['label']}], but the "
                     f"resolve request failed; the thread stays open for a later pass to retry")
-    return closed
+    return closed, failed
 
 
 async def post_review(pr_num: int, findings: list[Finding], diff_text: str,
@@ -1873,13 +1877,15 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str,
         # this panel's reviewers, so a changed panel cannot close threads for reviewers it did
         # not re-run.
         threads, complete = await _fetch_review_threads(repo, pr_num, cwd)
-        closed = await _archivist_resolution(
+        closed, failed = await _archivist_resolution(
             threads, complete, active_numbers, [], repo, pr_num, cwd, model,
             base_name, base_ref, debug, reasoning_effort)
         await _post_all_clear(repo, pr_num, cwd)
         summary = f'All clear: posted a no-issues note to PR #{pr_num}.'
         if closed:
             summary += f' ({closed} thread(s) resolved.)'
+        if failed:
+            summary += f' ({failed} clearance(s) cleared but not resolvable; left open)'
         print(summary)
         return
     # Anchor inline comments on the PR's own diff, not the local one: the local diff is truncated
@@ -1971,13 +1977,15 @@ async def post_review(pr_num: int, findings: list[Finding], diff_text: str,
     # git-grounded verdict (see _archivist_resolution) — resolved when the code verifiably no
     # longer has the concern, withheld when the thread list is incomplete, and left open when the
     # panel still raises it or the archivist cannot verify it is gone.
-    closed = await _archivist_resolution(
+    closed, failed = await _archivist_resolution(
         threads, complete, active_numbers, findings, repo, pr_num, cwd, model,
         base_name, base_ref, debug, reasoning_effort)
     summary = (
         f'Posted review to PR #{pr_num}: {len(new_inline)} new inline, '
         f'{len(replies)} replies, {len(body_findings)} in the review body, '
         f'{closed} threads resolved.')
+    if failed:
+        summary += f' {failed} validated clearance(s) could not be resolved and stay open.'
     if demoted:
         # The user should see that some findings lost inline placement (and why), not just that
         # the body count grew.
