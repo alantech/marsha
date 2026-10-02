@@ -801,8 +801,11 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
         if attempt == 0:
             log('review: the archivist returned no verdict; retrying once')
     by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
-    verdicts: dict[str, str] = {
-        c['thread_id']: 'unclear' for c in candidates}
+    # The archivist may name a thread more than once; collect the set of recognized verdicts per
+    # thread and resolve at the end. A thread is 'cleared' only on exactly {'cleared'} — a
+    # conflicting reply (e.g. STILL-RAISED then CLEARED), an unrecognized word, or no verdict is
+    # 'unclear', which fails closed: an unclear thread is not cleared, so nothing resolves.
+    raw: dict[str, set[str]] = {c['thread_id']: set() for c in candidates}
     for line in str(text or '').splitlines():
         m = _ARCHIVIST_VERDICT_RE.match(line)
         if not m:
@@ -811,9 +814,17 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
         thread_id = by_label.get(label)
         if thread_id is None:
             continue
-        verdicts[thread_id] = ('cleared' if word == 'CLEARED'
-                               else 'still-raised' if word == 'STILL-RAISED'
-                               else 'unclear')
+        raw[thread_id].add('cleared' if word == 'CLEARED'
+                           else 'still-raised' if word == 'STILL-RAISED'
+                           else 'unclear')
+    verdicts: dict[str, str] = {}
+    for thread_id, words in raw.items():
+        if words == {'cleared'}:
+            verdicts[thread_id] = 'cleared'
+        elif words == {'still-raised'}:
+            verdicts[thread_id] = 'still-raised'
+        else:
+            verdicts[thread_id] = 'unclear'
     # Watch the watchman: the archivist's CLEARED is only as good as the basis in its own record.
     # Before any thread is honored, the watchman (Iris) checks, for each CLEARED, that the record
     # the archivist actually produced (the code it read, plus the thread's replies) contains a

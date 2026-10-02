@@ -1216,6 +1216,34 @@ def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
     assert verdicts['PRRT_D7'] == 'unclear'
 
 
+def test_archivist_clearance_conflicting_verdicts_is_unclear(repo: Any) -> None:
+    # If the archivist names a thread with both CLEARED and STILL-RAISED (a self-conflict), the
+    # verdicts do not resolve to a single word, so the thread is 'unclear' (fail-closed), not
+    # 'cleared' — a last-wins parser would have cleared it and resolved the thread. A thread is
+    # cleared only on exactly {'cleared'}.
+    class VerdictMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            return '[B9] - STILL-RAISED\n[B9] - CLEARED'
+
+    candidates = [{'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
+                   'desc': 'fixed gap', 'replies': []}]
+
+    async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
+        return messages
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: VerdictMapper()):
+        verdicts = asyncio.run(review._archivist_clearance(
+            candidates, [], 'm', 'main', 'main', repo))
+    assert verdicts == {'PRRT_B9': 'unclear'}
+
+
 def test_archivist_clearance_fails_closed(repo: Any) -> None:
     # Resolution is irreversible, so a failed archivist clears nothing: every thread stays open.
     class BoomMapper:
