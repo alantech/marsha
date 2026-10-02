@@ -220,6 +220,17 @@ def test_run_diff_usage_error_with_no_source() -> None:
     assert asyncio.run(diff.run_diff(_args())) == 2
 
 
+def test_run_diff_negative_review_cycles_is_usage_error() -> None:
+    # A negative --review-cycles is a usage error (exit 2), not a silent clamp to 0 (which would
+    # disable the review gate).
+    assert asyncio.run(diff.run_diff(_args(source='x.mrsh', review_cycles=-1))) == 2
+
+
+def test_run_diff_zero_max_tool_failure_is_usage_error() -> None:
+    # A non-positive --max-tool-failure is a usage error (exit 2), not a silent clamp to 1.
+    assert asyncio.run(diff.run_diff(_args(source='x.mrsh', max_tool_failure=0))) == 2
+
+
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
     # An unlocked spec stops before any branch is created and before the implementor runs.
     p = str(tmp_path)

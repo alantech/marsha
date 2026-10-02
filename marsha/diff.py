@@ -546,8 +546,22 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
                  or getattr(args, 'trace', False)
                  or getattr(args, 'trace_full', False))
     safe = bool(getattr(args, 'safe', False))
-    review_cycles = max(0, int(getattr(args, 'review_cycles', 5)))
-    max_tool_failure = max(1, int(getattr(args, 'max_tool_failure', 5)))
+    # `--review-cycles` must be a non-negative integer and `--max-tool-failure` a positive one (the
+    # CLI contract). An out-of-range value is a usage error (exit 2), never silently clamped:
+    # clamping a negative --review-cycles to 0 would disable the review gate — a safety bypass.
+    try:
+        review_cycles = int(args.review_cycles)
+        max_tool_failure = int(args.max_tool_failure)
+    except (TypeError, ValueError):
+        print('error: --review-cycles and --max-tool-failure must be integers.', file=sys.stderr)
+        return 2
+    if review_cycles < 0:
+        print('error: --review-cycles must be a non-negative integer (0 disables the review gate).',
+              file=sys.stderr)
+        return 2
+    if max_tool_failure < 1:
+        print('error: --max-tool-failure must be a positive integer.', file=sys.stderr)
+        return 2
     model = resolve_model()
 
     # --- Design gate: resolve the source and confirm the spec is locked (no edits yet). ---
