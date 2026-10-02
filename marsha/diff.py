@@ -192,10 +192,13 @@ async def _unique_branch(base: str, cwd: str) -> str:
     return f'{base}-{n}'
 
 
-async def _create_branch(name: str, cwd: str) -> None:
-    rc, _o, err = await _git('checkout', '-b', name, cwd=cwd)
+async def _create_branch(name: str, base_ref: str, cwd: str) -> None:
+    # Base the new branch on the default branch (the review gate and the eventual PR both diff
+    # against it), not on the arbitrary current HEAD: if the clean starting branch were not the
+    # default, basing on HEAD would fold those extra commits into the reviewed/committed change.
+    rc, _o, err = await _git('checkout', '-b', name, base_ref, cwd=cwd)
     if rc != 0:
-        raise Exception(f'git checkout -b {name} failed: {err}')
+        raise Exception(f'git checkout -b {name} {base_ref} failed: {err}')
 
 
 async def _changed_files(cwd: str, base_ref: str) -> list[str]:
@@ -271,8 +274,9 @@ def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool) 
     parts.append(
         f'The default branch is `{base_name}`. Work in the working tree; do not commit.')
     if safe:
-        parts.append('Safe mode is on: do not use the network and do not install dependencies; '
-                     'make local edits and run local validation only.')
+        parts.append('Safe mode is on: make local edits only. You have no command tool (no '
+                     'network, no dependency installation, no shell) — the harness runs the '
+                     'project\'s validation for you; fix whatever it reports by editing files.')
     else:
         parts.append('You may look up documentation over the network and install dependencies as '
                      'needed.')
@@ -594,9 +598,9 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
             return 1
         base_name, base_ref = await default_branch(cwd)
         branch = await _unique_branch(f'marsha/{_slugify(title)}', cwd)
-        await _create_branch(branch, cwd)
+        await _create_branch(branch, base_ref, cwd)
         print(
-            f'Created and checked out branch `{branch}` (based on {base_name}).')
+            f'Created and checked out branch `{branch}` (based on `{base_name}`).')
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1

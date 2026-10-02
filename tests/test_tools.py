@@ -259,6 +259,17 @@ def test_phase_scoping_no_backend_is_agnostic_only() -> None:
     assert set(tools.build_commands(tools.ToolContext('gen'))) == AGNOSTIC
 
 
+def test_implement_safe_phase_drops_exec_and_network() -> None:
+    # Safe mode (marsha diff --safe) must not expose an unrestricted shell or the network: the
+    # implementor only reads and edits, and the harness runs the project's validation itself.
+    b = backends.current()
+    impl = set(tools.build_commands(tools.ToolContext('implement', backend=b)))
+    impl_safe = set(tools.build_commands(tools.ToolContext('implement-safe', backend=b)))
+    assert 'write-file' in impl and 'write-file' in impl_safe
+    assert 'exec' in impl and 'exec' not in impl_safe  # no unrestricted shell in safe mode
+    assert 'web-search' in impl and 'web-search' not in impl_safe  # no network in safe mode
+
+
 def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # The point of the per-target design: a backend supplies the language-specific
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set

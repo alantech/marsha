@@ -185,8 +185,10 @@ _BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB,
 # The implement phases (marsha diff). Normal mode keeps the base set (so the implementor can look
 # up documentation over the network and consult the registry) plus the read-only git/notes tools
 # and the two mutating implementation tools (write-file, exec). Safe mode drops the network
-# categories (web, registry) — no marsha-provided network or install path — but keeps the local
-# reads, git/notes, and the local write/exec so the implementor can still edit and validate.
+# categories (web, registry) — no marsha-provided network or install path — AND the exec tool:
+# an unrestricted shell could still reach the network, install dependencies, or run destructive
+# git, so the safe implementor only reads and edits; the harness runs the project's validation
+# itself (a controlled subprocess), which is what the issue means by "local validation".
 PHASE_CATEGORIES = {
     'gen': _BASE_CATEGORIES,
     'oracle-opt': _BASE_CATEGORIES,
@@ -197,7 +199,7 @@ PHASE_CATEGORIES = {
     'implement': _BASE_CATEGORIES | {CATEGORY_GIT, CATEGORY_NOTES,
                                      CATEGORY_WRITE, CATEGORY_EXEC},
     'implement-safe': {CATEGORY_COMPUTATION, CATEGORY_READ, CATEGORY_GIT,
-                       CATEGORY_NOTES, CATEGORY_WRITE, CATEGORY_EXEC},
+                       CATEGORY_NOTES, CATEGORY_WRITE},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
