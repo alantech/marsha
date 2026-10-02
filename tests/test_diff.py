@@ -19,7 +19,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from marsha import diff
+from marsha import tools
 from marsha.findings import Finding
+from marsha.refine import ChatResult, SpecSource
 
 
 def _args(**kw: Any) -> Any:
@@ -309,6 +311,64 @@ def test_review_gate_includes_untracked_files(tmp_path: Any) -> None:
             result = asyncio.run(
                 diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
     assert result  # the gate ran (not skipped on an empty diff) and returned the finding
+
+
+def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
+    # Two consecutive reject->refine cycles: after the first refine is applied, the staleness
+    # baseline must be refreshed to the refined fields, or the second refine would be mistaken for
+    # a concurrent edit and dropped (leaving only one refinement applied).
+    p = str(tmp_path)
+    source = SpecSource(kind='issue', num=1, name='ISSUE-1')
+    fields = {'current': ('Initial Title', 'Initial Body')}
+    applied: list[Any] = []
+
+    async def fake_source_fields(*a: Any, **k: Any) -> Any:
+        return fields['current']
+
+    async def fake_apply(src: Any, payload: Any, cwd: Any) -> None:
+        applied.append(payload)
+        fields['current'] = (f'Refined{len(applied)}', f'Body{len(applied)}')
+
+    async def fake_refine_chat(*a: Any, **k: Any) -> Any:
+        return ChatResult(
+            status='locked', payload={'title': 'T', 'body': 'B', 'spec': 's'}, detail='')
+
+    async def fake_implementor(*a: Any, **k: Any) -> str:
+        return 'done'
+
+    async def fake_validated(*a: Any, **k: Any) -> Any:
+        return (True, 'ok')
+
+    async def fake_review_gate(*a: Any, **k: Any) -> list[Any]:
+        return []
+
+    async def fake_commit(cwd: Any, title: Any, body: Any) -> str:
+        return f'sha-{len(applied)}'
+
+    async def fake_head_commit(cwd: Any) -> Any:
+        return ('abc123', 'initial')
+
+    async def fake_recent_subjects(cwd: Any) -> list[str]:
+        return []
+
+    answers = iter(['n', 'y', 'n', 'y', 'y'])  # reject,refine, reject,refine, accept
+    with patch.object(diff, '_source_fields', new=fake_source_fields), \
+         patch.object(diff, '_apply', new=fake_apply), \
+         patch.object(diff, 'run_refine_chat', new=fake_refine_chat), \
+         patch.object(diff, '_run_implementor', new=fake_implementor), \
+         patch.object(diff, '_ensure_validated', new=fake_validated), \
+         patch.object(diff, '_review_gate', new=fake_review_gate), \
+         patch.object(diff, '_commit', new=fake_commit), \
+         patch.object(diff, '_head_commit', new=fake_head_commit), \
+         patch.object(diff, '_recent_commit_subjects', new=fake_recent_subjects), \
+         patch.object(diff, '_conventions_text', return_value=''):
+        rc, _title, _sha = asyncio.run(diff._propose_and_maybe_refine(
+            lambda: next(answers), p, source, 'spec text',
+            ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
+            tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
+            'clean', 'test-model', 5, False))
+    assert rc == 0
+    assert len(applied) == 2  # BOTH refinements applied (the second was not bailed as stale)
 
 
 def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None:

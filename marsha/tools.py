@@ -1662,6 +1662,12 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     if len(target) > 200:
         shown = target[:197] + '…[target truncated]'
     if re.match(r'^https?://\S+$', target):
+        # Safe mode (the implement-safe phase) forbids the network: refuse a URL rather than fetch
+        # it, so the safe implementor cannot reach the web through this read tool. A local file in
+        # the working tree is still summarizable (the file branch below is unaffected).
+        if ctx is not None and ctx.phase == 'implement-safe':
+            return ('error: summarize cannot fetch a URL in safe mode; summarize a local file in '
+                    'the working tree instead.')
         try:
             assert_public_url(target)
         except Exception as e:

@@ -776,6 +776,18 @@ def test_git_line_count_matches_splitlines(repo: Any) -> None:
         assert got == len(content.splitlines()), (name, got, content)
 
 
+def test_file_info_working_tree_uses_disk_line_count(repo: Any) -> None:
+    # A working-tree review (marsha diff) validates a modified tracked file against its on-disk
+    # line count (the uncommitted change is what is under review), not its stale committed count.
+    # HEAD (feature) has a.txt at 4 lines; grow it on disk to 8 (uncommitted).
+    with open(f'{repo}/a.txt', 'w') as f:
+        f.write('l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n')
+    disk = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=True))
+    assert disk == (True, 8)  # the on-disk (working-tree) length, not HEAD's 4
+    committed = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=False))
+    assert committed == (True, 4)  # the committed (HEAD) length
+
+
 def test_gate_drops_finding_with_no_evidence(repo: Any) -> None:
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.

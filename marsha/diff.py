@@ -482,6 +482,11 @@ async def _propose_and_maybe_refine(
                           file=sys.stderr)
                     return (0, commit_title, sha)
             await _apply(source, result.payload, cwd)
+            if source.kind != 'mrsh':
+                # The source now holds the refined fields; refresh the staleness baseline so a
+                # later reject-and-refine cycle compares against them (not the pre-refinement
+                # originals), or a legitimate second refinement would read as a concurrent edit.
+                original_fields = await _source_fields(source, cwd)
         except (Exception, KeyboardInterrupt) as e:
             print(f'error: failed to update the source: {e}. Leaving the existing commit '
                   'intact.', file=sys.stderr)

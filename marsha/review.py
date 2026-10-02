@@ -1535,26 +1535,29 @@ async def _file_info(path: str, cwd: str | None, base_ref: str,
     # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
     # path so several findings citing the same file cost one probe each. A deleted file (present
     # at base, absent at HEAD) still resolves against the base. When `working_tree` is set (a
-    # review of uncommitted changes), a file that exists only on disk also resolves, so a
-    # citation into a newly added or not-yet-committed file is not read as a fabrication.
+    # review of uncommitted changes), the on-disk version is what is under review, so a file
+    # present on disk takes precedence over its committed line count: a modified tracked file is
+    # validated against its working-tree length (not the stale HEAD/base one), and a newly added
+    # file resolves on disk so a citation into it is not read as a fabrication.
     if path in cache:
         return cache[path]
     exists = False
     line_count = None
-    for ref in ('HEAD', base_ref):
-        rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
-        if rc != 0:
-            continue
-        exists = True
-        # Stream the line count rather than buffering the whole blob and splitting it, so a large
-        # cited file is not held in memory just to validate a citation's line bound.
-        line_count = await _git_line_count(ref, path, cwd)
-        break
-    if not exists and working_tree and cwd is not None:
+    if working_tree and cwd is not None:
         disk = os.path.join(cwd, path)
         if os.path.isfile(disk):
             exists = True
             line_count = _disk_line_count(disk)
+    if not exists:
+        for ref in ('HEAD', base_ref):
+            rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
+            if rc != 0:
+                continue
+            exists = True
+            # Stream the line count rather than buffering the whole blob and splitting it, so a
+            # large cited file is not held in memory just to validate a citation's line bound.
+            line_count = await _git_line_count(ref, path, cwd)
+            break
     cache[path] = (exists, line_count)
     return cache[path]
 

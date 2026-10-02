@@ -323,6 +323,14 @@ def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
     assert outside.read_text() == 'original'  # the outside file is untouched
 
 
+def test_summarize_refuses_url_in_safe_mode() -> None:
+    # Safe mode forbids the network: summarize must refuse a URL (before any fetch) rather than
+    # let the safe implementor reach the web through this read tool.
+    result = asyncio.run(tools.summarize(
+        ['https://example.com/page'], tools.ToolContext(phase='implement-safe')))
+    assert result.startswith('error:') and 'safe mode' in result
+
+
 def test_tool_instructions_lists_phase_tools() -> None:
     gen = tools.tool_instructions(tools.ToolContext('gen', backend=backends.current()))
     assert 'search-dependencies' in gen and 'web-search' in gen and 'calc' in gen
