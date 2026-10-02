@@ -264,7 +264,8 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set
     # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | \
+        {'git', 'notes', 'write-file', 'exec'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
@@ -273,6 +274,9 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
         == {'list-tree', 'summarize', 'find-in-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WRITE} \
+        == {'write-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_EXEC} == {'exec'}
 
 
 def test_tool_instructions_lists_phase_tools() -> None:

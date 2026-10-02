@@ -149,6 +149,27 @@ async def working_tree_clean(cwd: str | None = None) -> bool:
     return out == ''
 
 
+async def working_tree_diff(base_ref: str, cwd: str | None = None, context: int = 3) -> str:
+    # Two-dot diff of the WORKING TREE against the base ref (no head): it includes uncommitted
+    # changes, so a branch's not-yet-committed implementation is reviewed exactly as it sits.
+    # `marsha review` reviews committed changes (base...HEAD); this is the uncommitted variant the
+    # `diff` command's review gate uses before its implementation has been committed.
+    rc, out, err = await _git('diff', f'{base_ref}', f'-U{context}', cwd=cwd)
+    if rc != 0:
+        raise Exception(
+            f'git diff against {base_ref} (working tree) failed: {err}')
+    return out
+
+
+async def working_tree_diff_stat(base_ref: str, cwd: str | None = None) -> str:
+    # The changed-file summary of the working tree against the base ref (uncommitted included).
+    rc, out, err = await _git('diff', '--stat', base_ref, cwd=cwd)
+    if rc != 0:
+        raise Exception(
+            f'git diff --stat against {base_ref} (working tree) failed: {err}')
+    return out
+
+
 async def branch_diff(base_ref: str, head: str = 'HEAD', cwd: str | None = None, context: int = 3) -> str:
     # Three-dot (base...head): symmetric diff from the merge-base — exactly what `head` changed
     # relative to `base` (the default branch), excluding changes that landed on `base` itself.
@@ -1472,11 +1493,36 @@ async def _git_line_count(ref: str, path: str, cwd: str | None) -> int | None:
     return count
 
 
-async def _file_info(path: str, cwd: str | None, base_ref: str, cache: dict[str, tuple[bool, int | None]]) -> tuple[bool, int | None]:
+def _disk_line_count(path: str) -> int | None:
+    # The line count of a file on disk (the working tree), counting exactly as _git_line_count
+    # does (a final line without a trailing newline still counts, blank lines count). Used to
+    # validate a citation into a file that exists only as an uncommitted change.
+    try:
+        count = 0
+        last: bytes | None = None
+        with open(path, 'rb') as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                count += chunk.count(b'\n')
+                last = chunk[-1:]
+    except OSError:
+        return None
+    if last is not None and last != b'\n':
+        count += 1
+    return count
+
+
+async def _file_info(path: str, cwd: str | None, base_ref: str,
+                     cache: dict[str, tuple[bool, int | None]],
+                     working_tree: bool = False) -> tuple[bool, int | None]:
     # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
     # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
     # path so several findings citing the same file cost one probe each. A deleted file (present
-    # at base, absent at HEAD) still resolves against the base.
+    # at base, absent at HEAD) still resolves against the base. When `working_tree` is set (a
+    # review of uncommitted changes), a file that exists only on disk also resolves, so a
+    # citation into a newly added or not-yet-committed file is not read as a fabrication.
     if path in cache:
         return cache[path]
     exists = False
@@ -1490,6 +1536,11 @@ async def _file_info(path: str, cwd: str | None, base_ref: str, cache: dict[str,
         # cited file is not held in memory just to validate a citation's line bound.
         line_count = await _git_line_count(ref, path, cwd)
         break
+    if not exists and working_tree and cwd is not None:
+        disk = os.path.join(cwd, path)
+        if os.path.isfile(disk):
+            exists = True
+            line_count = _disk_line_count(disk)
     cache[path] = (exists, line_count)
     return cache[path]
 
@@ -1582,7 +1633,7 @@ def _path_token_match(command_scope: str, file_path: str) -> bool:
     return False
 
 
-async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False) -> list[Finding]:
+async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False, working_tree: bool = False) -> list[Finding]:
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
     # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
@@ -1655,9 +1706,12 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             ok, reason = False, (
                 'names no symbol and cites no file, so it cannot be grounded in the code read')
         if ok and file_path:
-            exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
+            exists, line_count = await _file_info(
+                file_path, cwd, base_ref, file_cache, working_tree=working_tree)
+            where = 'the working tree, ' if working_tree else ''
             if not exists:
-                ok, reason = False, f'cited file {file_path} does not exist at HEAD or {base_ref}'
+                ok, reason = (False,
+                              f'cited file {file_path} does not exist at {where}HEAD or {base_ref}')
             elif line is not None and line_count is None:
                 # The file exists but its line count could not be read, so the cited line cannot
                 # be verified against the file's end; drop it rather than let an out-of-range
