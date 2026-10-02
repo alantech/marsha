@@ -1902,6 +1902,14 @@ async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> st
     target = os.path.normpath(os.path.join(root, path))
     if target != root and not target.startswith(root + os.sep):
         return f'error: write-file cannot write outside the working tree: {path}'
+    # The lexical check above is not enough: `open(..., 'w')` follows symlinks, so a path inside
+    # the tree that traverses an outside-pointing symlink would pass it yet write outside the
+    # tree. Resolve the real path (following symlinks) and re-check the boundary against the
+    # tree's real root, so the tool's working-tree boundary holds even through symlinks.
+    real_root = os.path.realpath(root)
+    real_target = os.path.realpath(target)
+    if real_target != real_root and not real_target.startswith(real_root + os.sep):
+        return f'error: write-file cannot write outside the working tree: {path}'
     try:
         parent = os.path.dirname(target)
         if parent:

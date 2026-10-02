@@ -339,13 +339,19 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     # The review gate over the implementation's working-tree changes (uncommitted): the review
     # personas plus the deterministic evidence gate, over `git diff <base>` (which includes
     # uncommitted work). A clean gate has zero findings at any severity.
+    #
+    # `git diff <base>` shows only tracked files, so a change that consists solely of NEW files
+    # (still untracked) would read as empty and skip the gate — yet `_commit` stages everything
+    # with `git add -A`. Stage the working tree first so the review sees exactly what the commit
+    # will capture (this is the same non-destructive staging the commit performs).
+    await _git('add', '-A', cwd=cwd)
     stat_text = await working_tree_diff_stat(base_ref, cwd)
     if not stat_text.strip():
         return []
     context_blocks = [tools.wrap_untrusted(
         'spec', tools.truncate(spec_text, limit=REVIEW_CONTEXT_LIMIT))]
     message = build_review_message(
-        stat_text, base_name, base_ref, context_blocks)
+        stat_text, base_name, base_ref, context_blocks, working_tree=True)
     registry = build_registry()
     combined = (resolve_loop_reviewers('impl', None, registry)
                 + resolve_loop_reviewers('review', None, registry))

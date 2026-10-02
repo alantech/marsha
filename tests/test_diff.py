@@ -282,6 +282,35 @@ def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> N
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
 
 
+def test_review_gate_includes_untracked_files(tmp_path: Any) -> None:
+    # An implementation that creates only NEW (untracked) files must still be reviewed: without
+    # staging, `git diff <base>` reads as empty and the gate would skip it — yet the commit stages
+    # the new files with `git add -A`, so an unreviewed file would reach the commit.
+    p = str(tmp_path)
+    _git_repo(p, {'a.py': 'x = 1\n'})
+    with open(os.path.join(p, 'new.py'), 'w') as f:
+        f.write('y = 2\n')
+    finding: Finding = {'name': 'r', 'label': 'L', 'severity': 'major',
+                        'location': 'new.py:1', 'desc': 'd'}
+
+    async def fake_review_pass(*a: Any, **k: Any) -> list[Any]:
+        return [dict(finding)]
+
+    async def fake_evidence_gate(findings: Any, *a: Any, **k: Any) -> Any:
+        return findings
+
+    async def fake_consolidate(ctx: Any, findings: Any, *a: Any, **k: Any) -> Any:
+        return findings
+
+    with patch.object(diff, '_review_pass', new=fake_review_pass), \
+         patch.object(diff, 'evidence_gate', new=fake_evidence_gate), \
+         patch.object(diff, 'consolidate_findings', new=fake_consolidate):
+        with _chdir(p):
+            result = asyncio.run(
+                diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
+    assert result  # the gate ran (not skipped on an empty diff) and returned the finding
+
+
 def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None:
     # A locked spec with passing validation and a clean review commits and the proposal is
     # accepted (no PR is pushed or created).

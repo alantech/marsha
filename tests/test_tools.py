@@ -279,6 +279,39 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_EXEC} == {'exec'}
 
 
+def test_write_file_writes_inside_tree(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['src/foo.py', 'print(1)\\n'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'src' / 'foo.py').read_text() == 'print(1)\n'
+
+
+def test_write_file_refuses_dotdot_escape(tmp_path: Any) -> None:
+    # A `..` path that leaves the working tree is refused before anything is written.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['../escape.txt', 'x'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert not (tmp_path / 'escape.txt').exists()
+
+
+def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
+    # A path inside the tree that traverses an outside-pointing symlink must be refused: a lexical
+    # prefix check alone would let open(..., 'w') follow the link and write outside the tree.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('original')
+    os.symlink(outside, repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert outside.read_text() == 'original'  # the outside file is untouched
+
+
 def test_tool_instructions_lists_phase_tools() -> None:
     gen = tools.tool_instructions(tools.ToolContext('gen', backend=backends.current()))
     assert 'search-dependencies' in gen and 'web-search' in gen and 'calc' in gen

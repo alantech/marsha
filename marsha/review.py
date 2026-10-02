@@ -446,7 +446,21 @@ async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) ->
     return anchorable
 
 
-def build_review_message(stat_text: str, base_name: str, base_ref: str, context_blocks: list[str]) -> str:
+def build_review_message(stat_text: str, base_name: str, base_ref: str,
+                         context_blocks: list[str], working_tree: bool = False) -> str:
+    # The committed case (`marsha review`) diffs the branch against its base; the working-tree
+    # case (`marsha diff`'s pre-commit gate) reviews uncommitted changes, so the diff is the
+    # working tree against the base (two-dot) and the changed files must be read from disk —
+    # `git show HEAD:<path>` would show the base version, not the uncommitted change.
+    if working_tree:
+        diff_ref = (f'`git diff {base_ref}` — the working tree against `{base_ref}`, which '
+                    'includes uncommitted changes')
+        changed_files = ('the changed files (they are uncommitted, so read them with '
+                         '`summarize` / `find-in-file`, not `git show HEAD:<path>`, which would '
+                         'show the base version)')
+    else:
+        diff_ref = f'`git diff {base_ref}...HEAD`'
+        changed_files = 'the changed files (`git show HEAD:<path>`)'
     parts = [
         f'You are reviewing a change to an existing codebase: the currently checked-out '
         f'branch, diffed against the default branch `{base_name}` (ref `{base_ref}`). There '
@@ -455,9 +469,9 @@ def build_review_message(stat_text: str, base_name: str, base_ref: str, context_
         f'specified, apply general correctness, safety, and code-quality standards to the '
         f'changed code.',
         ('You have a read-only `git` tool and a `notes` scratchpad. Start from the changed-file '
-         f'summary below, then probe the codebase yourself: read the diff (`git diff '
-         f'{base_ref}...HEAD`), the changed files (`git show HEAD:<path>`), their surrounding '
-         'code, and their history (`git log`, `git blame`). As you find a concrete candidate '
+         f'summary below, then probe the codebase yourself: read the diff ({diff_ref}), '
+         f'{changed_files}, their surrounding code, and their history (`git log`, `git blame`). '
+         'As you find a concrete candidate '
          'finding, record it with `notes add "<file:line> - <what and why>"` so it survives '
          'compaction. Your final findings must be grounded in code you actually read, not '
          'assumed from the summary.'
