@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from marsha import context
 from marsha import personas
 from marsha import review
 from marsha import tools
@@ -1356,9 +1357,10 @@ def test_watchman_validate_conflicting_verdicts_is_no_verdict(repo: Any) -> None
 
 
 def test_watchman_validate_truncates_large_evidence(repo: Any) -> None:
-    # The watchman is a single tool-less call that bypasses the tool loop's per-result
-    # pagination, so its (unbounded) evidence record is truncated to the review context limit
-    # before the prompt is built; an oversized read must not push the prompt unboundedly large.
+    # The watchman is a single tool-less call, so it bounds the (unbounded) evidence to the
+    # model's context budget — not a fixed cap. With a small window the budget (9k chars) is
+    # tighter than the fixed 48k cap, so a 20k-char read (above the budget, below the cap) is
+    # truncated to the budget; a cap-only fix would have left it untruncated.
     captured: list[str] = []
 
     class CapturingMapper:
@@ -1372,17 +1374,55 @@ def test_watchman_validate_truncates_large_evidence(repo: Any) -> None:
             captured.append(str(a[0]))
             return '[A1] - VALIDATED'
 
+    async def small_window(*a: Any, **k: Any) -> int:
+        # 6000-token window -> budget 3000 tokens -> 9000 chars (tighter than the 48k fixed cap).
+        return 6000
+
     candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
                    'desc': 'compute_total drops the x term', 'replies': []}]
-    big_read = 'x' * (review.REVIEW_CONTEXT_LIMIT * 2)
+    big_read = 'x' * 20_000  # above the 9000-char budget, below the 48k cap
     evidence = [('git show HEAD:src/calc.py', big_read)]
-    with patch.object(review, 'get_mapper', new=lambda *a, **k: CapturingMapper()):
+    with patch.object(context, 'resolve_context_window', new=small_window), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: CapturingMapper()):
         out = asyncio.run(review._watchman_validate(
             candidates, evidence, 'm', 'main', 'main', repo))
     assert out == {'PRRT_A1': 'validated'}
     assert len(captured) == 1
-    # The oversized read was truncated, so the prompt carries the truncation marker rather than
-    # the full unbounded read.
+    # The oversized read was truncated to the budget, so the prompt carries the truncation
+    # marker rather than the full unbounded read.
+    assert '…[truncated]' in captured[0]
+    assert big_read not in captured[0]
+
+
+def test_watchman_validate_evidence_falls_back_to_cap_on_resolution_error(repo: Any) -> None:
+    # If the model's context window cannot be resolved, the evidence is still bounded — by the
+    # tight fixed cap — so a failed lookup never leaves the watchman prompt unbounded.
+    captured: list[str] = []
+
+    class CapturingMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        async def run(self, *a: Any, **k: Any) -> Any:
+            captured.append(str(a[0]))
+            return '[A1] - VALIDATED'
+
+    async def broken_window(*a: Any, **k: Any) -> int:
+        raise RuntimeError('no /models endpoint')
+
+    candidates = [{'label': 'A1', 'thread_id': 'PRRT_A1', 'location': 'src/calc.py:20',
+                   'desc': 'compute_total drops the x term', 'replies': []}]
+    big_read = 'x' * (review.REVIEW_CONTEXT_LIMIT * 2)  # above the 48k cap
+    evidence = [('git show HEAD:src/calc.py', big_read)]
+    with patch.object(context, 'resolve_context_window', new=broken_window), \
+         patch.object(review, 'get_mapper', new=lambda *a, **k: CapturingMapper()):
+        out = asyncio.run(review._watchman_validate(
+            candidates, evidence, 'm', 'main', 'main', repo))
+    assert out == {'PRRT_A1': 'validated'}
+    assert len(captured) == 1
     assert '…[truncated]' in captured[0]
     assert big_read not in captured[0]
 

@@ -19,6 +19,7 @@ import subprocess
 from typing import Any
 
 from marsha import backends
+from marsha import context
 from marsha import tools
 from marsha.config import resolve_model
 from marsha.findings import Finding
@@ -875,12 +876,21 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
             evidence_lines.append(f'$ {cmd}\n{out}')
     evidence_content = ('\n\n'.join(evidence_lines) if evidence_lines
                         else '(the archivist read no code — it ran no git command)')
-    # The record is trusted (real git reads) but unbounded: many reads across the archivist's
-    # session can push the single watchman prompt past the context budget. The watchman is a
-    # one-shot tool-less call that bypasses the per-result pagination the tool loop applies, so
-    # bound the record to the review context limit here.
+    # The record is trusted (real git reads) but unbounded: as the archivist's exploration grows,
+    # the evidence can outgrow the model's context window and the watchman call fails, leaving
+    # clearances unvalidated. The watchman is a one-shot tool-less call, so it has no tool history
+    # to pass through _maybe_compact_tool_history; instead it bounds the only growing part of its
+    # prompt — the evidence — to the same context budget the tool loop enforces (the model's
+    # context window at the 0.5 cap), capped at a tight fixed limit so a large window never admits
+    # an unreasonably big record. If the window cannot be resolved, the fixed cap still bounds it.
+    try:
+        window = await context.resolve_context_window(model=model)
+        evidence_limit = min(REVIEW_CONTEXT_LIMIT,
+                             context.budget_tokens(window, 0.5) * context.CHARS_PER_TOKEN)
+    except Exception:
+        evidence_limit = REVIEW_CONTEXT_LIMIT
     evidence_block = ('\n\n# Code the archivist actually read\n\n'
-                      + tools.truncate(evidence_content, limit=REVIEW_CONTEXT_LIMIT))
+                      + tools.truncate(evidence_content, limit=evidence_limit))
     # The thread text (its desc and replies) is untrusted PR data, wrapped so a malicious comment
     # cannot inject instructions into the clearance decision; the evidence block is the archivist's
     # real git reads (trusted) and is left unwrapped.
