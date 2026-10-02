@@ -226,13 +226,24 @@ async def _commit(cwd: str, title: str, body: str) -> str:
 async def _run_validation(cwd: str, cmd: str, safe: bool = False) -> tuple[bool, str]:
     # Run the validation command and report whether it passed (a clean exit). The tail of the
     # output is returned so the implementor can see a failure without buffering without bound.
-    # In safe mode the environment blocks dependency installation (uv and pip run offline), so a
-    # validation command that would build the env or install deps (e.g. a Makefile `test` target
-    # that depends on a venv) cannot reach the network — safe mode forbids installs even via the
+    # In safe mode the subprocess runs in a network-isolated environment (proxies point at a
+    # non-routable local port, no_proxy cleared, package managers offline), so a validation
+    # command that would build the env or install deps (e.g. a Makefile `test` target that
+    # depends on a venv) cannot reach the web — safe mode forbids installs even via the
     # harness's own re-verification run.
     try:
         env: dict[str, str] = dict(os.environ)
         if safe:
+            # Safe mode forbids the network and dependency installation. Offline flags alone are
+            # not enough (a Makefile `test` target that depends on a venv still runs its install
+            # step), so isolate the network: route every proxy at a non-routable local port
+            # (nothing listens on :9, the discard port) and clear no_proxy, so any network access
+            # — an install, a download — fails rather than reaching the web. UV_OFFLINE and
+            # PIP_NO_INDEX additionally stop the package managers from using their index.
+            for _var in ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY'):
+                env[_var] = 'http://127.0.0.1:9'
+            env['no_proxy'] = ''
+            env['NO_PROXY'] = ''
             env['UV_OFFLINE'] = '1'
             env['PIP_NO_INDEX'] = '1'
         proc = await asyncio.create_subprocess_shell(
