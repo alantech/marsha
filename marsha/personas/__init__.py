@@ -395,6 +395,7 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
+        fail_on_all_errors: bool = False,
 ) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
@@ -448,7 +449,7 @@ async def run_personas(
             if debug:
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
-            return []
+            raise
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
         # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
@@ -464,8 +465,29 @@ async def run_personas(
             f['sources'] = sources
         return findings
     if is_local_backend():
-        results = [await one(s) for s in reviewers]
+        results: list[Any] = []
+        for s in reviewers:
+            try:
+                results.append(await one(s))
+            except Exception as e:
+                results.append(e)
     else:
         # A generator (not a list) avoids the intermediate list of coroutines gather would build.
-        results = await asyncio.gather(*(one(s) for s in reviewers))
-    return [f for sub in results for f in sub]
+        results = list(await asyncio.gather(
+            *(one(s) for s in reviewers), return_exceptions=True))
+    # A reviewer that failed is a failure, not an empty result. When EVERY reviewer failed the
+    # review did not run and must not be mistaken for a clean one: with fail_on_all_errors the
+    # caller can distinguish a genuine "no findings" from a review that could not complete.
+    findings: list[Finding] = []
+    failures = 0
+    for r in results:
+        if isinstance(r, BaseException):
+            failures += 1
+        else:
+            findings.extend(r)
+    if failures == len(reviewers) and fail_on_all_errors:
+        raise Exception(
+            f'personas: all {failures} reviewer(s) failed; the review did not run')
+    if failures:
+        log(f'personas: {failures}/{len(reviewers)} reviewer(s) failed; using the survivors')
+    return findings

@@ -276,6 +276,28 @@ def test_run_diff_review_not_clean_no_commit(tmp_path: Any, capsys: Any) -> None
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
 
 
+def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> None:
+    # A review gate that could not run (every reviewer failed) stops the run with exit 1 and no
+    # commit, rather than being mistaken for a clean review.
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+
+    async def _failed_review(*a: Any, **k: Any) -> Any:
+        raise diff.ReviewGateFailed('all reviewers failed')
+
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+         patch.object(diff, '_ensure_validated', new=_ok_validation), \
+         patch.object(diff, '_review_gate', new=_failed_review):
+        with _chdir(p):
+            rc = asyncio.run(
+                diff.run_diff(_args(source=_spec_path(p), review_cycles=1)))
+    assert rc == 1
+    assert 'could not run' in capsys.readouterr().out
+    # Only the initial commit exists: nothing was committed on a review that never ran.
+    assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
 def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> None:
     # A successful --safe run (review skipped) leaves the edits uncommitted and offers no PR.
     p = str(tmp_path)

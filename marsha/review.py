@@ -2207,7 +2207,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
                        prior_block_by_number: dict[int, str],
                        prior_labels_by_number: dict[int, set[str]],
                        reasoning_effort: str | None, seed: int,
-                       debug: bool) -> list[Finding]:
+                       debug: bool, fail_on_all_errors: bool = False) -> list[Finding]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
     # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
@@ -2230,7 +2230,8 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            fail_on_all_errors=fail_on_all_errors)
         # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
         # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
         # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already

@@ -223,12 +223,20 @@ async def _commit(cwd: str, title: str, body: str) -> str:
 
 # --- validation (async) -----------------------------------------------------------
 
-async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
+async def _run_validation(cwd: str, cmd: str, safe: bool = False) -> tuple[bool, str]:
     # Run the validation command and report whether it passed (a clean exit). The tail of the
     # output is returned so the implementor can see a failure without buffering without bound.
+    # In safe mode the environment blocks dependency installation (uv and pip run offline), so a
+    # validation command that would build the env or install deps (e.g. a Makefile `test` target
+    # that depends on a venv) cannot reach the network — safe mode forbids installs even via the
+    # harness's own re-verification run.
     try:
+        env: dict[str, str] = dict(os.environ)
+        if safe:
+            env['UV_OFFLINE'] = '1'
+            env['PIP_NO_INDEX'] = '1'
         proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+            cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out, _err = await run_subprocess(proc, VALIDATION_TIMEOUT,
                                          max_bytes=tools.EXEC_MAX_BYTES)
@@ -316,11 +324,12 @@ async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
 
 async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: str,
                             model: str, max_failures: int,
-                            debug: bool) -> tuple[bool, str]:
+                            debug: bool, safe: bool = False) -> tuple[bool, str]:
     # Run the validation; on a failure, hand it to the implementor to fix and rerun, up to
     # MAX_VALIDATION_FIX_PASSES. Returns (passed, last_output). A validation that cannot even be
-    # run counts as a failure and is also handed back for a workaround.
-    passed, out = await _run_validation(cwd, validation_cmd)
+    # run counts as a failure and is also handed back for a workaround. In safe mode the re-run
+    # blocks dependency installation (see _run_validation).
+    passed, out = await _run_validation(cwd, validation_cmd, safe)
     fix_passes = 0
     while not passed and fix_passes < MAX_VALIDATION_FIX_PASSES:
         if debug:
@@ -331,12 +340,19 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
                                    max_failures, debug)
         except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
             break
-        passed, out = await _run_validation(cwd, validation_cmd)
+        passed, out = await _run_validation(cwd, validation_cmd, safe)
         fix_passes += 1
     return passed, out
 
 
 # --- review gate (async) ----------------------------------------------------------
+
+class ReviewGateFailed(Exception):
+    """Raised by _review_gate when the review could not run at all (every reviewer failed). That
+    is not a clean review: a commit must not be made on the strength of a review that never
+    happened, so the caller stops and reports a failure."""
+    pass
+
 
 async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                        model: str, debug: bool) -> list[Finding]:
@@ -363,9 +379,14 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     tool_ctx = tools.ToolContext(
         phase='review', workdir=cwd, notes=[], require_evidence=True)
     guidance = backends.current().persona_guidance()
-    findings = await _review_pass(
-        reviewers, message, model, base_name, base_ref, 1, guidance, tool_ctx,
-        {}, {}, REVIEW_REASONING_EFFORT, REVIEW_SEED, debug)
+    try:
+        findings = await _review_pass(
+            reviewers, message, model, base_name, base_ref, 1, guidance, tool_ctx,
+            {}, {}, REVIEW_REASONING_EFFORT, REVIEW_SEED, debug, fail_on_all_errors=True)
+    except Exception as e:
+        # The review could not run (every reviewer failed). That is not a clean review: do not
+        # proceed to a commit on the strength of a review that never happened.
+        raise ReviewGateFailed(str(e)) from e
     findings = await evidence_gate(findings, cwd, base_ref, debug=debug, working_tree=True)
     if findings:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
@@ -424,7 +445,7 @@ async def _propose_and_maybe_refine(
         original_fields: tuple[str, str] | None, current_repo: str, base_name: str,
         base_ref: str, impl_ctx: tools.ToolContext, commit_title: str,
         validation_cmd: str, review_result: str, model: str, max_failures: int,
-        debug: bool) -> tuple[int, str, str]:
+        debug: bool, safe: bool = False) -> tuple[int, str, str]:
     # Show the proposed PR title/body; on acceptance finish; on rejection optionally refine the
     # source (and, if it locks, resume implementation + validation + a clean review on the same
     # branch and commit a follow-up) before finishing. Marsha never pushes or creates a PR.
@@ -504,7 +525,7 @@ async def _propose_and_maybe_refine(
                     spec_text, _conventions_text(cwd), base_name, False),
                 model, max_failures, debug)
             passed, _out = await _ensure_validated(
-                impl_ctx, cwd, validation_cmd, model, max_failures, debug)
+                impl_ctx, cwd, validation_cmd, model, max_failures, debug, safe)
             if not passed:
                 print('Validation failed after refinement; leaving the existing commit intact.',
                       file=sys.stderr)
@@ -591,8 +612,14 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     window = await _resolve_window(model)
     design_tool_ctx = None
     if source.kind != 'mrsh':
+        # Safe mode disables the network: the design gate (which uses the `refine` phase, that has
+        # the web category) must not get web tools, so drop them from its category set.
+        design_categories = tools.PHASE_CATEGORIES['refine']
+        if safe:
+            design_categories = design_categories - {tools.CATEGORY_WEB}
         design_tool_ctx = tools.ToolContext(
-            phase='refine', workdir=cwd, require_evidence=False, context_window=window)
+            phase='refine', workdir=cwd, require_evidence=False, context_window=window,
+            categories=design_categories)
     try:
         check = await analyze_spec(spec_text, tool_ctx=design_tool_ctx, debug=debug)
     except Exception as e:
@@ -651,7 +678,7 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     validation_cmd = _validation_command(cwd)
     print(f'Running validation: `{validation_cmd}`', file=sys.stderr)
     passed, _out = await _ensure_validated(
-        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
+        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
     if not passed:
         await _report(cwd, base_ref, short, ticket_id, design='locked',
                       validation=f'FAILED (`{validation_cmd}`)', review='not run',
@@ -661,28 +688,39 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
 
     # --- Review gate (working-tree changes vs base). ---
     if review_cycles >= 1:
-        remaining = await _review_gate(cwd, base_name, base_ref, spec_text, model, debug)
-        cycles = 0
-        while remaining and cycles < review_cycles:
-            print(f'Review found {len(remaining)} finding(s); addressing (cycle '
-                  f'{cycles + 1}/{review_cycles})...', file=sys.stderr)
-            try:
-                await _run_implementor(
-                    impl_ctx, _address_findings_request(remaining, base_name),
-                    model, max_tool_failure, debug)
-            except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                break
-            passed, _out = await _ensure_validated(
-                impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
-            if not passed:
-                break
+        try:
             remaining = await _review_gate(cwd, base_name, base_ref, spec_text, model, debug)
-            cycles += 1
-        if remaining:
+            cycles = 0
+            while remaining and cycles < review_cycles:
+                print(f'Review found {len(remaining)} finding(s); addressing (cycle '
+                      f'{cycles + 1}/{review_cycles})...', file=sys.stderr)
+                try:
+                    await _run_implementor(
+                        impl_ctx, _address_findings_request(
+                            remaining, base_name),
+                        model, max_tool_failure, debug)
+                except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+                    break
+                passed, _out = await _ensure_validated(
+                    impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
+                if not passed:
+                    break
+                remaining = await _review_gate(
+                    cwd, base_name, base_ref, spec_text, model, debug)
+                cycles += 1
+            if remaining:
+                await _report(cwd, base_ref, short, ticket_id, design='locked',
+                              validation=validation,
+                              review=f'NOT clean ({len(remaining)} finding(s) remain)',
+                              commit='none (review not clean)')
+                return 1
+        except ReviewGateFailed as e:
+            # The review could not run (every reviewer failed). Do not commit on the strength of
+            # a review that never happened: stop and report a failure.
             await _report(cwd, base_ref, short, ticket_id, design='locked',
                           validation=validation,
-                          review=f'NOT clean ({len(remaining)} finding(s) remain)',
-                          commit='none (review not clean)')
+                          review=f'FAILED (the review gate could not run: {e})',
+                          commit='none (review gate failed to run)')
             return 1
         review_result = 'clean (no actionable findings)'
     else:
@@ -713,7 +751,7 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     exit_code, commit_title, commit_sha = await _propose_and_maybe_refine(
         read_line, cwd, source, spec_text, original_fields, current_repo, base_name,
         base_ref, impl_ctx, commit_title, validation_cmd, review_result, model,
-        max_tool_failure, debug)
+        max_tool_failure, debug, safe)
     await _report(cwd, base_ref, short, ticket_id, design='locked', validation=validation,
                   review=review_result, commit=f'{commit_sha} ({commit_title})')
     return exit_code
