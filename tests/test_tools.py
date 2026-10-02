@@ -323,6 +323,20 @@ def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
     assert outside.read_text() == 'original'  # the outside file is untouched
 
 
+def test_write_file_never_follows_a_symlink(tmp_path: Any) -> None:
+    # O_NOFOLLOW: even an in-tree symlink (which passes the realpath boundary check) is not
+    # written through — the final component is refused at the syscall level, so the tool never
+    # follows a symlink.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'real.txt').write_text('original')
+    os.symlink(repo / 'real.txt', repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert (repo / 'real.txt').read_text() == 'original'  # not written through the link
+
+
 def test_summarize_refuses_url_in_safe_mode() -> None:
     # Safe mode forbids the network: summarize must refuse a URL (before any fetch) rather than
     # let the safe implementor reach the web through this read tool.

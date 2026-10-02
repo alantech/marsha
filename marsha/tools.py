@@ -1922,7 +1922,12 @@ async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> st
         parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(target, 'w', encoding='utf-8') as f:
+        # Open with O_NOFOLLOW so the final path component is never followed as a symlink — the
+        # realpath check above is a check-then-open, and O_NOFOLLOW closes that gap at the syscall
+        # level (a symlink final component fails with ELOOP rather than being written through).
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT |
+                     os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(content)
     except Exception as e:
         return f'error: write-file could not write {path}: {e}'
