@@ -289,6 +289,10 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug
     prior_preamble: str = ''
     for i in range(level):
         log(f'oracle loop iteration {i + 1}/{level}: running reviewers')
+        if tool_ctx is not None:
+            # The editor applies the prior iteration's findings and changes the files, so a
+            # summarize/find-in-file cached before the edit would describe the old content.
+            tool_ctx.read_cache = {}
         user_message = _oracle_review_message(meta, oracle_md)
         if i > 0:
             user_message += prior_round_block(prior_findings, prior_preamble)
@@ -451,6 +455,10 @@ async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str],
     prior_preamble: str = ''
     for i in range(level):
         log(f'impl loop iteration {i + 1}/{level}: running reviewers')
+        if tool_ctx is not None:
+            # The editor applies the prior iteration's findings and changes the files, so a
+            # summarize/find-in-file cached before the edit would describe the old content.
+            tool_ctx.read_cache = {}
         current_code = cast(str, read_file(code_file))
         user_message = _impl_review_message(meta, oracle, current_code)
         if i > 0:
@@ -718,6 +726,10 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
     prior_preamble: str = ''
     for i in range(level):
         log(f'correction loop iteration {i + 1}/{level}: running reviewers')
+        if tool_ctx is not None:
+            # The editor applies the prior iteration's findings and changes the files, so a
+            # summarize/find-in-file cached before the edit would describe the old content.
+            tool_ctx.read_cache = {}
         corrected_code = _code_from_test_md(corrected_md)
         user_message = _correction_review_message(
             meta, code, orig_test, corrected_code, reason)

@@ -27,3 +27,9 @@ diff location. If the documentation does not identify the exact pattern you are 
 the change does not actually re-introduce it, that is not a finding — never report a vague "this
 looks like the old bug". A passage and a hunk that only loosely resemble each other is not a match.
 You may not modify the git tree, and every file path you read must stay inside the working tree.
+
+The documentation is the project's own account, so it outranks general advice: if a documented
+pattern and the codebase's current config or conventions point in different directions, trust the
+codebase and do not flag a change the codebase has already decided on. And a pattern counts as
+documented only if you actually opened the passage that names it, with the git tool or a read tool
+— a doc you have not read is not a citation you may lean on.

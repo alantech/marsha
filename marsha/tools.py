@@ -60,7 +60,24 @@ from marsha.utils import JSON, run_subprocess
 # Safety cap on how many tool rounds one generation may spend issuing commands
 # before the stage falls back to its normal retry logic (the last, still-a-command
 # response is returned so the stage's validation fails and its retry takes over).
-MAX_TOOL_ROUNDS = 5
+# Code generation must search the web for the real APIs it is told to interface with and,
+# when tests fail, read enough of the codebase to diagnose them; five rounds cut that off
+# before it got past the first lookup, so it implemented against a guessed API. 50 leaves
+# room for the lookups and the diagnosis. This is a cap, not a target — a simple generation
+# still finishes in a few rounds.
+MAX_TOOL_ROUNDS = 50
+
+# The tools whose output is a retrieved SOURCE (not a code read): a doc the reviewer summarized or
+# searched, or a web page it viewed or searched for. Their results are recorded in
+# ToolContext.sources so the evidence gate's citation check can prove a finding's cited doc path or
+# URL was actually retrieved. `list-tree` is excluded deliberately: it proves a doc EXISTS, not
+# that its contents were read, so a directory listing must not satisfy a citation.
+SOURCE_TOOLS = {'summarize', 'find-in-file', 'view-web-page', 'web-search'}
+
+# How many times the tool loop will bounce a findings response back to retrieve a cited doc/URL it
+# has not read, before returning it as-is and letting the deterministic evidence gate make the
+# call. Bounded so a stuck reviewer cannot burn the whole tool budget on the citation probe.
+MAX_CITATION_BOUNCES = 2
 
 # Bounds on the output fed back into the conversation, so a single tool result
 # cannot blow the context budget.
@@ -200,6 +217,17 @@ class ToolContext:
     # really retrieved — the basis for the review's anti-hallucination evidence gate. A fresh list
     # per reviewer so their ledgers do not leak across reviewers.
     evidence: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    # Per-reviewer ledger of the NON-git sources the reviewer actually retrieved: the (command
+    # line, output) of every summarize / find-in-file / view-web-page / web-search call. Kept
+    # separate from `evidence` (git only) so the mandatory-probing and code-grounding checks keep
+    # keying off real git reads, while the evidence gate's citation check — a finding's cited doc
+    # path or URL must have been retrieved — judges against this. A fresh list per reviewer.
+    sources: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    # Cache for the LLM-backed read tools (summarize / find-in-file), keyed by a normalized
+    # command line, so repeating the same retrieval within a run returns the cached result instead
+    # of calling the helper model again. Unlike the ledgers above it is NOT reset per reviewer:
+    # every reviewer in a review shares the caller's dict, so one summary serves the whole run.
+    read_cache: dict[str, str] = dataclasses.field(default_factory=dict)
     # When True (the review panel), the loop will not accept a findings response until the
     # reviewer has actually run a git command — the changed-file summary (names + line counts) is
     # not a basis for a finding. "NO FINDINGS" is exempt. False elsewhere (the optimize loops, the
@@ -1587,6 +1615,11 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
         return ('error: summarize takes one argument, a file path in the working tree or a URL, '
                 'e.g. $ summarize docs/NOTES.md')
     target = args[0].strip()
+    # A repeated retrieval within the run (same target, any reviewer) is served from the shared
+    # cache instead of calling the helper model again.
+    key = 'summarize\t' + target
+    if ctx is not None and key in ctx.read_cache:
+        return ctx.read_cache[key]
     # Bound the WHOLE helper request, not just the text: the header carries the target (an
     # unbounded URL or path), so refuse it before any fetch or read when it cannot fit.
     header = f'# Source: {target}\n\n'
@@ -1661,7 +1694,10 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     if not summary:
         return 'error: summarize could not be run (the helper model returned nothing).'
     note = '\n[the source was truncated before summarizing]' if truncated else ''
-    return f'Summary of {shown} (1-3 paragraphs):{note}\n\n{summary}'
+    result = f'Summary of {shown} (1-3 paragraphs):{note}\n\n{summary}'
+    if ctx is not None:
+        ctx.read_cache[key] = result
+    return result
 
 
 async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
@@ -1675,6 +1711,11 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     query = ' '.join(args[:-1]).strip()
     if not query:
         return 'error: find-in-file needs a non-empty query before the file path.'
+    # A repeated search within the run (same query and target, any reviewer) is served from the
+    # shared cache instead of calling the helper model again.
+    key = 'find-in-file\t' + query + '\t' + path
+    if ctx is not None and key in ctx.read_cache:
+        return ctx.read_cache[key]
     # Bound the WHOLE helper request, not just the document: the header carries the query and
     # path (unbounded user text), so refuse it before any read when it cannot fit. '1: ' is
     # the shortest numbered line, so the header must leave room for it.
@@ -1765,7 +1806,10 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
         return f'No content in {shown_path} is relevant to: {shown}'
     note = (f'\n[only the first {covered_chars} chars of {shown_path} were searched]'
             if truncated else '')
-    return f'Relevant parts of {shown_path} for: {shown}{note}\n\n{result}'
+    out = f'Relevant parts of {shown_path} for: {shown}{note}\n\n{result}'
+    if ctx is not None:
+        ctx.read_cache[key] = out
+    return out
 
 
 # --- the command set: agnostic base, layered per target -------------------------
@@ -2042,6 +2086,201 @@ def _is_no_findings_response(text: Any) -> bool:
     return _FINDING_SEVERITY_RE.search(text or '') is None
 
 
+# --- cited-source verification: shared by the tool-loop bounce and the evidence gate ---
+#
+# A finding that names a documentation file or a web URL as the basis of its claim must have
+# actually retrieved it — opened the doc (git show / cat-file) or fetched it (summarize /
+# find-in-file / view-web-page / web-search). This is the institutional-knowledge half of the
+# anti-hallucination checks: it stops a "re-introduces the pattern documented in docs/X.md"
+# finding where X.md was never opened. Code file paths are NOT checked here — the symbol / file
+# git checks ground those. The match is deliberately lenient (a citation written slightly
+# differently from the command still counts as retrieved): the failure it must avoid is a FALSE
+# DROP of a real, grounded finding, not a false pass.
+# A "source" is a doc or a config the codebase's conventions live in (per the proof directive):
+# prose docs plus the config files a reviewer may cite for a convention.
+_CITE_DOC_EXT_RE = re.compile(
+    r'\.(?:md|markdown|txt|rst|adoc|org|toml|cfg|ini|ya?ml|json|xml'
+    r'|properties|gradle)$', re.I)
+# A bare config/build file name with no extension that a reviewer may cite as a convention
+# source, matched in its exact file spelling (a prose "license" is not a citation).
+_CITE_DOC_BARE_RE = re.compile(
+    r'\b(?:CHANGELOG|CHANGES|Makefile|Dockerfile|Containerfile|Rakefile|Procfile'
+    r'|Gemfile|Jenkinsfile|Vagrantfile|LICENSE)\b')
+_CITE_URL_RE = re.compile(r'https?://\S+')
+# A cited path is a name.ext token — optionally under dot-prefixed directories, so
+# .github/workflows/x.md is one token, not fragments — or a dotfile (.flake8, .env, ...)
+# that is not itself a directory (a following '/' would make it one). A token that is not
+# a doc/config (a .md file, 1.2.3) is filtered by _is_cited_doc_path, not here.
+_CITE_PATH_RE = re.compile(
+    r'(?:\.[A-Za-z0-9_\-]+/)*[A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9]{1,10}\b'
+    r'|\.[A-Za-z][A-Za-z0-9_\-]*(?:\.[A-Za-z]{1,10})?(?!\s*/)', re.I)
+# Trailing sentence punctuation (and a CommonMark angle-bracket autolink's closing '>',
+# which the URL capture swallows) is not part of a cited URL or path.
+_CITE_PUNCT = '.,;:!?)]\'"`>'
+# A finding's path:line location is not a citation, so it is stripped before extraction.
+_CITE_FINDING_LOC_RE = re.compile(
+    r'(\[(?:MAJOR|MINOR|NIT|NITPICK)\]\s+)\S+:\d+')
+
+
+def _is_cited_doc_path(token: str) -> bool:
+    # A cited token is a documentation file (not a code file) when it ends in a prose extension,
+    # is a bare changelog-style name, or is a dotfile — a repo's config dotfiles (.flake8, .env,
+    # .editorconfig, ...) are convention sources a reviewer may cite. A final component under 4
+    # chars (a ".md file" mention in prose) is a bare extension, not a file citation. Code files
+    # (.py / .ts / ...) are excluded — the git symbol / file checks ground those, not the
+    # citation check.
+    last = token.rsplit('/', 1)[-1]
+    if last.startswith('.'):
+        return len(last) >= 4
+    if _CITE_DOC_EXT_RE.search(token):
+        return True
+    return last in ('CHANGELOG', 'CHANGES')
+
+
+def _command_tokens(cmd: str) -> list[str]:
+    # The tokens of a `$ <tool> <args>` command line: the leading `$` and any `PAGE=N` page
+    # prefix are removed and the rest is shlex-split, so a paged read is matched like its
+    # unpaged form and a quoted argument (the documented usage quotes URLs and search
+    # patterns) is one token. A naive split would leave the quotes on the target, and a
+    # quoted fetched URL would then not be recognized as fetched.
+    s = cmd.strip()
+    if not s.startswith('$'):
+        return []
+    rest = s[1:].strip()
+    m = re.match(r'PAGE=\d+\s+(.*)$', rest)
+    if m:
+        rest = m.group(1)
+    try:
+        return shlex.split(rest)
+    except ValueError:
+        return rest.split()
+
+
+def _command_tool(cmd: str) -> str | None:
+    toks = _command_tokens(cmd)
+    return toks[0] if toks else None
+
+
+def _git_object_path(arg: str) -> str:
+    # Strip a `REF:` prefix (HEAD:docs/x.md -> docs/x.md) from a git show / cat-file argument.
+    return arg.split(':', 1)[1] if (':' in arg and '://' not in arg) else arg
+
+
+def _command_target(cmd: str) -> str | None:
+    # The path or URL a content-READ command targets, else None. Reads are git show, git
+    # cat-file (not -s/-t, which report size/type), summarize, find-in-file, and view-web-page.
+    # Listing/search commands (git grep, git ls-files, list-tree, web-search) read no content.
+    toks = _command_tokens(cmd)
+    if not toks:
+        return None
+    tool, args = toks[0], toks[1:]
+    if tool == 'git':
+        if len(args) >= 2 and args[0] == 'show':
+            a = args[-1]
+            # Only `git show <ref>:<path>` reads the object's content. The other forms
+            # (`git show <commit>`, `git show --stat`, `git show <commit> -- <path>`)
+            # report commit info or a diff, not the file a citation names.
+            if ':' not in a or '://' in a:
+                return None
+            return _git_object_path(a)
+        if len(args) >= 2 and args[0] == 'cat-file':
+            # Only -p prints a blob's content. -e/-s/-t and their long forms
+            # (--exists/--size/--type) report metadata, and the --batch modes
+            # read from stdin, so none of them reads the file a citation names.
+            if '-p' not in args:
+                return None
+            return _git_object_path(args[-1])
+        return None
+    if tool in ('summarize', 'view-web-page'):
+        return args[0] if args else None
+    if tool == 'find-in-file':
+        return args[-1] if args else None
+    return None
+
+
+def _path_matches(cited: str, retrieved: str) -> bool:
+    # A citation matches a read path exactly, or — when the citation is a bare name (no '/') — by
+    # basename, so a reviewer who opened docs/NOTES.md satisfies a citation of just NOTES.md.
+    if cited == retrieved:
+        return True
+    return '/' not in cited and cited == retrieved.rsplit('/', 1)[-1]
+
+
+def _cited_url(u: str) -> str:
+    # Trailing punctuation is stripped from a cited/fetched URL, but a ')' that balances an
+    # opening '(' INSIDE the URL is part of the URL, not prose around the link.
+    while u and u[-1] in _CITE_PUNCT:
+        if u[-1] == ')' and u.count('(') >= u.count(')'):
+            break
+        u = u[:-1]
+    return u
+
+
+def retrieved_paths_and_urls(
+        evidence: list[tuple[str, str]], sources: list[tuple[str, str]]
+) -> tuple[set[str], set[str]]:
+    # The doc/code paths and URLs actually read: paths from git show/cat-file and summarize /
+    # find-in-file, urls from a view-web-page / summarize target and from web-search RESULT
+    # text (the output's first line echoes the QUERY, which is not a retrieval).
+    paths: set[str] = set()
+    urls: set[str] = set()
+    for cmd, _out in evidence:
+        t = _command_target(cmd)
+        if t and not t.startswith('http'):
+            paths.add(t)
+    for cmd, out in sources:
+        t = _command_target(cmd)
+        if t:
+            (urls if t.startswith('http') else paths).add(_cited_url(t))
+        if _command_tool(cmd) == 'web-search':
+            body = '\n'.join((out or '').splitlines()[1:])
+            for u in _CITE_URL_RE.findall(body):
+                urls.add(_cited_url(u))
+    return paths, urls
+
+
+def cited_sources(text: str) -> tuple[list[str], list[str]]:
+    # The doc paths and URLs cited in `text`, normalized (trailing punctuation stripped) and
+    # de-duplicated. Returns (doc_paths, urls). URLs are masked before path extraction so a URL
+    # ending in a doc extension (e.g. .../guide.md) is not also read as a local path.
+    text = text or ''
+    urls: list[str] = []
+    for u in _CITE_URL_RE.findall(text):
+        u = _cited_url(u)
+        if u not in urls:
+            urls.append(u)
+    masked = _CITE_URL_RE.sub(' ', text)
+    paths: list[str] = []
+    for tok in _CITE_PATH_RE.findall(masked):
+        tok = _cited_url(tok)
+        if _is_cited_doc_path(tok) and tok not in paths:
+            paths.append(tok)
+    for m in _CITE_DOC_BARE_RE.finditer(masked):
+        if m.group(0) not in paths:
+            paths.append(m.group(0))
+    return sorted(paths), urls
+
+
+def opened_command_scope(evidence: list[tuple[str, str]]) -> str:
+    # The command text that establishes a file/doc was OPENED. A `git grep` is a search, not a
+    # file open (a no-match grep reads no code from its pathspec), so it is excluded.
+    return '\n'.join(cmd for cmd, _out in evidence if 'grep' not in cmd.split())
+
+
+def unretrieved_citations(
+        text: str, evidence: list[tuple[str, str]], sources: list[tuple[str, str]]
+) -> list[str]:
+    # The doc paths and URLs cited in `text` that were not read. A doc path must have been opened
+    # (git show / cat-file, summarize, or find-in-file); a URL fetched (view-web-page / summarize)
+    # or surfaced by a web-search result. Empty means every citation was read (or none cited).
+    paths, urls = retrieved_paths_and_urls(evidence, sources)
+    doc_paths, cited_urls = cited_sources(text)
+    unret = [p for p in doc_paths if not any(
+        _path_matches(p, r) for r in paths)]
+    unret += [u for u in cited_urls if u not in urls]
+    return unret
+
+
 async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | None = None,
                          debug: bool = False, max_rounds: int = MAX_TOOL_ROUNDS) -> Any:
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
@@ -2066,6 +2305,7 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
     commands = build_commands(ctx)
     messages = [{'role': 'user', 'content': request}]
     last_text = ''
+    citation_bounces = 0
     for round_ in range(max_rounds):
         messages = await _maybe_compact_tool_history(messages, mapper, ctx, debug=debug)
         text = await mapper.run(messages)
@@ -2093,6 +2333,36 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
                     {'role': 'user', 'content': block},
                 ])
                 continue
+            # Citation probing: a finding that cites a doc/URL the reviewer never retrieved is
+            # bounced back to retrieve it (bounded by MAX_CITATION_BOUNCES), mirroring the git
+            # probe above. The deterministic evidence gate remains the final arbiter; this only
+            # gives the reviewer a chance to back a citation it already made. The finding's
+            # location is stripped first so a finding located in a doc is not read as a citation.
+            if (ctx.require_evidence and not _is_no_findings_response(text)
+                    and citation_bounces < MAX_CITATION_BOUNCES):
+                cite_text = _CITE_FINDING_LOC_RE.sub(r'\1', text)
+                bad = unretrieved_citations(
+                    cite_text, ctx.evidence, ctx.sources)
+                if bad:
+                    citation_bounces += 1
+                    if debug:
+                        print(f'[tools] citation bounce: {", ".join(bad)} '
+                              f'not retrieved; requesting retrieval')
+                    shown = ', '.join(bad[:5])
+                    if len(bad) > 5:
+                        shown += f', and {len(bad) - 5} more'
+                    block = (
+                        f'You cited {shown} in a finding but have not retrieved it. A citation '
+                        f'you have not read is not a basis for a finding. Retrieve it before you '
+                        f'rely on it: `git show HEAD:<path>` (or `summarize` / `find-in-file`) '
+                        f'a doc, or `view-web-page` / `web-search` a URL. Keep the citation only '
+                        f'if the source you read actually supports the finding; if it does not, '
+                        f'withdraw that finding. Then re-issue your findings.')
+                    messages.extend([
+                        {'role': 'assistant', 'content': text},
+                        {'role': 'user', 'content': block},
+                    ])
+                    continue
             return text
         if debug:
             print(f'[tools] round {round_ + 1}/{max_rounds}: {pending.name}')
@@ -2108,6 +2378,11 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
         # appears in the echoed command line, with no code actually read.
         if pending.name == 'git' and not result.startswith('error:'):
             ctx.evidence.append((pending.line, result))
+        elif (pending.name in SOURCE_TOOLS
+              and not result.startswith('error:')):
+            # A retrieved source (a doc or a web page), recorded separately from the git evidence
+            # so the citation check can prove a finding's cited doc/URL was actually fetched.
+            ctx.sources.append((pending.line, result))
         block = (wrap_untrusted(label, result)
                  + '\n\nIf you need more information, end your next response with another '
                    '`$` command line. Otherwise produce your final response now, in the exact '

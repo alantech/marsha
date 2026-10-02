@@ -11,3 +11,9 @@ you read it with the git tool, so that you point to the specific scan, allocatio
 rather than to a complexity you have merely assumed.
 
 You are after cost that the scale will actually pay, and you name the line that pays it.
+
+Back your order-of-growth claims in what you can point to: read the hot path with the git tool,
+and where the growth is not obvious from the code alone, retrieve and cite the source that
+establishes it — a documented incident at scale, a benchmark, or the project's own notes. If the
+repository's own design or config already bounds the growth you are about to flag, say so and do
+not raise it; the codebase's own decisions override a general principle.

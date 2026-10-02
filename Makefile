@@ -1,6 +1,7 @@
 n_jobs ?= 1
 provider ?= openai
 runs ?= 30
+threshold ?= 90
 PREFIX ?= $(HOME)/.local
 
 ./venv:
@@ -42,3 +43,10 @@ typecheck: ./venv
 .PHONY: time
 time: ./venv .time.py
 	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.time.py $(test) $(attempts) $(n_parallel_executions) $(stats) --n_jobs $(n_jobs) --provider $(provider) --runs $(runs)
+
+# Run the watchman over the example archivist clearances (examples/watchman/fixtures.json) and
+# fail when too few are decided correctly. The threshold is ratcheted up over time as the
+# watchman earns trust; the default (90) leaves a 6-of-60 error budget for borderline calls.
+.PHONY: watchman-eval
+watchman-eval: ./venv .watchman_eval.py
+	uv pip install --python ./venv/bin/python --upgrade .; ./venv/bin/python ./.watchman_eval.py examples/watchman/fixtures.json --provider $(provider) --n_jobs $(n_jobs) --threshold $(threshold)

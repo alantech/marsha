@@ -981,12 +981,65 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
 
 
 def test_run_with_tools_does_not_record_non_git_evidence() -> None:
-    # Only git output is evidence; a web-search result is not.
+    # Only git output is evidence; a web-search result is not evidence (it is a retrieved source).
     mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
     ctx = tools.ToolContext('gen')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert ctx.evidence == []
+    assert len(ctx.sources) == 1  # the search result IS recorded, as a source
+
+
+def test_run_with_tools_records_retrieved_sources() -> None:
+    # A retrieval tool (view-web-page) records its output on ctx.sources, not ctx.evidence, so the
+    # evidence gate's citation check can prove a finding's cited URL was really fetched.
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='PAGE-CONTENT')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+    assert len(ctx.sources) == 1
+    line, result = ctx.sources[0]
+    assert 'view-web-page' in line and 'example.com/x' in line
+    assert 'PAGE-CONTENT' in result
+
+
+def test_run_with_tools_records_summarize_as_source() -> None:
+    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command',
+                      new=AsyncMock(return_value='Summary of docs/NOTES.md: overflow.')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+    assert len(ctx.sources) == 1
+    assert 'summarize docs/NOTES.md' in ctx.sources[0][0]
+
+
+def test_run_with_tools_list_tree_is_not_a_source() -> None:
+    # list-tree proves a doc EXISTS, not that its contents were read, so it is not a source: a
+    # directory listing must not satisfy a citation.
+    mapper = ScriptedMapper(['$ list-tree docs\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='docs/NOTES.md')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.sources == [] and ctx.evidence == []
+
+
+def test_run_with_tools_does_not_record_error_source() -> None:
+    # An `error:` result from a retrieval tool carries no retrieved content, so it is not recorded
+    # as a source (mirroring the git evidence rule).
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='error: bad url')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.sources == []
+
+
+def test_codegen_tool_budget_allows_api_discovery() -> None:
+    # Code generation must be able to search the web for the real APIs it interfaces with and to
+    # diagnose failing tests; the budget was raised well above the old five-round default so a
+    # generation is not cut off before it gets past its first lookup.
+    assert tools.MAX_TOOL_ROUNDS >= 50
 
 
 def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
@@ -1011,6 +1064,259 @@ def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
     out2 = asyncio.run(
         tools.run_with_tools(ScriptedMapper(['NO FINDINGS']), 'REQ', ctx2))
     assert out2 == 'NO FINDINGS' and ctx2.evidence == []
+
+
+def test_run_with_tools_bounces_unretrieved_citation(tmp_path: Any) -> None:
+    # A finding that cites a doc the reviewer never retrieved is bounced back to retrieve it,
+    # mirroring the git probe. It is only accepted once the cited doc is actually read, which lands
+    # in the evidence ledger. (The finding's own location, mid.py:2, is not a citation.)
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs' / 'NOTES.md').write_text('# Notes\nthe pattern\n')
+    subprocess.run(['git', 'add', 'mid.py', 'docs'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong, per docs/NOTES.md'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # git probe -> finding citing an unread doc (bounced) -> retrieve the doc -> finding (kept).
+    mapper = ScriptedMapper([
+        '$ git show HEAD:mid.py\n',
+        finding,
+        '$ git show HEAD:docs/NOTES.md\n',
+        finding,
+    ])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == finding
+    assert any('docs/NOTES.md' in line for line, _ in ctx.evidence)
+
+
+def test_run_with_tools_citation_bounce_is_bounded(tmp_path: Any) -> None:
+    # The citation bounce is bounded: after MAX_CITATION_BOUNCES the finding is returned as-is
+    # (the deterministic evidence gate makes the final call), so a stuck reviewer cannot burn the
+    # whole tool budget on the citation probe.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'mid.py').write_text('alpha\nbeta\ngamma\n')
+    subprocess.run(['git', 'add', 'mid.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] mid.py:2 - beta is wrong, per docs/NOTES.md'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    # git probe -> finding (bounce 1) -> finding (bounce 2) -> finding (returned, at the cap).
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', finding, finding, finding])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx, max_rounds=10))
+    assert out == finding
+
+
+def test_unretrieved_citations_extraction() -> None:
+    # The shared extractor finds doc paths and URLs; unretrieved_citations reports the ones not
+    # read (a doc needs git show/summarize/find-in-file, a URL a view-web-page or web-search hit).
+    text = 'see docs/NOTES.md and https://example.com/x for the pattern'
+    assert tools.cited_sources(text) == (['docs/NOTES.md'], ['https://example.com/x'])
+    assert tools.unretrieved_citations(text, [], []) == \
+        ['docs/NOTES.md', 'https://example.com/x']
+    # A doc read via git show and a URL in a web-search result are both considered read.
+    assert tools.unretrieved_citations(
+        text, [('$ git show HEAD:docs/NOTES.md', '')],
+        [('$ web-search "x"',
+          'Search results for: x\n1. Example\nhttps://example.com/x')]) == []
+
+
+def test_unretrieved_citations_requires_a_real_read() -> None:
+    # A citation is satisfied only by a real read: a URL merely mentioned in a summarized local
+    # file is not fetched, git ls-files lists a doc without reading it, and a web-search query that
+    # contains a URL does not fetch it (only the results count).
+    url = 'https://example.com/x'
+    assert tools.unretrieved_citations(
+        url, [], [('$ summarize docs/NOTES.md', f'see {url}')]) == [url]
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git ls-files docs/NOTES.md', 'docs/NOTES.md')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        url, [], [('$ web-search "' + url + ' bug"',
+                   'Search results for: ' + url + ' bug\nno urls here')]) == [url]
+
+
+def test_unretrieved_citations_config_files_and_paged_reads() -> None:
+    # A repo config file (pyproject.toml, setup.cfg, ...) is a citable source like a doc, and a
+    # paged `git show` (PAGE=<n>) is a real read of the cited file.
+    cfg = 'the lint convention is in pyproject.toml'
+    assert tools.cited_sources(cfg) == (['pyproject.toml'], [])
+    assert tools.unretrieved_citations(cfg, [], []) == ['pyproject.toml']
+    assert tools.unretrieved_citations(
+        cfg, [('$ git show HEAD:pyproject.toml', '[tool.ruff]')], []) == []
+    assert tools.unretrieved_citations(
+        'see docs/big.md',
+        [('$ PAGE=2 git show HEAD:docs/big.md', 'page two')], []) == []
+
+
+def test_unretrieved_citations_size_type_queries_are_not_reads() -> None:
+    # `git cat-file -s/-t` reports a blob's size or type without reading its content, so it does
+    # not satisfy a citation of that file.
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -s HEAD:docs/NOTES.md', '1234')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -t HEAD:docs/NOTES.md', 'blob')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git cat-file -p HEAD:docs/NOTES.md', 'notes')], []) == []
+
+
+def test_unretrieved_citations_metadata_cat_file_forms() -> None:
+    # Only `git cat-file -p` prints content: the existence/size/type forms, short (-e/-s/-t) or
+    # long (--exists/--size/--type), and the stdin-driven --batch modes, do not read the cited
+    # file and must not satisfy its citation.
+    for cmd in ('$ git cat-file -e HEAD:docs/NOTES.md',
+                '$ git cat-file --exists HEAD:docs/NOTES.md',
+                '$ git cat-file -s HEAD:docs/NOTES.md',
+                '$ git cat-file --size HEAD:docs/NOTES.md',
+                '$ git cat-file -t HEAD:docs/NOTES.md',
+                '$ git cat-file --type HEAD:docs/NOTES.md',
+                '$ git cat-file --batch-check HEAD:docs/NOTES.md'):
+        assert tools.unretrieved_citations(
+            'see docs/NOTES.md', [(cmd, '0')], []) == ['docs/NOTES.md'], cmd
+
+
+def test_unretrieved_citations_json_configs() -> None:
+    # A JSON config (package.json, config.json) is a citable source like the other config
+    # formats: naming it in a finding requires having opened it.
+    assert tools.cited_sources('the build flag is in package.json') == \
+        (['package.json'], [])
+    assert tools.unretrieved_citations(
+        'the build flag is in package.json', [], []) == ['package.json']
+    assert tools.unretrieved_citations(
+        'the build flag is in package.json',
+        [('$ git show HEAD:package.json', '{}')], []) == []
+    # XML, properties, and gradle build files are convention sources too.
+    assert tools.cited_sources('the plugin is in pom.xml') == (['pom.xml'], [])
+    assert tools.cited_sources('the property is in application.properties') == \
+        (['application.properties'], [])
+    assert tools.cited_sources('the task is in build.gradle') == (['build.gradle'], [])
+    assert tools.unretrieved_citations(
+        'the plugin is in pom.xml', [], []) == ['pom.xml']
+    assert tools.unretrieved_citations(
+        'the plugin is in pom.xml',
+        [('$ git show HEAD:pom.xml', '<project/>')], []) == []
+
+
+def test_cited_sources_masks_urls_ending_in_doc_extensions() -> None:
+    # A URL ending in a doc extension (https://x/guide.md) is a URL citation only — it is not
+    # also read as a local doc path, and fetching the URL satisfies the citation.
+    url = 'https://example.com/guide.md'
+    assert tools.cited_sources(f'see {url} for the pattern') == ([], [url])
+    assert tools.unretrieved_citations(
+        f'see {url} for the pattern', [], []) == [url]
+    assert tools.unretrieved_citations(
+        f'see {url} for the pattern',
+        [], [('$ view-web-page "' + url + '"', 'the guide')]) == []
+    # A real local path beside the URL is still extracted.
+    assert tools.cited_sources(f'see {url} and docs/NOTES.md') == \
+        (['docs/NOTES.md'], [url])
+
+
+def test_unretrieved_citations_quoted_arguments() -> None:
+    # The documented usage quotes URLs and patterns ($ view-web-page "https://url"), so a
+    # quoted fetch must satisfy the citation exactly like an unquoted one, and a quoted
+    # find-in-file target is the path, not a fragment of it.
+    url = 'https://docs.python.org/3/'
+    assert tools.unretrieved_citations(
+        f'see {url}', [], [('$ view-web-page "' + url + '"', 'the docs')]) == []
+    assert tools.unretrieved_citations(
+        f'see {url}', [], [('$ summarize "' + url + '"', 'the docs')]) == []
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [], [('$ find-in-file "pattern" "docs/NOTES.md"', 'the note')]) == []
+
+
+def test_unretrieved_citations_git_show_forms() -> None:
+    # Only `git show <ref>:<path>` reads a doc's content: `git show <commit>` and
+    # `git show <commit> -- <path>` (commit info or a diff) do not satisfy a citation.
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show --stat HEAD -- docs/NOTES.md', 'docs/NOTES.md | 1 +')],
+        []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show HEAD -- docs/NOTES.md', '+a note')], []) == ['docs/NOTES.md']
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md',
+        [('$ git show HEAD:docs/NOTES.md', 'a note')], []) == []
+
+
+def test_unretrieved_citations_dotfile_configs() -> None:
+    # A repo config dotfile (.flake8, .env) is a citable source like the other config
+    # formats, while a bare extension mention in prose (a ".md file") is not a citation.
+    assert tools.cited_sources('the flake8 config is in .flake8') == (['.flake8'], [])
+    assert tools.unretrieved_citations(
+        'the flake8 config is in .flake8', [], []) == ['.flake8']
+    assert tools.unretrieved_citations(
+        'the flake8 config is in .flake8',
+        [('$ git show HEAD:.flake8', '[flake8]')], []) == []
+    assert tools.cited_sources('per config/.flake8 the limit is 79') == \
+        (['config/.flake8'], [])
+    assert tools.cited_sources('the docs use a .md file') == ([], [])
+
+
+def test_unretrieved_citations_extensionless_configs() -> None:
+    # An extensionless config/build file (Makefile, Dockerfile, ...) is a citable convention
+    # source in its exact file spelling; a prose "license" is not a citation.
+    assert tools.cited_sources('per the Makefile, run make format') == (['Makefile'], [])
+    assert tools.unretrieved_citations(
+        'per the Makefile, run make format', [], []) == ['Makefile']
+    assert tools.unretrieved_citations(
+        'per the Makefile, run make format',
+        [('$ git show HEAD:Makefile', '.PHONY: format')], []) == []
+    assert tools.cited_sources('the Dockerfile copies the repo') == (['Dockerfile'], [])
+    assert tools.cited_sources('a license is required') == ([], [])
+
+
+def test_unretrieved_citations_web_search_query_is_not_a_result() -> None:
+    # The web-search output's first line echoes the QUERY; a URL in the query is not a
+    # retrieval — only URLs in the result lines count.
+    url = 'https://example.com/x'
+    out = ('Search results for: ' + url + ' bug\n1. Some title\n'
+           'https://other.com/page')
+    assert tools.unretrieved_citations(
+        'see ' + url, [], [('$ web-search "' + url + ' bug"', out)]) == [url]
+    assert tools.unretrieved_citations(
+        'see https://other.com/page', [], [('$ web-search "q"', out)]) == []
+
+
+def test_cited_url_balanced_parentheses() -> None:
+    # A trailing ')' that balances an opening '(' inside the URL is part of the URL (kept);
+    # a lone ')' is prose punctuation around the link (stripped).
+    u = 'https://en.wikipedia.org/wiki/Foo_(bar)'
+    assert tools.cited_sources('see ' + u) == ([], [u])
+    assert tools.unretrieved_citations(
+        'see ' + u, [], [('$ view-web-page "' + u + '"', 'page')]) == []
+    assert tools.cited_sources('see (https://x.com) here') == \
+        ([], ['https://x.com'])
+
+
+def test_cited_sources_dot_directory_paths_are_one_token() -> None:
+    # A doc under a dot-prefixed directory (.github/workflows/x.md) is ONE citation matching
+    # the retrieved path — not fragments that could never match and false-drop a grounded finding.
+    text = 'the workflow in .github/workflows/ci.md says so'
+    assert tools.cited_sources(text) == (['.github/workflows/ci.md'], [])
+    assert tools.unretrieved_citations(
+        text, [('$ git show HEAD:.github/workflows/ci.md', 'on: push')], []) == []
+    assert tools.unretrieved_citations(text, [], []) == ['.github/workflows/ci.md']
+
+
+def test_cited_sources_strips_angle_bracket_autolinks() -> None:
+    # A CommonMark angle-bracket autolink (<https://x>) is a URL citation: the closing
+    # bracket is not part of the URL and must not block the retrieval match.
+    url = 'https://spec.commonmark.org/0.31.2/#autolinks'
+    assert tools.cited_sources(f'see <{url}> for the rule') == ([], [url])
+    assert tools.unretrieved_citations(
+        f'see <{url}> for the rule', [], []) == [url]
+    assert tools.unretrieved_citations(
+        f'see <{url}> for the rule',
+        [], [('$ view-web-page "' + url + '"', 'the spec')]) == []
 
 
 def test_run_with_tools_unknown_command_feeds_error() -> None:
@@ -1409,6 +1715,59 @@ def test_summarize_file_uses_helper_model(tmp_path: Any) -> None:
     assert 'SUMMARY TEXT' in out
     assert '# Notes' in seen['m'].req
     assert seen['m'].kw.get('label') == 'read:summarize'
+
+
+def test_summarize_caches_within_run(tmp_path: Any) -> None:
+    # A repeated summarize of the same target within a run is served from the shared read_cache
+    # instead of calling the helper model again.
+    (tmp_path / 'notes.md').write_text('# Notes\nbody\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        out1 = asyncio.run(tools.summarize(['notes.md'], ctx))
+        out2 = asyncio.run(tools.summarize(['notes.md'], ctx))
+    assert out1 == out2
+    assert len(calls) == 1  # the second call was served from the cache
+
+
+def test_summarize_cache_is_per_target(tmp_path: Any) -> None:
+    # Distinct targets are distinct cache keys: summarizing two different files calls the helper
+    # model once each.
+    (tmp_path / 'a.md').write_text('# A\n')
+    (tmp_path / 'b.md').write_text('# B\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        asyncio.run(tools.summarize(['a.md'], ctx))
+        asyncio.run(tools.summarize(['b.md'], ctx))
+    assert len(calls) == 2
+
+
+def test_find_in_file_caches_within_run(tmp_path: Any) -> None:
+    # A repeated find-in-file with the same query and target within a run is served from the cache.
+    (tmp_path / 'notes.md').write_text('# Notes\nthe body\n')
+    calls: list[Any] = []
+
+    def make(system: Any, **kw: Any) -> Any:
+        m = _SummMapper(system, **kw)
+        calls.append(m)
+        return m
+    ctx = tools.ToolContext('review', workdir=str(tmp_path))
+    with patch.object(tools, 'get_mapper', new=make):
+        out1 = asyncio.run(tools.find_in_file(['failure modes', 'notes.md'], ctx))
+        out2 = asyncio.run(tools.find_in_file(['failure modes', 'notes.md'], ctx))
+    assert out1 == out2
+    assert len(calls) == 1
 
 
 def test_summarize_rejects_escaping_and_non_file(tmp_path: Any) -> None:
