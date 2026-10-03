@@ -239,6 +239,22 @@ def test_run_diff_safe_refuses_remote_spec_source() -> None:
     assert asyncio.run(diff.run_diff(_args(linear='ABC-123', safe=True))) == 2
 
 
+def test_address_and_validation_fix_requests_are_safe_aware() -> None:
+    # In safe mode the implementor has no command tool (implement-safe omits exec), so the fix
+    # requests must not tell it to rerun validation with exec (the harness does that); the
+    # non-safe requests keep the exec instruction.
+    finding: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
+                        'location': 'a.py:1', 'desc': 'fix this'}
+    safe_req = diff._address_findings_request([finding], 'main', safe=True)
+    assert 'exec' not in safe_req and 'harness reruns' in safe_req
+    normal_req = diff._address_findings_request([finding], 'main')
+    assert 'exec' in normal_req and 'harness reruns' not in normal_req
+    safe_fix = diff._validation_fix_request('pytest', 'boom', safe=True)
+    assert 'exec' not in safe_fix and 'harness reruns' in safe_fix
+    normal_fix = diff._validation_fix_request('pytest', 'boom')
+    assert 'exec' in normal_fix and 'harness reruns' not in normal_fix
+
+
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
     # An unlocked spec stops before any branch is created and before the implementor runs.
     p = str(tmp_path)

@@ -286,22 +286,36 @@ def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool) 
     return '\n\n'.join(parts)
 
 
-def _address_findings_request(findings: list[Finding], base_name: str) -> str:
-    # The request that sends review findings back to the implementor to address.
-    return (
-        'A review of the working-tree changes found the findings below. Address each one: fix the '
-        'code (write-file), then rerun the project\'s validation (exec) until it passes. Keep '
-        f'changes scoped to the default branch `{base_name}` and do not commit. When done, give a '
-        'short report of what you changed and the validation result.\n\n# Findings to address\n\n'
-        + _findings_block(findings))
+def _address_findings_request(findings: list[Finding], base_name: str,
+                              safe: bool = False) -> str:
+    # The request that sends review findings back to the implementor to address. In safe mode the
+    # implementor has no command tool (the implement-safe phase omits exec), so it cannot rerun
+    # the validation itself — the harness does that — and is told to just make the fix.
+    if safe:
+        action = ('fix the code (write-file); you have no command tool, so the harness reruns the '
+                  'project\'s validation for you — make the fix by editing files.')
+    else:
+        action = ('fix the code (write-file), then rerun the project\'s validation (exec) until it '
+                  'passes.')
+    head = (f'A review of the working-tree changes found the findings below. Address each one: '
+            f'{action} Keep changes scoped to the default branch `{base_name}` and do not commit. '
+            'When done, give a short report of what you changed and the validation result.\n\n')
+    return head + '# Findings to address\n\n' + _findings_block(findings)
 
 
-def _validation_fix_request(validation_cmd: str, failure_output: str) -> str:
-    # The request that hands a failing validation back to the implementor.
-    return (
-        f'The project\'s validation command `{validation_cmd}` failed. Read the failure below, fix '
-        'the code (write-file), and rerun the command (exec) until it passes. Then give a short '
-        'report.\n\n# Validation failure\n\n' + failure_output[:8000])
+def _validation_fix_request(validation_cmd: str, failure_output: str,
+                            safe: bool = False) -> str:
+    # The request that hands a failing validation back to the implementor. In safe mode the
+    # implementor has no command tool (the implement-safe phase omits exec), so it cannot rerun
+    # the validation itself — the harness does that — and is told to just make the fix.
+    if safe:
+        action = ('you have no command tool, so the harness reruns it for you — make the fix by '
+                  'editing files.')
+    else:
+        action = 'rerun the command (exec) until it passes.'
+    head = (f'The project\'s validation command `{validation_cmd}` failed. Read the failure below, '
+            f'fix the code (write-file), and {action} Then give a short report.\n\n')
+    return head + '# Validation failure\n\n' + failure_output[:8000]
 
 
 async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
@@ -318,11 +332,12 @@ async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
 
 
 async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: str,
-                            model: str, max_failures: int,
-                            debug: bool) -> tuple[bool, str]:
+                            model: str, max_failures: int, debug: bool,
+                            safe: bool = False) -> tuple[bool, str]:
     # Run the validation; on a failure, hand it to the implementor to fix and rerun, up to
     # MAX_VALIDATION_FIX_PASSES. Returns (passed, last_output). A validation that cannot even be
-    # run counts as a failure and is also handed back for a workaround.
+    # run counts as a failure and is also handed back for a workaround. In safe mode the fix
+    # request omits the exec instruction (the implement-safe phase has no command tool).
     passed, out = await _run_validation(cwd, validation_cmd)
     fix_passes = 0
     while not passed and fix_passes < MAX_VALIDATION_FIX_PASSES:
@@ -330,7 +345,7 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
             print(f'[diff] validation `{validation_cmd}` failed; asking the implementor to fix '
                   f'(pass {fix_passes + 1}/{MAX_VALIDATION_FIX_PASSES})')
         try:
-            await _run_implementor(ctx, _validation_fix_request(validation_cmd, out), model,
+            await _run_implementor(ctx, _validation_fix_request(validation_cmd, out, safe), model,
                                    max_failures, debug)
         except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
             break
@@ -695,7 +710,7 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     if validation_allowed:
         print(f'Running validation: `{validation_cmd}`', file=sys.stderr)
         passed, _out = await _ensure_validated(
-            impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
+            impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
         if not passed:
             await _report(cwd, base_ref, short, ticket_id, design='locked',
                           validation=f'FAILED (`{validation_cmd}`)', review='not run',
@@ -716,13 +731,13 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
                 try:
                     await _run_implementor(
                         impl_ctx, _address_findings_request(
-                            remaining, base_name),
+                            remaining, base_name, safe),
                         model, max_tool_failure, debug)
                 except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
                     break
                 if validation_allowed:
                     passed, _out = await _ensure_validated(
-                        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
+                        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
                     if not passed:
                         break
                 remaining = await _review_gate(
