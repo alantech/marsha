@@ -373,8 +373,13 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     # `git diff <base>` shows only tracked files, so a change that consists solely of NEW files
     # (still untracked) would read as empty and skip the gate — yet `_commit` stages everything
     # with `git add -A`. Stage the working tree first so the review sees exactly what the commit
-    # will capture (this is the same non-destructive staging the commit performs).
-    await _git('add', '-A', cwd=cwd)
+    # will capture (this is the same non-destructive staging the commit performs). If staging
+    # fails, the tree may not be fully captured (untracked changes would be absent from the diff
+    # yet committed later), so the gate must not review — or clear — an incomplete tree.
+    rc, _o, err = await _git('add', '-A', cwd=cwd)
+    if rc != 0:
+        raise ReviewGateFailed(
+            f'the review gate could not stage the working tree: {err}')
     stat_text = await working_tree_diff_stat(base_ref, cwd)
     if not stat_text.strip():
         return []

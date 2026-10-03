@@ -1017,6 +1017,9 @@ GIT_READONLY_COMMANDS = {
 # remote-tracking refs). The read-only subcommands are allowlisted and the rest refused, so a
 # new or aliased mutating subcommand (e.g. `rm` for `remove`) cannot slip through.
 GIT_REMOTE_READONLY_SUBCOMMANDS = {'get-url', 'show'}
+# `git remote` subcommands that contact the remote over the network (read-only, but still a
+# network operation), so they are refused in safe mode along with the top-level network commands.
+GIT_REMOTE_NETWORK_SUBCOMMANDS = {'show'}
 # Subcommands that contact a remote over the network. Read-only, but still a network operation —
 # so they are refused in safe mode (the implement-safe phase is a no-network mode) to keep its
 # documented boundary intact.
@@ -1110,6 +1113,10 @@ async def git(args: list[str], ctx: ToolContext | None = None, page: int | None 
                 f'error: `git remote {first}` is not allowed (it would modify the '
                 'repository); only `git remote`, `git remote -v`, '
                 '`git remote get-url` and `git remote show` are permitted.')
+        if first in GIT_REMOTE_NETWORK_SUBCOMMANDS and ctx is not None \
+                and ctx.phase == 'implement-safe':
+            return (f'error: `git remote {first}` is not allowed in safe mode (it would contact '
+                    'the remote over the network, which safe mode disables).')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:

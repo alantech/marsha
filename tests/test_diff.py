@@ -513,6 +513,19 @@ def test_propose_refine_review_gate_failed_leaves_commit_intact(tmp_path: Any, c
     assert 'could not run' in capsys.readouterr().err
 
 
+def test_review_gate_fails_if_staging_fails(tmp_path: Any) -> None:
+    # If staging the working tree (git add -A) fails, the gate must fail rather than review an
+    # incomplete tree (whose untracked changes could later be committed unreviewed).
+    p = str(tmp_path)
+
+    async def fake_git(*a: Any, **k: Any) -> Any:
+        return (1, '', 'boom')
+
+    with patch.object(diff, '_git', new=fake_git):
+        with pytest.raises(diff.ReviewGateFailed):
+            asyncio.run(diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
+
+
 def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None:
     # A locked spec with passing validation and a clean review commits and the proposal is
     # accepted (no PR is pushed or created).

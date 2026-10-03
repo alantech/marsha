@@ -849,9 +849,9 @@ def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
 
 
 def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
-    # Safe mode is a no-network mode: a read-only but network-contacting git subcommand (ls-remote)
-    # is refused in the implement-safe phase, while local read-only commands are still allowed and
-    # the same subcommand is not blocked by the safe-mode check outside safe mode.
+    # Safe mode is a no-network mode: read-only but network-contacting git operations (ls-remote,
+    # remote show) are refused in the implement-safe phase, while local read-only commands are
+    # still allowed and the same subcommands are not blocked by the safe-mode check outside it.
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
@@ -859,15 +859,16 @@ def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
     subprocess.run(['git', 'add', 'a.txt'], cwd=tmp_path, check=True)
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     safe = tools.ToolContext('implement-safe', workdir=str(tmp_path))
-    refused = asyncio.run(tools.git(['ls-remote', 'origin'], safe))
-    assert refused.startswith('error:') and 'safe mode' in refused
+    for cmd in (['ls-remote', 'origin'], ['remote', 'show', 'origin']):
+        refused = asyncio.run(tools.git(cmd, safe))
+        assert refused.startswith('error:') and 'safe mode' in refused
     # A local read-only command is still permitted in safe mode.
     log = asyncio.run(tools.git(['log', '--oneline'], safe))
     assert not log.startswith('error:')
-    # The same subcommand is not blocked by the safe-mode check outside safe mode.
+    # The same subcommands are not blocked by the safe-mode check outside safe mode.
     review = tools.ToolContext('review', workdir=str(tmp_path))
-    notsafe = asyncio.run(tools.git(['ls-remote', 'origin'], review))
-    assert 'safe mode' not in notsafe
+    assert 'safe mode' not in asyncio.run(tools.git(['ls-remote', 'origin'], review))
+    assert 'safe mode' not in asyncio.run(tools.git(['remote', 'show', 'origin'], review))
 
 
 def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:
