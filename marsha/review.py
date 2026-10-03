@@ -1619,17 +1619,22 @@ def _symbol_in_text(text: str, symbol: str) -> bool:
     return re.search(rf'\b{re.escape(symbol)}\b', text) is not None
 
 
-async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | None]) -> bool | None:
-    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word fixed string (no
+async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | None],
+                          working_tree: bool = False) -> bool | None:
+    # Whether `symbol` occurs in the reviewed code, matched as a whole-word fixed string (no
     # language-specific keyword, so any language works). A dotted name is grepped in full, so an
     # invented chain such as svc.foo.bar is "present" only if that exact chain is, never on the
-    # strength of its `bar` leaf alone. Pinned to HEAD rather than the working tree, so uncommitted
-    # changes — which a local review excludes — cannot falsify a finding about the committed code.
+    # strength of its `bar` leaf alone. Greps the working tree when `working_tree` is set (a review
+    # of uncommitted changes) and HEAD otherwise, so a change outside the review's scope cannot
+    # falsify a finding about the code under review.
     # Returns True (a match), False (a clean no-match), or None (the grep itself failed — an error
     # is not proof of absence). Cached per symbol.
     if symbol in cache:
         return cache[symbol]
-    rc, _out, _err = await _git('grep', '-F', '-w', symbol, 'HEAD', cwd=cwd)
+    args = ['grep', '-F', '-w', symbol]
+    if not working_tree:
+        args.append('HEAD')
+    rc, _out, _err = await _git(*args, cwd=cwd)
     present = True if rc == 0 else (False if rc == 1 else None)
     cache[symbol] = present
     return present
@@ -1760,7 +1765,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
                 # A name is a fabrication only when it is definitively absent from the tree (a
                 # clean no-match grep) and absent from the evidence; a grep error (None) cannot
                 # prove absence, so it does not drop the finding.
-                if await _symbol_present(a, cwd, symbol_cache) is not False:
+                if await _symbol_present(a, cwd, symbol_cache, working_tree) is not False:
                     continue
                 ok, reason = (False,
                               f'names {a}, which appears in neither the reviewer\'s git '
@@ -1772,7 +1777,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
             # does not drop the finding.
             for symbol in _asserted_absent_symbols(f):
-                if await _symbol_present(symbol, cwd, symbol_cache) is True:
+                if await _symbol_present(symbol, cwd, symbol_cache, working_tree) is True:
                     ok, reason = (False,
                                   f'asserts {symbol} is undefined or absent, but '
                                   f'it is present in the reviewed tree')

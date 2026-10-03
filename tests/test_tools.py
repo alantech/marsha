@@ -834,6 +834,28 @@ def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
     assert beyond.startswith('error: page 99 is out of range')
 
 
+def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
+    # Safe mode is a no-network mode: a read-only but network-contacting git subcommand (ls-remote)
+    # is refused in the implement-safe phase, while local read-only commands are still allowed and
+    # the same subcommand is not blocked by the safe-mode check outside safe mode.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'a.txt').write_text('x\n')
+    subprocess.run(['git', 'add', 'a.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    safe = tools.ToolContext('implement-safe', workdir=str(tmp_path))
+    refused = asyncio.run(tools.git(['ls-remote', 'origin'], safe))
+    assert refused.startswith('error:') and 'safe mode' in refused
+    # A local read-only command is still permitted in safe mode.
+    log = asyncio.run(tools.git(['log', '--oneline'], safe))
+    assert not log.startswith('error:')
+    # The same subcommand is not blocked by the safe-mode check outside safe mode.
+    review = tools.ToolContext('review', workdir=str(tmp_path))
+    notsafe = asyncio.run(tools.git(['ls-remote', 'origin'], review))
+    assert 'safe mode' not in notsafe
+
+
 def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:
     # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
     # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first

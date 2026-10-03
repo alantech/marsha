@@ -874,6 +874,18 @@ def test_symbol_present_tri_state_on_grep_error(repo: Any) -> None:
         assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
 
 
+def test_symbol_present_working_tree_mode(repo: Any) -> None:
+    # working_tree=True greps the working tree (not HEAD): a symbol present only in an uncommitted
+    # change is "present", and one deleted from the working tree is "absent" — the opposite of the
+    # committed (HEAD) default. This is the mode the marsha diff review gate runs in.
+    with open(os.path.join(repo, 'a.txt'), 'w') as f:
+        f.write('one\nthree\nfour\nWORKTREE_ONLY\n')  # drops TWO, adds WORKTREE_ONLY (uncommitted)
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=False)) is True
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=True)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=False)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=True)) is True
+
+
 def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:
     # The cited-file check matches a whole path component, not a substring: a command that read
     # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
