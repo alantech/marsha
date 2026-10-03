@@ -202,11 +202,21 @@ async def _create_branch(name: str, base_ref: str, cwd: str) -> None:
 
 
 async def _changed_files(cwd: str, base_ref: str) -> list[str]:
-    # The relative paths changed against the base (uncommitted working-tree work included).
+    # The relative paths changed against the base (uncommitted working-tree work included), plus
+    # newly created files that are still untracked — `git diff` omits those, so without this the
+    # summary would report a change of new files as "no changes" (e.g. a --review-cycles 0 safe run
+    # or an early failure, before the review gate stages them).
     rc, out, _err = await _git('diff', '--name-only', base_ref, cwd=cwd)
-    if rc != 0:
-        return []
-    return [line for line in out.splitlines() if line.strip()]
+    paths: list[str] = []
+    if rc == 0:
+        paths = [line for line in out.splitlines() if line.strip()]
+    rc, untracked, _e = await _git('ls-files', '--others', '--exclude-standard', cwd=cwd)
+    if rc == 0:
+        for line in untracked.splitlines():
+            line = line.strip()
+            if line and line not in paths:
+                paths.append(line)
+    return paths
 
 
 async def _commit(cwd: str, title: str, body: str) -> str:

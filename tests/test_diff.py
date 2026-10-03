@@ -526,6 +526,17 @@ def test_review_gate_fails_if_staging_fails(tmp_path: Any) -> None:
             asyncio.run(diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
 
 
+def test_changed_files_includes_untracked_new_files(tmp_path: Any) -> None:
+    # A newly created, still-untracked file must appear in the changed-files list (git diff omits
+    # it), so the summary does not report a change of only new files as "no changes".
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    with open(os.path.join(p, 'brand_new.py'), 'w') as f:
+        f.write('print(1)\n')
+    files = asyncio.run(diff._changed_files(p, 'main'))
+    assert 'brand_new.py' in files
+
+
 def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None:
     # A locked spec with passing validation and a clean review commits and the proposal is
     # accepted (no PR is pushed or created).
