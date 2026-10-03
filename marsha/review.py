@@ -149,6 +149,27 @@ async def working_tree_clean(cwd: str | None = None) -> bool:
     return out == ''
 
 
+async def working_tree_diff(base_ref: str, cwd: str | None = None, context: int = 3) -> str:
+    # Two-dot diff of the WORKING TREE against the base ref (no head): it includes uncommitted
+    # changes, so a branch's not-yet-committed implementation is reviewed exactly as it sits.
+    # `marsha review` reviews committed changes (base...HEAD); this is the uncommitted variant the
+    # `diff` command's review gate uses before its implementation has been committed.
+    rc, out, err = await _git('diff', f'{base_ref}', f'-U{context}', cwd=cwd)
+    if rc != 0:
+        raise Exception(
+            f'git diff against {base_ref} (working tree) failed: {err}')
+    return out
+
+
+async def working_tree_diff_stat(base_ref: str, cwd: str | None = None) -> str:
+    # The changed-file summary of the working tree against the base ref (uncommitted included).
+    rc, out, err = await _git('diff', '--stat', base_ref, cwd=cwd)
+    if rc != 0:
+        raise Exception(
+            f'git diff --stat against {base_ref} (working tree) failed: {err}')
+    return out
+
+
 async def branch_diff(base_ref: str, head: str = 'HEAD', cwd: str | None = None, context: int = 3) -> str:
     # Three-dot (base...head): symmetric diff from the merge-base — exactly what `head` changed
     # relative to `base` (the default branch), excluding changes that landed on `base` itself.
@@ -425,7 +446,21 @@ async def pr_anchorable_lines(repo: str, pr_num: int, cwd: str | None = None) ->
     return anchorable
 
 
-def build_review_message(stat_text: str, base_name: str, base_ref: str, context_blocks: list[str]) -> str:
+def build_review_message(stat_text: str, base_name: str, base_ref: str,
+                         context_blocks: list[str], working_tree: bool = False) -> str:
+    # The committed case (`marsha review`) diffs the branch against its base; the working-tree
+    # case (`marsha diff`'s pre-commit gate) reviews uncommitted changes, so the diff is the
+    # working tree against the base (two-dot) and the changed files must be read from disk —
+    # `git show HEAD:<path>` would show the base version, not the uncommitted change.
+    if working_tree:
+        diff_ref = (f'`git diff {base_ref}` — the working tree against `{base_ref}`, which '
+                    'includes uncommitted changes')
+        changed_files = ('the changed files (they are uncommitted, so read them with '
+                         '`summarize` / `find-in-file`, not `git show HEAD:<path>`, which would '
+                         'show the base version)')
+    else:
+        diff_ref = f'`git diff {base_ref}...HEAD`'
+        changed_files = 'the changed files (`git show HEAD:<path>`)'
     parts = [
         f'You are reviewing a change to an existing codebase: the currently checked-out '
         f'branch, diffed against the default branch `{base_name}` (ref `{base_ref}`). There '
@@ -434,9 +469,9 @@ def build_review_message(stat_text: str, base_name: str, base_ref: str, context_
         f'specified, apply general correctness, safety, and code-quality standards to the '
         f'changed code.',
         ('You have a read-only `git` tool and a `notes` scratchpad. Start from the changed-file '
-         f'summary below, then probe the codebase yourself: read the diff (`git diff '
-         f'{base_ref}...HEAD`), the changed files (`git show HEAD:<path>`), their surrounding '
-         'code, and their history (`git log`, `git blame`). As you find a concrete candidate '
+         f'summary below, then probe the codebase yourself: read the diff ({diff_ref}), '
+         f'{changed_files}, their surrounding code, and their history (`git log`, `git blame`). '
+         'As you find a concrete candidate '
          'finding, record it with `notes add "<file:line> - <what and why>"` so it survives '
          'compaction. Your final findings must be grounded in code you actually read, not '
          'assumed from the summary.'
@@ -1472,24 +1507,57 @@ async def _git_line_count(ref: str, path: str, cwd: str | None) -> int | None:
     return count
 
 
-async def _file_info(path: str, cwd: str | None, base_ref: str, cache: dict[str, tuple[bool, int | None]]) -> tuple[bool, int | None]:
+def _disk_line_count(path: str) -> int | None:
+    # The line count of a file on disk (the working tree), counting exactly as _git_line_count
+    # does (a final line without a trailing newline still counts, blank lines count). Used to
+    # validate a citation into a file that exists only as an uncommitted change.
+    try:
+        count = 0
+        last: bytes | None = None
+        with open(path, 'rb') as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                count += chunk.count(b'\n')
+                last = chunk[-1:]
+    except OSError:
+        return None
+    if last is not None and last != b'\n':
+        count += 1
+    return count
+
+
+async def _file_info(path: str, cwd: str | None, base_ref: str,
+                     cache: dict[str, tuple[bool, int | None]],
+                     working_tree: bool = False) -> tuple[bool, int | None]:
     # Whether `path` exists at the reviewed ref (HEAD) or the base, and its line count there; an
     # existing but empty file counts as 0 so a citation to any line is out of range. Cached per
     # path so several findings citing the same file cost one probe each. A deleted file (present
-    # at base, absent at HEAD) still resolves against the base.
+    # at base, absent at HEAD) still resolves against the base. When `working_tree` is set (a
+    # review of uncommitted changes), the on-disk version is what is under review, so a file
+    # present on disk takes precedence over its committed line count: a modified tracked file is
+    # validated against its working-tree length (not the stale HEAD/base one), and a newly added
+    # file resolves on disk so a citation into it is not read as a fabrication.
     if path in cache:
         return cache[path]
     exists = False
     line_count = None
-    for ref in ('HEAD', base_ref):
-        rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
-        if rc != 0:
-            continue
-        exists = True
-        # Stream the line count rather than buffering the whole blob and splitting it, so a large
-        # cited file is not held in memory just to validate a citation's line bound.
-        line_count = await _git_line_count(ref, path, cwd)
-        break
+    if working_tree and cwd is not None:
+        disk = os.path.join(cwd, path)
+        if os.path.isfile(disk):
+            exists = True
+            line_count = _disk_line_count(disk)
+    if not exists:
+        for ref in ('HEAD', base_ref):
+            rc, _out, _err = await _git('cat-file', '-e', f'{ref}:{path}', cwd=cwd)
+            if rc != 0:
+                continue
+            exists = True
+            # Stream the line count rather than buffering the whole blob and splitting it, so a
+            # large cited file is not held in memory just to validate a citation's line bound.
+            line_count = await _git_line_count(ref, path, cwd)
+            break
     cache[path] = (exists, line_count)
     return cache[path]
 
@@ -1551,17 +1619,22 @@ def _symbol_in_text(text: str, symbol: str) -> bool:
     return re.search(rf'\b{re.escape(symbol)}\b', text) is not None
 
 
-async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | None]) -> bool | None:
-    # Whether `symbol` occurs in the reviewed commit, matched as a whole-word fixed string (no
+async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | None],
+                          working_tree: bool = False) -> bool | None:
+    # Whether `symbol` occurs in the reviewed code, matched as a whole-word fixed string (no
     # language-specific keyword, so any language works). A dotted name is grepped in full, so an
     # invented chain such as svc.foo.bar is "present" only if that exact chain is, never on the
-    # strength of its `bar` leaf alone. Pinned to HEAD rather than the working tree, so uncommitted
-    # changes — which a local review excludes — cannot falsify a finding about the committed code.
+    # strength of its `bar` leaf alone. Greps the working tree when `working_tree` is set (a review
+    # of uncommitted changes) and HEAD otherwise, so a change outside the review's scope cannot
+    # falsify a finding about the code under review.
     # Returns True (a match), False (a clean no-match), or None (the grep itself failed — an error
     # is not proof of absence). Cached per symbol.
     if symbol in cache:
         return cache[symbol]
-    rc, _out, _err = await _git('grep', '-F', '-w', symbol, 'HEAD', cwd=cwd)
+    args = ['grep', '-F', '-w', symbol]
+    if not working_tree:
+        args.append('HEAD')
+    rc, _out, _err = await _git(*args, cwd=cwd)
     present = True if rc == 0 else (False if rc == 1 else None)
     cache[symbol] = present
     return present
@@ -1582,7 +1655,7 @@ def _path_token_match(command_scope: str, file_path: str) -> bool:
     return False
 
 
-async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False) -> list[Finding]:
+async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug: bool = False, post_consolidation: bool = False, working_tree: bool = False) -> list[Finding]:
     # Deterministic anti-hallucination filter, run before AND after consolidation (the consolidator
     # rewrites each finding's description and is only guaranteed to keep its [Name-Label], so it can
     # name a symbol the reviewers never read). Mandatory probing (in the tool loop) already requires
@@ -1655,9 +1728,12 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             ok, reason = False, (
                 'names no symbol and cites no file, so it cannot be grounded in the code read')
         if ok and file_path:
-            exists, line_count = await _file_info(file_path, cwd, base_ref, file_cache)
+            exists, line_count = await _file_info(
+                file_path, cwd, base_ref, file_cache, working_tree=working_tree)
+            where = 'the working tree, ' if working_tree else ''
             if not exists:
-                ok, reason = False, f'cited file {file_path} does not exist at HEAD or {base_ref}'
+                ok, reason = (False,
+                              f'cited file {file_path} does not exist at {where}HEAD or {base_ref}')
             elif line is not None and line_count is None:
                 # The file exists but its line count could not be read, so the cited line cannot
                 # be verified against the file's end; drop it rather than let an out-of-range
@@ -1689,7 +1765,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
                 # A name is a fabrication only when it is definitively absent from the tree (a
                 # clean no-match grep) and absent from the evidence; a grep error (None) cannot
                 # prove absence, so it does not drop the finding.
-                if await _symbol_present(a, cwd, symbol_cache) is not False:
+                if await _symbol_present(a, cwd, symbol_cache, working_tree) is not False:
                     continue
                 ok, reason = (False,
                               f'names {a}, which appears in neither the reviewer\'s git '
@@ -1701,7 +1777,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
             # does not drop the finding.
             for symbol in _asserted_absent_symbols(f):
-                if await _symbol_present(symbol, cwd, symbol_cache) is True:
+                if await _symbol_present(symbol, cwd, symbol_cache, working_tree) is True:
                     ok, reason = (False,
                                   f'asserts {symbol} is undefined or absent, but '
                                   f'it is present in the reviewed tree')
@@ -2136,7 +2212,7 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
                        prior_block_by_number: dict[int, str],
                        prior_labels_by_number: dict[int, set[str]],
                        reasoning_effort: str | None, seed: int,
-                       debug: bool) -> list[Finding]:
+                       debug: bool, fail_on_incomplete: bool = False) -> list[Finding]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
     # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
@@ -2159,7 +2235,8 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             tool_ctx=tool_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=prior_block_by_number,
             prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            fail_on_incomplete=fail_on_incomplete)
         # Per-persona critique: critique each reviewer's findings in isolation (a small, focused
         # set, not the pooled panel) and give any reviewer the critic refutes one pass to correct
         # or drop it. Run on the initial proposal (i == 0); later rounds are the panel already

@@ -259,12 +259,24 @@ def test_phase_scoping_no_backend_is_agnostic_only() -> None:
     assert set(tools.build_commands(tools.ToolContext('gen'))) == AGNOSTIC
 
 
+def test_implement_safe_phase_drops_exec_and_network() -> None:
+    # Safe mode (marsha diff --safe) must not expose an unrestricted shell or the network: the
+    # implementor only reads and edits, and the harness runs the project's validation itself.
+    b = backends.current()
+    impl = set(tools.build_commands(tools.ToolContext('implement', backend=b)))
+    impl_safe = set(tools.build_commands(tools.ToolContext('implement-safe', backend=b)))
+    assert 'write-file' in impl and 'write-file' in impl_safe
+    assert 'exec' in impl and 'exec' not in impl_safe  # no unrestricted shell in safe mode
+    assert 'web-search' in impl and 'web-search' not in impl_safe  # no network in safe mode
+
+
 def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # The point of the per-target design: a backend supplies the language-specific
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set
     # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | \
+        {'git', 'notes', 'write-file', 'exec'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
@@ -273,6 +285,78 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
         == {'list-tree', 'summarize', 'find-in-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WRITE} \
+        == {'write-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_EXEC} == {'exec'}
+
+
+def test_write_file_writes_inside_tree(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['src/foo.py', 'print(1)\\n'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'src' / 'foo.py').read_text() == 'print(1)\n'
+
+
+def test_write_file_refuses_dotdot_escape(tmp_path: Any) -> None:
+    # A `..` path that leaves the working tree is refused before anything is written.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['../escape.txt', 'x'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert not (tmp_path / 'escape.txt').exists()
+
+
+def test_write_file_refuses_git_metadata(tmp_path: Any) -> None:
+    # The working tree includes the repo's .git directory; write-file must refuse to touch Git
+    # metadata (it would corrupt the repo), while a normal source file still writes.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ok = asyncio.run(tools.write_file_tool(
+        ['src/a.py', 'print(1)'], tools.ToolContext(workdir=str(repo))))
+    assert ok.startswith('wrote')
+    bad = asyncio.run(tools.write_file_tool(
+        ['.git/config', '[core]'], tools.ToolContext(workdir=str(repo))))
+    assert bad.startswith('error:') and 'Git metadata' in bad
+    assert not (repo / '.git' / 'config').exists()
+
+
+def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
+    # A path inside the tree that traverses an outside-pointing symlink must be refused: a lexical
+    # prefix check alone would let open(..., 'w') follow the link and write outside the tree.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('original')
+    os.symlink(outside, repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert outside.read_text() == 'original'  # the outside file is untouched
+
+
+def test_write_file_never_follows_a_symlink(tmp_path: Any) -> None:
+    # O_NOFOLLOW: even an in-tree symlink (which passes the realpath boundary check) is not
+    # written through — the final component is refused at the syscall level, so the tool never
+    # follows a symlink.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'real.txt').write_text('original')
+    os.symlink(repo / 'real.txt', repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert (repo / 'real.txt').read_text() == 'original'  # not written through the link
+
+
+def test_summarize_refuses_url_in_safe_mode() -> None:
+    # Safe mode forbids the network: summarize must refuse a URL (before any fetch) rather than
+    # let the safe implementor reach the web through this read tool.
+    result = asyncio.run(tools.summarize(
+        ['https://example.com/page'], tools.ToolContext(phase='implement-safe')))
+    assert result.startswith('error:') and 'safe mode' in result
 
 
 def test_tool_instructions_lists_phase_tools() -> None:
@@ -762,6 +846,29 @@ def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
     assert 'end of output' in page2
     beyond = asyncio.run(tools.git(['show', 'HEAD:huge.txt'], ctx, page=99))
     assert beyond.startswith('error: page 99 is out of range')
+
+
+def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
+    # Safe mode is a no-network mode: read-only but network-contacting git operations (ls-remote,
+    # remote show) are refused in the implement-safe phase, while local read-only commands are
+    # still allowed and the same subcommands are not blocked by the safe-mode check outside it.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'a.txt').write_text('x\n')
+    subprocess.run(['git', 'add', 'a.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    safe = tools.ToolContext('implement-safe', workdir=str(tmp_path))
+    for cmd in (['ls-remote', 'origin'], ['remote', 'show', 'origin']):
+        refused = asyncio.run(tools.git(cmd, safe))
+        assert refused.startswith('error:') and 'safe mode' in refused
+    # A local read-only command is still permitted in safe mode.
+    log = asyncio.run(tools.git(['log', '--oneline'], safe))
+    assert not log.startswith('error:')
+    # The same subcommands are not blocked by the safe-mode check outside safe mode.
+    review = tools.ToolContext('review', workdir=str(tmp_path))
+    assert 'safe mode' not in asyncio.run(tools.git(['ls-remote', 'origin'], review))
+    assert 'safe mode' not in asyncio.run(tools.git(['remote', 'show', 'origin'], review))
 
 
 def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:

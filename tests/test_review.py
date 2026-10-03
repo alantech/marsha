@@ -776,6 +776,18 @@ def test_git_line_count_matches_splitlines(repo: Any) -> None:
         assert got == len(content.splitlines()), (name, got, content)
 
 
+def test_file_info_working_tree_uses_disk_line_count(repo: Any) -> None:
+    # A working-tree review (marsha diff) validates a modified tracked file against its on-disk
+    # line count (the uncommitted change is what is under review), not its stale committed count.
+    # HEAD (feature) has a.txt at 4 lines; grow it on disk to 8 (uncommitted).
+    with open(f'{repo}/a.txt', 'w') as f:
+        f.write('l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n')
+    disk = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=True))
+    assert disk == (True, 8)  # the on-disk (working-tree) length, not HEAD's 4
+    committed = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=False))
+    assert committed == (True, 4)  # the committed (HEAD) length
+
+
 def test_gate_drops_finding_with_no_evidence(repo: Any) -> None:
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
@@ -860,6 +872,35 @@ def test_symbol_present_tri_state_on_grep_error(repo: Any) -> None:
     assert asyncio.run(review._symbol_present('zzzabsent', repo, {})) is False
     with patch.object(review, '_git', new=AsyncMock(return_value=(2, '', 'fatal: bad'))):
         assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
+
+
+def test_symbol_present_working_tree_mode(repo: Any) -> None:
+    # working_tree=True greps the working tree (not HEAD): a symbol present only in an uncommitted
+    # change is "present", and one deleted from the working tree is "absent" — the opposite of the
+    # committed (HEAD) default. This is the mode the marsha diff review gate runs in.
+    with open(os.path.join(repo, 'a.txt'), 'w') as f:
+        f.write('one\nthree\nfour\nWORKTREE_ONLY\n')  # drops TWO, adds WORKTREE_ONLY (uncommitted)
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=False)) is True
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=True)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=False)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=True)) is True
+
+
+def test_collect_personas_results_incomplete_not_clean() -> None:
+    # An incomplete review (any reviewer failed) that produced no findings must raise when
+    # fail_on_incomplete is set (it must not be mistaken for a clean "no findings" verdict); an
+    # incomplete review that DID find things still returns them (they are real); without the flag
+    # the survivors' findings are returned; and a complete review is untouched by the flag.
+    f: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
+                  'location': 'a.py:1', 'desc': 'd'}
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), Exception('y')], 2, True)
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), []], 2, True)
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, True) == [f]
+    assert personas._collect_personas_results([Exception('x'), []], 2, False) == []
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, False) == [f]
+    assert personas._collect_personas_results([[f], [f]], 2, True) == [f, f]
 
 
 def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:

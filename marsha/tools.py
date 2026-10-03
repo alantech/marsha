@@ -79,6 +79,21 @@ SOURCE_TOOLS = {'summarize', 'find-in-file', 'view-web-page', 'web-search'}
 # call. Bounded so a stuck reviewer cannot burn the whole tool budget on the citation probe.
 MAX_CITATION_BOUNCES = 2
 
+# Bounds for the implement-phase `exec` tool (marsha diff): how long a single command may run
+# before it is treated as a (countable) tool failure, and how much output one command may produce
+# before it is refused (so a chatty build cannot buffer without bound into the model's context).
+EXEC_TIMEOUT = 600
+EXEC_MAX_BYTES = 256_000
+
+
+class ToolFailureLimitExceeded(Exception):
+    """Raised by run_with_tools when a caller's `max_consecutive_failures` budget is exhausted:
+    the agent has failed that many tool invocations in a row and the harness should stop it, keep
+    whatever it has done, and not proceed to commit. A command that merely reports failing tests
+    (a nonzero exit) is NOT a failure here — only a tool that could not run is counted."""
+    pass
+
+
 # Bounds on the output fed back into the conversation, so a single tool result
 # cannot blow the context budget.
 RESULT_CHAR_LIMIT = 12_000
@@ -159,9 +174,21 @@ CATEGORY_NOTES = 'notes'
 # they can read files that are NOT committed (e.g. a git-ignored CLAUDE.local.md), so every file
 # they read is sandboxed to the local working tree.
 CATEGORY_READ = 'read'
+# Implementation tools (marsha diff): write a file into the working tree and run a command in
+# it. Scoped to the implement phases only — no other phase (review, refine, the generation loops)
+# gets file writes or arbitrary exec, so a reviewer's read-only git tool can never grow a write.
+CATEGORY_WRITE = 'write'
+CATEGORY_EXEC = 'exec'
 
 _BASE_CATEGORIES = {CATEGORY_REGISTRY, CATEGORY_WEB,
                     CATEGORY_COMPUTATION, CATEGORY_READ}
+# The implement phases (marsha diff). Normal mode keeps the base set (so the implementor can look
+# up documentation over the network and consult the registry) plus the read-only git/notes tools
+# and the two mutating implementation tools (write-file, exec). Safe mode drops the network
+# categories (web, registry) — no marsha-provided network or install path — AND the exec tool:
+# an unrestricted shell could still reach the network, install dependencies, or run destructive
+# git, so the safe implementor only reads and edits; the harness runs the project's validation
+# itself (a controlled subprocess), which is what the issue means by "local validation".
 PHASE_CATEGORIES = {
     'gen': _BASE_CATEGORIES,
     'oracle-opt': _BASE_CATEGORIES,
@@ -169,6 +196,10 @@ PHASE_CATEGORIES = {
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
     'refine': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_WEB},
+    'implement': _BASE_CATEGORIES | {CATEGORY_GIT, CATEGORY_NOTES,
+                                     CATEGORY_WRITE, CATEGORY_EXEC},
+    'implement-safe': {CATEGORY_COMPUTATION, CATEGORY_READ, CATEGORY_GIT,
+                       CATEGORY_NOTES, CATEGORY_WRITE},
 }
 
 # A fake-terminal handler: takes the parsed args (and, for paginating commands, a `page=`
@@ -986,6 +1017,13 @@ GIT_READONLY_COMMANDS = {
 # remote-tracking refs). The read-only subcommands are allowlisted and the rest refused, so a
 # new or aliased mutating subcommand (e.g. `rm` for `remove`) cannot slip through.
 GIT_REMOTE_READONLY_SUBCOMMANDS = {'get-url', 'show'}
+# `git remote` subcommands that contact the remote over the network (read-only, but still a
+# network operation), so they are refused in safe mode along with the top-level network commands.
+GIT_REMOTE_NETWORK_SUBCOMMANDS = {'show'}
+# Subcommands that contact a remote over the network. Read-only, but still a network operation —
+# so they are refused in safe mode (the implement-safe phase is a no-network mode) to keep its
+# documented boundary intact.
+GIT_NETWORK_COMMANDS = {'ls-remote'}
 # Flags that make an otherwise-read-only command write to disk (e.g. `git diff
 # --output=file`); rejected so the reviewer cannot touch the working tree.
 GIT_WRITE_FLAGS = {'--output', '-o', '--output-directory'}
@@ -1061,6 +1099,9 @@ async def git(args: list[str], ctx: ToolContext | None = None, page: int | None 
             f'error: `git {sub}` is not allowed: you may only run read-only git '
             'commands (diff, log, show, blame, grep, ls-files, ...). You may not '
             'modify the git tree.')
+    if sub in GIT_NETWORK_COMMANDS and ctx is not None and ctx.phase == 'implement-safe':
+        return (f'error: `git {sub}` is not allowed in safe mode (it would contact the '
+                'remote over the network, which safe mode disables).')
     rest = args[1:]
     if sub == 'remote':
         # `git remote` lists, but its mutating subcommands (add/remove/rm/rename/set-url/
@@ -1072,6 +1113,10 @@ async def git(args: list[str], ctx: ToolContext | None = None, page: int | None 
                 f'error: `git remote {first}` is not allowed (it would modify the '
                 'repository); only `git remote`, `git remote -v`, '
                 '`git remote get-url` and `git remote show` are permitted.')
+        if first in GIT_REMOTE_NETWORK_SUBCOMMANDS and ctx is not None \
+                and ctx.phase == 'implement-safe':
+            return (f'error: `git remote {first}` is not allowed in safe mode (it would contact '
+                    'the remote over the network, which safe mode disables).')
     for flag in rest:
         # Catch both `--output` and the `--output=<file>` form.
         if flag.split('=', 1)[0] in GIT_WRITE_FLAGS:
@@ -1631,6 +1676,12 @@ async def summarize(args: list[str], ctx: ToolContext | None = None) -> str:
     if len(target) > 200:
         shown = target[:197] + '…[target truncated]'
     if re.match(r'^https?://\S+$', target):
+        # Safe mode (the implement-safe phase) forbids the network: refuse a URL rather than fetch
+        # it, so the safe implementor cannot reach the web through this read tool. A local file in
+        # the working tree is still summarizable (the file branch below is unaffected).
+        if ctx is not None and ctx.phase == 'implement-safe':
+            return ('error: summarize cannot fetch a URL in safe mode; summarize a local file in '
+                    'the working tree instead.')
         try:
             assert_public_url(target)
         except Exception as e:
@@ -1812,6 +1863,122 @@ async def find_in_file(args: list[str], ctx: ToolContext | None = None) -> str:
     return out
 
 
+# --- the implementation tools (marsha diff): write-file and exec -----------------
+
+
+def _decode_content(raw: str) -> str:
+    # Turn the escape sequences a model writes on a single command line into real characters, so
+    # a multi-line file can be written in one `write-file` command. Only the common C escapes are
+    # interpreted (a lone backslash or an unknown escape is left as-is), so arbitrary UTF-8 in the
+    # content is never mangled.
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c == '\\' and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt == 'n':
+                out.append('\n')
+                i += 2
+                continue
+            if nxt == 't':
+                out.append('\t')
+                i += 2
+                continue
+            if nxt == 'r':
+                out.append('\r')
+                i += 2
+                continue
+            if nxt == '\\':
+                out.append('\\')
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def _workdir_root(ctx: ToolContext | None) -> str | None:
+    # The working tree the implement tools act on; None when there is none (or it is gone).
+    workdir = ctx.workdir if ctx is not None else None
+    if not workdir or not os.path.isdir(workdir):
+        return None
+    return os.path.abspath(workdir)
+
+
+async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> str:
+    """`write-file <path> <content>` — write `content` to a file in the working tree, creating
+    parent directories as needed. `content` is the rest of the command (a single quoted argument
+    is cleanest; spaces are otherwise rejoined) with the common escape sequences (`\\n`, `\\t`,
+    `\\\\`) decoded, so a whole multi-line file can be written in one command. The path is
+    resolved inside the working tree and a path that would escape it (a `..` or an absolute path)
+    is refused rather than followed."""
+    if len(args) < 2:
+        return ('error: write-file needs a path and content, '
+                'e.g. $ write-file src/foo.py "print(1)\\n"')
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: write-file has no working tree to write into.'
+    path = args[0]
+    content = _decode_content(' '.join(args[1:]))
+    target = os.path.normpath(os.path.join(root, path))
+    if target != root and not target.startswith(root + os.sep):
+        return f'error: write-file cannot write outside the working tree: {path}'
+    # The lexical check above is not enough: `open(..., 'w')` follows symlinks, so a path inside
+    # the tree that traverses an outside-pointing symlink would pass it yet write outside the
+    # tree. Resolve the real path (following symlinks) and re-check the boundary against the
+    # tree's real root, so the tool's working-tree boundary holds even through symlinks.
+    real_root = os.path.realpath(root)
+    real_target = os.path.realpath(target)
+    if real_target != real_root and not real_target.startswith(real_root + os.sep):
+        return f'error: write-file cannot write outside the working tree: {path}'
+    # The working tree includes the repository's .git directory, and writing there would corrupt
+    # the repo (safe mode in particular promises no destructive git operations). Refuse any target
+    # whose path contains a .git component — it covers .git/... and a nested worktree's .git.
+    if '.git' in os.path.relpath(real_target, real_root).split(os.sep):
+        return f'error: write-file cannot modify Git metadata: {path}'
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        # Open with O_NOFOLLOW so the final path component is never followed as a symlink — the
+        # realpath check above is a check-then-open, and O_NOFOLLOW closes that gap at the syscall
+        # level (a symlink final component fails with ELOOP rather than being written through).
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT |
+                     os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+    except Exception as e:
+        return f'error: write-file could not write {path}: {e}'
+    rel = os.path.relpath(target, root)
+    return f'wrote {len(content)} chars to {rel}'
+
+
+async def exec_command(args: list[str], ctx: ToolContext | None = None) -> str:
+    """`exec <command...>` — run a shell command in the working tree and return its combined
+    output with its exit code. A command that RUNS (any exit code) is a successful tool
+    invocation whose output is validation feedback — a failing test/build/lint is reported as
+    `[exit N]`, not `error:`. Only a command that could not be started (bad spawn, or a run that
+    hit the timeout/output cap) is a tool failure (`error:`), which the implement's failure budget
+    counts."""
+    if not args:
+        return 'error: exec needs a command, e.g. $ exec pytest -q'
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: exec has no working tree to run in.'
+    cmd = ' '.join(args)
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            cmd, cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out, _err = await run_subprocess(proc, EXEC_TIMEOUT, max_bytes=EXEC_MAX_BYTES)
+    except Exception as e:
+        return f'error: exec could not be run (timed out or failed): {e}'
+    code = proc.returncode if proc.returncode is not None else -1
+    body = (out or '').strip()
+    return f'[exit {code}]\n{body}' if body else f'[exit {code}]'
+
+
 # --- the command set: agnostic base, layered per target -------------------------
 
 
@@ -1872,6 +2039,18 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                                     'tree relevant to a query, with their line ranges, instead of '
                                     'reading the whole file',
                                     lambda args, _c=ctx: find_in_file(args, _c)),
+        'write-file': ToolCommand('write-file', CATEGORY_WRITE,
+                                  '$ write-file <path> "<content>"',
+                                  'write content to a file in the working tree (creating parent '
+                                  'directories); quote the content and use \\n for newlines so a '
+                                  'whole file fits on one command line',
+                                  lambda args, _c=ctx: write_file_tool(args, _c)),
+        'exec': ToolCommand('exec', CATEGORY_EXEC,
+                            '$ exec <command...>',
+                            'run a shell command in the working tree (validation, tests, builds, '
+                            'installs) and return its combined output with its exit code; a '
+                            'failing test is reported as [exit N], not an error',
+                            lambda args, _c=ctx: exec_command(args, _c)),
     }
 
 
@@ -2282,13 +2461,20 @@ def unretrieved_citations(
 
 
 async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | None = None,
-                         debug: bool = False, max_rounds: int = MAX_TOOL_ROUNDS) -> Any:
+                         debug: bool = False, max_rounds: int = MAX_TOOL_ROUNDS,
+                         max_consecutive_failures: int | None = None) -> Any:
     """Drive one LLM exchange with the fake terminal: call the mapper, and if
     the response's final line is a `$` command, execute it and feed the
     untrusted-wrapped output back in a follow-up call, repeating until a
     response arrives with no trailing command. The mapper must be single-result
     (n_results=1). On the round cap the last (still-a-command) response is
     returned so the stage's validation fails and its normal retry takes over.
+
+    When `max_consecutive_failures` is set, tool invocations that return an
+    `error:` result are counted; the count resets after any successful call, and
+    reaching the budget raises ToolFailureLimitExceeded so the caller can stop the
+    agent (keeping its work) instead of letting it spin. A nonzero exit from a
+    command that ran is not a failure — only a tool that could not run is.
     """
     if getattr(mapper, 'n_results', 1) != 1:
         raise Exception(
@@ -2306,6 +2492,7 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
     messages = [{'role': 'user', 'content': request}]
     last_text = ''
     citation_bounces = 0
+    consecutive_failures = 0
     for round_ in range(max_rounds):
         messages = await _maybe_compact_tool_history(messages, mapper, ctx, debug=debug)
         text = await mapper.run(messages)
@@ -2370,6 +2557,17 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
         label = pending.name if pending.name in commands else 'command'
         result = await execute_command(commands, pending.name, pending.args,
                                        page=pending.page)
+        # Consecutive-failure budget (only when a caller sets one): a tool that could not run is an
+        # `error:` result; one that ran (any exit) is not. The count resets on any successful call,
+        # and reaching the budget stops the agent so its caller can keep the work and not commit.
+        if result.startswith('error:'):
+            consecutive_failures += 1
+            if (max_consecutive_failures is not None
+                    and consecutive_failures >= max_consecutive_failures):
+                raise ToolFailureLimitExceeded(
+                    f'{consecutive_failures} consecutive tool failures')
+        else:
+            consecutive_failures = 0
         # Record what the reviewer actually retrieved (the command and its raw output) so the
         # evidence gate can later prove a finding was grounded in real git output, not a guess.
         # An `error:` result carries no code — a git failure, or the "name a page" reply for a
