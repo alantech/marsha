@@ -300,6 +300,7 @@ def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> No
 
 def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> None:
     # A successful --safe run (review skipped) leaves the edits uncommitted and offers no PR.
+    # Safe mode prompts for approval before running the validation command; approve it here.
     p = str(tmp_path)
     _git_repo(p, {'spec.mrsh': _mrsh_spec()})
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
@@ -307,14 +308,39 @@ def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> N
          patch.object(diff, '_ensure_validated', new=_ok_validation):
         with _chdir(p):
             rc = asyncio.run(
-                diff.run_diff(_args(source=_spec_path(p), safe=True, review_cycles=0)))
+                diff.run_diff(_args(source=_spec_path(p), safe=True, review_cycles=0),
+                              read_line=lambda: 'y'))
     assert rc == 0
     out = capsys.readouterr().out
+    assert 'Allow it?' in out  # the safe-mode validation approval prompt was shown
     assert 'UNCOMMITTED' in out
     assert '## Validation' not in out  # no PR proposal in safe mode
     # The file exists in the working tree but no commit was made beyond the initial one.
     assert os.path.isfile(os.path.join(p, 'impl.txt'))
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_run_diff_safe_declined_validation_skipped(tmp_path: Any, capsys: Any) -> None:
+    # Declining the safe-mode validation prompt skips the validation (not a failure): the run
+    # completes, leaving edits uncommitted, and _ensure_validated is never called.
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    calls = {'n': 0}
+
+    async def _counting_validation(*a: Any, **k: Any) -> Any:
+        calls['n'] += 1
+        return (True, 'ok')
+
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+         patch.object(diff, '_ensure_validated', new=_counting_validation):
+        with _chdir(p):
+            rc = asyncio.run(
+                diff.run_diff(_args(source=_spec_path(p), safe=True, review_cycles=0),
+                              read_line=lambda: 'n'))
+    assert rc == 0
+    assert calls['n'] == 0  # the validation was never run
+    assert 'skipped' in capsys.readouterr().out
 
 
 def test_review_gate_includes_untracked_files(tmp_path: Any) -> None:

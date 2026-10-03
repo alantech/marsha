@@ -223,31 +223,15 @@ async def _commit(cwd: str, title: str, body: str) -> str:
 
 # --- validation (async) -----------------------------------------------------------
 
-async def _run_validation(cwd: str, cmd: str, safe: bool = False) -> tuple[bool, str]:
+async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     # Run the validation command and report whether it passed (a clean exit). The tail of the
     # output is returned so the implementor can see a failure without buffering without bound.
-    # In safe mode the subprocess runs in a network-isolated environment (proxies point at a
-    # non-routable local port, no_proxy cleared, package managers offline), so a validation
-    # command that would build the env or install deps (e.g. a Makefile `test` target that
-    # depends on a venv) cannot reach the web — safe mode forbids installs even via the
-    # harness's own re-verification run.
+    # In safe mode this command is not run silently: the caller prompts the user for approval
+    # first (see run_diff), so a command that would build the env or install deps is a deliberate,
+    # user-approved action rather than an unattended side effect.
     try:
-        env: dict[str, str] = dict(os.environ)
-        if safe:
-            # Safe mode forbids the network and dependency installation. Offline flags alone are
-            # not enough (a Makefile `test` target that depends on a venv still runs its install
-            # step), so isolate the network: route every proxy at a non-routable local port
-            # (nothing listens on :9, the discard port) and clear no_proxy, so any network access
-            # — an install, a download — fails rather than reaching the web. UV_OFFLINE and
-            # PIP_NO_INDEX additionally stop the package managers from using their index.
-            for _var in ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY'):
-                env[_var] = 'http://127.0.0.1:9'
-            env['no_proxy'] = ''
-            env['NO_PROXY'] = ''
-            env['UV_OFFLINE'] = '1'
-            env['PIP_NO_INDEX'] = '1'
         proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out, _err = await run_subprocess(proc, VALIDATION_TIMEOUT,
                                          max_bytes=tools.EXEC_MAX_BYTES)
@@ -335,12 +319,11 @@ async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
 
 async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: str,
                             model: str, max_failures: int,
-                            debug: bool, safe: bool = False) -> tuple[bool, str]:
+                            debug: bool) -> tuple[bool, str]:
     # Run the validation; on a failure, hand it to the implementor to fix and rerun, up to
     # MAX_VALIDATION_FIX_PASSES. Returns (passed, last_output). A validation that cannot even be
-    # run counts as a failure and is also handed back for a workaround. In safe mode the re-run
-    # blocks dependency installation (see _run_validation).
-    passed, out = await _run_validation(cwd, validation_cmd, safe)
+    # run counts as a failure and is also handed back for a workaround.
+    passed, out = await _run_validation(cwd, validation_cmd)
     fix_passes = 0
     while not passed and fix_passes < MAX_VALIDATION_FIX_PASSES:
         if debug:
@@ -351,7 +334,7 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
                                    max_failures, debug)
         except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
             break
-        passed, out = await _run_validation(cwd, validation_cmd, safe)
+        passed, out = await _run_validation(cwd, validation_cmd)
         fix_passes += 1
     return passed, out
 
@@ -456,7 +439,7 @@ async def _propose_and_maybe_refine(
         original_fields: tuple[str, str] | None, current_repo: str, base_name: str,
         base_ref: str, impl_ctx: tools.ToolContext, commit_title: str,
         validation_cmd: str, review_result: str, model: str, max_failures: int,
-        debug: bool, safe: bool = False) -> tuple[int, str, str]:
+        debug: bool) -> tuple[int, str, str]:
     # Show the proposed PR title/body; on acceptance finish; on rejection optionally refine the
     # source (and, if it locks, resume implementation + validation + a clean review on the same
     # branch and commit a follow-up) before finishing. Marsha never pushes or creates a PR.
@@ -536,7 +519,7 @@ async def _propose_and_maybe_refine(
                     spec_text, _conventions_text(cwd), base_name, False),
                 model, max_failures, debug)
             passed, _out = await _ensure_validated(
-                impl_ctx, cwd, validation_cmd, model, max_failures, debug, safe)
+                impl_ctx, cwd, validation_cmd, model, max_failures, debug)
             if not passed:
                 print('Validation failed after refinement; leaving the existing commit intact.',
                       file=sys.stderr)
@@ -687,15 +670,32 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
 
     # --- Validation (the project's own checks; fix-and-rerun until green or the cap is hit). ---
     validation_cmd = _validation_command(cwd)
-    print(f'Running validation: `{validation_cmd}`', file=sys.stderr)
-    passed, _out = await _ensure_validated(
-        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
-    if not passed:
-        await _report(cwd, base_ref, short, ticket_id, design='locked',
-                      validation=f'FAILED (`{validation_cmd}`)', review='not run',
-                      commit='none (validation failed)')
-        return 1
-    validation = f'passed (`{validation_cmd}`)'
+    # Safe mode: the validation command may build the environment or install dependencies, so it
+    # is not run silently — the user approves or declines it. A decline skips the validation (the
+    # run still completes, leaving edits uncommitted); it is not a failure.
+    validation_allowed = True
+    if safe:
+        print(f'Safe mode: about to run the validation command `{validation_cmd}`. It may build '
+              'the environment or install dependencies. Allow it? [y/N] ')
+        answer = read_line().strip().lower()
+        while answer not in ('y', 'yes', 'n', 'no'):
+            print('Please answer y or n. [y/N] ')
+            answer = read_line().strip().lower()
+        validation_allowed = answer in ('y', 'yes')
+        if not validation_allowed:
+            print('Skipping validation (declined in safe mode).', file=sys.stderr)
+    if validation_allowed:
+        print(f'Running validation: `{validation_cmd}`', file=sys.stderr)
+        passed, _out = await _ensure_validated(
+            impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
+        if not passed:
+            await _report(cwd, base_ref, short, ticket_id, design='locked',
+                          validation=f'FAILED (`{validation_cmd}`)', review='not run',
+                          commit='none (validation failed)')
+            return 1
+        validation = f'passed (`{validation_cmd}`)'
+    else:
+        validation = 'skipped (--safe: validation declined)'
 
     # --- Review gate (working-tree changes vs base). ---
     if review_cycles >= 1:
@@ -712,10 +712,11 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
                         model, max_tool_failure, debug)
                 except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
                     break
-                passed, _out = await _ensure_validated(
-                    impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
-                if not passed:
-                    break
+                if validation_allowed:
+                    passed, _out = await _ensure_validated(
+                        impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug)
+                    if not passed:
+                        break
                 remaining = await _review_gate(
                     cwd, base_name, base_ref, spec_text, model, debug)
                 cycles += 1
@@ -762,7 +763,7 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     exit_code, commit_title, commit_sha = await _propose_and_maybe_refine(
         read_line, cwd, source, spec_text, original_fields, current_repo, base_name,
         base_ref, impl_ctx, commit_title, validation_cmd, review_result, model,
-        max_tool_failure, debug, safe)
+        max_tool_failure, debug)
     await _report(cwd, base_ref, short, ticket_id, design='locked', validation=validation,
                   review=review_result, commit=f'{commit_sha} ({commit_title})')
     return exit_code
