@@ -454,6 +454,65 @@ def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
     assert len(applied) == 2  # BOTH refinements applied (the second was not bailed as stale)
 
 
+def test_propose_refine_review_gate_failed_leaves_commit_intact(tmp_path: Any, capsys: Any) -> None:
+    # A reviewer failure after reject-and-refine (the follow-up review gate cannot run) must not
+    # escape as an uncaught exception: the existing commit is left intact and no follow-up commit
+    # is made on the strength of a review that could not complete.
+    p = str(tmp_path)
+    source = SpecSource(kind='issue', num=1, name='ISSUE-1')
+    committed = {'follow': 0}
+
+    async def fake_source_fields(*a: Any, **k: Any) -> Any:
+        return ('Initial Title', 'Initial Body')
+
+    async def fake_apply(*a: Any, **k: Any) -> None:
+        pass
+
+    async def fake_refine_chat(*a: Any, **k: Any) -> Any:
+        return ChatResult(status='locked', payload={'title': 'T', 'body': 'B', 'spec': 's'},
+                          detail='')
+
+    async def fake_implementor(*a: Any, **k: Any) -> str:
+        return 'done'
+
+    async def fake_validated(*a: Any, **k: Any) -> Any:
+        return (True, 'ok')
+
+    async def fake_review_gate(*a: Any, **k: Any) -> list[Any]:
+        raise diff.ReviewGateFailed('all reviewers failed')
+
+    async def fake_commit(*a: Any, **k: Any) -> str:
+        committed['follow'] += 1
+        return 'follow-sha'
+
+    async def fake_head_commit(cwd: Any) -> Any:
+        return ('abc123', 'initial')
+
+    async def fake_recent_subjects(cwd: Any) -> list[str]:
+        return []
+
+    answers = iter(['n', 'y'])  # reject the proposal, then refine (the follow-up review fails)
+    with patch.object(diff, '_source_fields', new=fake_source_fields), \
+         patch.object(diff, '_apply', new=fake_apply), \
+         patch.object(diff, 'run_refine_chat', new=fake_refine_chat), \
+         patch.object(diff, '_run_implementor', new=fake_implementor), \
+         patch.object(diff, '_ensure_validated', new=fake_validated), \
+         patch.object(diff, '_review_gate', new=fake_review_gate), \
+         patch.object(diff, '_commit', new=fake_commit), \
+         patch.object(diff, '_head_commit', new=fake_head_commit), \
+         patch.object(diff, '_recent_commit_subjects', new=fake_recent_subjects), \
+         patch.object(diff, '_conventions_text', return_value=''):
+        rc, _title, sha = asyncio.run(diff._propose_and_maybe_refine(
+            lambda: next(answers), p, source, 'spec text',
+            ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
+            tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
+            'clean', 'test-model', 5, False))
+    assert rc == 0
+    assert sha == 'abc123'  # the original commit is preserved
+    assert committed['follow'] == 0  # no follow-up commit on the strength of a failed review
+    assert 'could not run' in capsys.readouterr().err
+
+
 def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None:
     # A locked spec with passing validation and a clean review commits and the proposal is
     # accepted (no PR is pushed or created).

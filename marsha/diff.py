@@ -546,6 +546,12 @@ async def _propose_and_maybe_refine(
                 print(f'Review gate not clean after refinement ({len(remaining)} finding(s)); '
                       'leaving the existing commit intact.', file=sys.stderr)
                 return (0, commit_title, sha)
+        except ReviewGateFailed as e:
+            # The review gate could not run (a reviewer failed with nothing to fall back on); do
+            # not make the follow-up commit on the strength of a review that could not complete.
+            print(f'Review gate could not run after refinement ({e}); leaving the existing commit '
+                  'intact.', file=sys.stderr)
+            return (0, commit_title, sha)
         except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
             print('The follow-up implementation did not complete; leaving the existing commit '
                   'intact.', file=sys.stderr)
