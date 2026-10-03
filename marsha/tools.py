@@ -1925,6 +1925,11 @@ async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> st
     real_target = os.path.realpath(target)
     if real_target != real_root and not real_target.startswith(real_root + os.sep):
         return f'error: write-file cannot write outside the working tree: {path}'
+    # The working tree includes the repository's .git directory, and writing there would corrupt
+    # the repo (safe mode in particular promises no destructive git operations). Refuse any target
+    # whose path contains a .git component — it covers .git/... and a nested worktree's .git.
+    if '.git' in os.path.relpath(real_target, real_root).split(os.sep):
+        return f'error: write-file cannot modify Git metadata: {path}'
     try:
         parent = os.path.dirname(target)
         if parent:

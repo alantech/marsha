@@ -309,6 +309,20 @@ def test_write_file_refuses_dotdot_escape(tmp_path: Any) -> None:
     assert not (tmp_path / 'escape.txt').exists()
 
 
+def test_write_file_refuses_git_metadata(tmp_path: Any) -> None:
+    # The working tree includes the repo's .git directory; write-file must refuse to touch Git
+    # metadata (it would corrupt the repo), while a normal source file still writes.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ok = asyncio.run(tools.write_file_tool(
+        ['src/a.py', 'print(1)'], tools.ToolContext(workdir=str(repo))))
+    assert ok.startswith('wrote')
+    bad = asyncio.run(tools.write_file_tool(
+        ['.git/config', '[core]'], tools.ToolContext(workdir=str(repo))))
+    assert bad.startswith('error:') and 'Git metadata' in bad
+    assert not (repo / '.git' / 'config').exists()
+
+
 def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
     # A path inside the tree that traverses an outside-pointing symlink must be refused: a lexical
     # prefix check alone would let open(..., 'w') follow the link and write outside the tree.
