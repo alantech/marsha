@@ -381,6 +381,29 @@ def prior_round_block(findings: list[Finding], preamble: str,
     return block
 
 
+def _collect_personas_results(results: list[Any], total: int,
+                              fail_on_incomplete: bool) -> list[Finding]:
+    # A reviewer that failed is a failure, not an empty result. An incomplete review (any reviewer
+    # failed) must never be mistaken for a clean "no findings" verdict. With fail_on_incomplete, an
+    # incomplete review that produced no findings raises so the caller refuses to treat it as clean;
+    # one that DID find things still returns them (the findings are real and must be surfaced).
+    # Without the flag, the survivors' findings are always returned.
+    findings: list[Finding] = []
+    failures = 0
+    for r in results:
+        if isinstance(r, BaseException):
+            failures += 1
+        else:
+            findings.extend(r)
+    if failures and fail_on_incomplete and not findings:
+        raise Exception(
+            f'personas: {failures}/{total} reviewer(s) failed with no findings returned; the '
+            'review did not complete and is not a clean verdict')
+    if failures:
+        log(f'personas: {failures}/{total} reviewer(s) failed; using the survivors')
+    return findings
+
+
 async def run_personas(
         reviewers: list[tuple[str, str, int]],
         user_message: str,
@@ -395,7 +418,7 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
-        fail_on_all_errors: bool = False,
+        fail_on_incomplete: bool = False,
 ) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
@@ -475,19 +498,4 @@ async def run_personas(
         # A generator (not a list) avoids the intermediate list of coroutines gather would build.
         results = list(await asyncio.gather(
             *(one(s) for s in reviewers), return_exceptions=True))
-    # A reviewer that failed is a failure, not an empty result. When EVERY reviewer failed the
-    # review did not run and must not be mistaken for a clean one: with fail_on_all_errors the
-    # caller can distinguish a genuine "no findings" from a review that could not complete.
-    findings: list[Finding] = []
-    failures = 0
-    for r in results:
-        if isinstance(r, BaseException):
-            failures += 1
-        else:
-            findings.extend(r)
-    if failures == len(reviewers) and fail_on_all_errors:
-        raise Exception(
-            f'personas: all {failures} reviewer(s) failed; the review did not run')
-    if failures:
-        log(f'personas: {failures}/{len(reviewers)} reviewer(s) failed; using the survivors')
-    return findings
+    return _collect_personas_results(results, len(reviewers), fail_on_incomplete)

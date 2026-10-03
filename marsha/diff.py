@@ -357,9 +357,10 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
 # --- review gate (async) ----------------------------------------------------------
 
 class ReviewGateFailed(Exception):
-    """Raised by _review_gate when the review could not run at all (every reviewer failed). That
-    is not a clean review: a commit must not be made on the strength of a review that never
-    happened, so the caller stops and reports a failure."""
+    """Raised by _review_gate when the review could not complete (a reviewer failed with nothing
+    to fall back on, so the result would be a false "no findings"). That is not a clean review:
+    a commit must not be made on the strength of a review that could not fully run, so the
+    caller stops and reports a failure."""
     pass
 
 
@@ -391,10 +392,11 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     try:
         findings = await _review_pass(
             reviewers, message, model, base_name, base_ref, 1, guidance, tool_ctx,
-            {}, {}, REVIEW_REASONING_EFFORT, REVIEW_SEED, debug, fail_on_all_errors=True)
+            {}, {}, REVIEW_REASONING_EFFORT, REVIEW_SEED, debug, fail_on_incomplete=True)
     except Exception as e:
-        # The review could not run (every reviewer failed). That is not a clean review: do not
-        # proceed to a commit on the strength of a review that never happened.
+        # The review did not complete (a reviewer failed with nothing to fall back on). That is
+        # not a clean review: do not proceed to a commit on the strength of a review that could
+        # not fully run.
         raise ReviewGateFailed(str(e)) from e
     findings = await evidence_gate(findings, cwd, base_ref, debug=debug, working_tree=True)
     if findings:

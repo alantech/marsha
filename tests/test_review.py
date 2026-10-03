@@ -886,6 +886,23 @@ def test_symbol_present_working_tree_mode(repo: Any) -> None:
     assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=True)) is True
 
 
+def test_collect_personas_results_incomplete_not_clean() -> None:
+    # An incomplete review (any reviewer failed) that produced no findings must raise when
+    # fail_on_incomplete is set (it must not be mistaken for a clean "no findings" verdict); an
+    # incomplete review that DID find things still returns them (they are real); without the flag
+    # the survivors' findings are returned; and a complete review is untouched by the flag.
+    f: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
+                  'location': 'a.py:1', 'desc': 'd'}
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), Exception('y')], 2, True)
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), []], 2, True)
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, True) == [f]
+    assert personas._collect_personas_results([Exception('x'), []], 2, False) == []
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, False) == [f]
+    assert personas._collect_personas_results([[f], [f]], 2, True) == [f, f]
+
+
 def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:
     # The cited-file check matches a whole path component, not a substring: a command that read
     # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
