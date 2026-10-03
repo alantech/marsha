@@ -585,6 +585,14 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
+    # Safe mode is a no-network mode. `--issue`/`--linear` load their spec over the network (via
+    # gh/linear) inside load_spec_with_fields, before any safe-mode restriction could apply, so a
+    # remote spec source is a usage error in safe mode; only a local *.mrsh spec is allowed.
+    if safe and source.kind in ('issue', 'linear'):
+        print('error: --safe cannot load a remote spec via --issue/--linear (that reaches the '
+              'network, which safe mode disables). Use a local *.mrsh spec with the positional '
+              'source argument.', file=sys.stderr)
+        return 2
     try:
         current_repo = await _repo_gate(source, cwd)
     except Exception as e:

@@ -231,6 +231,14 @@ def test_run_diff_zero_max_tool_failure_is_usage_error() -> None:
     assert asyncio.run(diff.run_diff(_args(source='x.mrsh', max_tool_failure=0))) == 2
 
 
+def test_run_diff_safe_refuses_remote_spec_source() -> None:
+    # --safe is a no-network mode, but a --issue/--linear spec is loaded over the network inside
+    # load_spec_with_fields (before any safe-mode restriction could apply), so a remote spec
+    # source is a usage error (exit 2) in safe mode.
+    assert asyncio.run(diff.run_diff(_args(issue='218', safe=True))) == 2
+    assert asyncio.run(diff.run_diff(_args(linear='ABC-123', safe=True))) == 2
+
+
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
     # An unlocked spec stops before any branch is created and before the implementor runs.
     p = str(tmp_path)
