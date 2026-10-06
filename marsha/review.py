@@ -24,7 +24,7 @@ from marsha import tools
 from marsha.config import resolve_model
 from marsha.findings import Finding
 from marsha.llm import consolidate_findings
-from marsha.log import log
+from marsha.log import debug_print, log
 from marsha.mappers import get_mapper
 from marsha.personas import (build_registry, dedup_by_location, dedup_findings,
                              format_findings, load_editor, load_persona,
@@ -567,7 +567,7 @@ async def conventions_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
         # log() is a no-op unless --trace, so a failed gate would otherwise fail open (findings
         # proceed unexamined) with no visible trace; surface it at debug verbosity.
         if debug:
-            print(
+            debug_print(
                 f'[Review] conventions gate failed; findings proceed unexamined: {e}')
         log(f'review: conventions gate failed: {e}')
         return ''
@@ -709,7 +709,7 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
         # log() is a no-op unless --trace, so a failed critic would otherwise silently skip the
         # anti-hallucination backstop with no visible trace; surface it at debug verbosity.
         if debug:
-            print(
+            debug_print(
                 f'[Review] critic failed; findings proceed without critique: {e}')
         log(f'review: critic failed: {e}')
         return ''
@@ -825,7 +825,7 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
             # A failed archivist must fail closed: not one thread is cleared, so a live finding
             # is never resolved over an error. log() is a no-op unless --trace, so surface at debug.
             if debug:
-                print(
+                debug_print(
                     f'[Review] archivist failed; no threads resolved this pass: {e}')
             log(
                 f'review: archivist failed; withholding thread resolution: {e}')
@@ -959,7 +959,8 @@ async def _watchman_validate(candidates: list[dict[str, Any]],
     except Exception as e:
         # A failed watchman fails closed: it validates nothing, so no CLEARED is honored.
         if debug:
-            print(f'[Review] watchman failed; no clearances validated: {e}')
+            debug_print(
+                f'[Review] watchman failed; no clearances validated: {e}')
         log(f'review: watchman failed; no clearances validated: {e}')
         return {}
     by_label = {c['label'].upper(): c['thread_id'] for c in candidates}
@@ -1801,8 +1802,8 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
         if ok:
             kept.append(f)
         elif debug:
-            print(f'[Review] evidence gate dropped '
-                  f'[{f.get("name")}-{f.get("label")}] {f.get("location")}: {reason}')
+            debug_print(f'[Review] evidence gate dropped '
+                        f'[{f.get("name")}-{f.get("label")}] {f.get("location")}: {reason}')
     return kept
 
 
@@ -2176,11 +2177,11 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
         if not refutation:
             return group
         if debug:
-            print(f'[Review] critic examined {name}\'s finding(s):')
+            debug_print(f'[Review] critic examined {name}\'s finding(s):')
             for gf in group:
-                print(f'  [examined] [{name}-{gf.get("label")}] '
-                      f'{gf.get("location")}: {gf.get("desc")}')
-            print(f'  [refuted] {refutation.strip()}')
+                debug_print(f'  [examined] [{name}-{gf.get("label")}] '
+                            f'{gf.get("location")}: {gf.get("desc")}')
+            debug_print(f'  [refuted] {refutation.strip()}')
         spec = specs[name]
         rev_message = (message + prior_round_block(group, refutation, 'the critic')
                        + _REFUTE_CONFIDENCE_RULE)
@@ -2266,12 +2267,13 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             reasoning_effort=reasoning_effort, seed=seed)
         if not conv_preamble:
             if debug:
-                print('[Review] conventions gate found no issues; converged')
+                debug_print(
+                    '[Review] conventions gate found no issues; converged')
             break
         if debug:
             n_conv = conv_preamble.count('\n') + 1
-            print(f'[Review] conventions gate ({n_conv}) rebutted findings; '
-                  f'starting round {i + 2}')
+            debug_print(f'[Review] conventions gate ({n_conv}) rebutted findings; '
+                        f'starting round {i + 2}')
         prior_findings, prior_preamble = actionable, conv_preamble
     for f in actionable:
         f['evidence'] = evidence_by_number.get(
@@ -2416,9 +2418,9 @@ async def run_review(args: Any) -> int:
             f['sources'] = sources_by_key.get(
                 (f['name'], f['label']), list(f.get('sources') or []))
         if args.debug:
-            print(f'[Review] consensus over {consensus_n} passes '
-                  f'(threshold {threshold}): {len(union)} candidate(s) -> '
-                  f'{len(actionable)} corroborated')
+            debug_print(f'[Review] consensus over {consensus_n} passes '
+                        f'(threshold {threshold}): {len(union)} candidate(s) -> '
+                        f'{len(actionable)} corroborated')
     else:
         tool_ctx = tools.ToolContext(
             phase='review', workdir=cwd, notes=[], require_evidence=True)

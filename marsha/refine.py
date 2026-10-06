@@ -6,9 +6,11 @@ multi-turn conversation with the user (the assistant has read-only codebase tool
 every open ambiguity. On success it rewrites the source in place (the `.mrsh` contents, the
 issue's title/body, or the ticket's title/description). Before a design is locked, the harness
 probes the external endpoints the spec names (and reports dead ones under `--check`), so a dead
-API is not locked into the spec on the model's say-so. `--check` runs headless and reports the
-open ambiguities, the reusable "is this spec locked?" gate for `diff` (#219) and `daemon`
-(#220).
+API is not locked into the spec on the model's say-so, and it re-checks the locked design
+against the same spec gate `diff` uses, feeding any residual open ambiguities back to the chat,
+so a rewrite is only written as design-locked once that gate is clear. `--check` runs headless
+and reports the open ambiguities, the reusable "is this spec locked?" gate for `diff` (#219)
+and `daemon` (#220).
 """
 from __future__ import annotations
 
@@ -57,6 +59,11 @@ REFINE_SPEC_LIMIT = 48_000
 REFINE_PROMPT_RESERVE_TOKENS = 2_000
 # Cap the read-only tool loop within a single assistant turn.
 REFINE_MAX_TOOL_ROUNDS = 10
+# A lock that does not clear the spec gate (the same analyze_spec `marsha diff` runs before
+# implementing) is fed back to the chat to resolve, bounded: once this many re-checks have
+# rejected the design the session ends without locking, so a rewrite that never reaches the
+# gate's bar is not written as design-locked (and then rejected by `marsha diff`).
+REFINE_LOCK_RECHECK_LIMIT = 3
 # The refine step probes the external endpoints a spec names before a design is locked in (a
 # dead API must not be locked into a spec the compile will trust, on the model's say-so). This
 # is the probe's network timeout — well under the page-fetch timeout: it is a liveness check on
@@ -101,7 +108,7 @@ class SpecSource:
 @dataclasses.dataclass
 class ChatResult:
     """The outcome of the interactive loop: locked (with the new source payload) or not."""
-    status: str  # 'locked' | 'bail' | 'timeout' | 'error'
+    status: str  # 'locked' | 'bail' | 'timeout' | 'error' | 'not-locked'
     payload: dict[str, str] | None
     detail: str
 
@@ -226,16 +233,28 @@ async def gh_issue_view(num: int, cwd: str | None = None,
     return cast(dict[str, Any], json.loads(out))
 
 
+# The heading of a rendered issue's comment block: the one stable seam that separates the
+# fetched issue's comments (untrusted discussion) from its title + body (the spec fields refine
+# rewrites and the design gate analyzes).
+ISSUE_COMMENTS_MARKER = '# Comments so far'
+
+
 def render_gh_issue(data: dict[str, Any], num: int) -> str:
     """A fetched GitHub issue (title, body, comments) as a rendered spec."""
-    parts = [f"Issue #{num}: {data.get('title', '')}"]
+    title = data.get('title', '')
+    # A lock turn can copy the rendered header into the stored title (see _apply_issue, which
+    # strips it on the way in): a title that already names the issue is not prefixed again, or
+    # the header would appear doubled in every render of the issue.
+    header = (title if title.startswith(f'Issue #{num}: ')
+              else f'Issue #{num}: {title}')
+    parts = [header]
     body = data.get('body') or ''
     if body.strip():
         parts.append(body.strip())
     comments = [c for c in (data.get('comments') or [])
                 if not c.get('isMinimized')]
     if comments:
-        cparts = ['# Comments so far']
+        cparts = [ISSUE_COMMENTS_MARKER]
         for c in comments:
             author = (c.get('author') or {}).get('login', 'unknown')
             cparts.append(f'{author}: {c.get("body", "")}')
@@ -971,7 +990,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
         # The grounded note claims the spec belongs to an inspectable codebase — true only in
         # a repo; a standalone source has no codebase to settle terms against.
         system += SPEC_CHECK_GROUNDED_NOTE
-    system += tools.tool_instructions(tool_ctx)
+    system += tools.tool_instructions(tool_ctx, interactive=True)
     mapper = get_mapper(system, n_results=1, model=model, label='refine:chat')
     commands = tools.build_commands(tool_ctx)
     initial = _initial_chat_message(
@@ -981,10 +1000,14 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
     # The endpoints the person confirmed to keep (seeded by the source-level confirmation in
     # run_refine, and grown by keep answers at the lock gate): exempted from the probe.
     approved: set[str] = set(approved_endpoints or ())
+    # How many times a locked design has been rejected by the spec gate and fed back to the
+    # chat to resolve (bounded by REFINE_LOCK_RECHECK_LIMIT). A session-wide total, so the chat
+    # cannot spend unlimited re-checks by interleaving questions between re-locks.
+    gate_rechecks = 0
     try:
         for turn in range(max_turns):
             text = ''
-            pending = None
+            tool_budget_exhausted = False
             for _round in range(REFINE_MAX_TOOL_ROUNDS):
                 # Each model call (and any compaction inside it) is a blocking stretch with no
                 # other output: say we are alive, so a slow turn does not look like a hang.
@@ -992,22 +1015,33 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 messages = await _maybe_compact_chat(messages, mapper, tool_ctx, kind,
                                                      spec_text, debug=debug)
                 text = await mapper.run(messages)
-                pending = tools.extract_pending_command(text)
-                if pending is None:
+                pending_cmds = tools.extract_pending_commands(text)
+                if not pending_cmds:
                     break
-                if debug:
-                    print(f'[refine] tool: {pending.name}')
-                log(f'refine tool: {pending.name}')
-                result = await tools.execute_command(
-                    commands, pending.name, pending.args, page=pending.page)
-                block = (tools.wrap_untrusted(pending.name, result)
-                         + '\n\nIf you still need information, end your next response '
-                           'with another `$` command line. Otherwise continue the '
-                           'conversation now.')
-                messages.extend([
-                    {'role': 'assistant', 'content': text},
-                    {'role': 'user', 'content': block},
-                ])
+                blocks: list[str] = []
+                for pc in pending_cmds:
+                    if pc.name == 'finished':
+                        continue
+                    if debug:
+                        print(f'[refine] tool: {pc.name}')
+                    log(f'refine tool: {pc.name}')
+                    result = await tools.execute_command(
+                        commands, pc.name, pc.args, page=pc.page)
+                    blocks.append(tools.wrap_untrusted(pc.name, result))
+                if blocks:
+                    block = '\n\n'.join(blocks) + (
+                        '\n\nIf you still need information, end your next response '
+                        'with another `$` command line. When you are done gathering '
+                        'information, speak to the user directly (do not include a '
+                        '`$` line).')
+                    messages.extend([
+                        {'role': 'assistant', 'content': text},
+                        {'role': 'user', 'content': block},
+                    ])
+                else:
+                    break
+            else:
+                tool_budget_exhausted = True
             # A lock that reaches the gate is shown at most once, as a clean rendered
             # proposal (the raw protocol text — markers plus payload — is never shown), and
             # the confirmation step after the chat does not repeat the payload. The proposal
@@ -1023,7 +1057,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # than trusting the model to have checked) is asked of the person before the
             # gate: keep it as-is (approved for the session — a private endpoint a sample
             # request cannot reach) or have the assistant find a working alternative.
-            locked = (pending is None and _signal_before_payload(
+            locked = (not tool_budget_exhausted and _signal_before_payload(
                 text.split('\n'), '[[DESIGN:LOCKED]]', kind))
             payload = parse_locked_output(text, kind) if locked else None
             format_errors: list[str] = []
@@ -1032,6 +1066,48 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             endpoint_reply = ''
             if locked and kind == 'mrsh' and payload is not None:
                 format_errors = _mrsh_format_errors(payload['spec'])
+            # The locked design must clear the spec gate — the same analyze_spec `marsha diff`
+            # runs before implementing — before it is presented as a proposal: the chat model's
+            # "we are done" is not the gate's verdict, and a rewrite that still has open
+            # ambiguities would be written as design-locked and then rejected by `marsha diff`.
+            # A lock the gate rejects is fed back to the chat (bounded by
+            # REFINE_LOCK_RECHECK_LIMIT) to resolve rather than shown as locked; a .mrsh is
+            # checked ungrounded, exactly as `diff` checks it.
+            if locked and payload is not None and not format_errors:
+                gate_ctx = None if kind == 'mrsh' else tool_ctx
+                print('Checking the locked design against the spec gate...',
+                      file=sys.stderr)
+                try:
+                    gate = await analyze_spec(_payload_text(kind, payload),
+                                              tool_ctx=gate_ctx, debug=debug)
+                except Exception as e:
+                    return ChatResult(
+                        'error', None,
+                        f'The spec-check gate failed to run on the locked design ({e}); '
+                        'the source was not modified. Re-run refine.')
+                gate_items = list(gate['errors']) + list(gate['ambiguities'])
+                if gate_items:
+                    if gate_rechecks >= REFINE_LOCK_RECHECK_LIMIT:
+                        return ChatResult(
+                            'not-locked', None,
+                            f'The spec-check gate still sees {len(gate_items)} open '
+                            f'ambiguity(ies) after the refine conversation; the design is '
+                            f'not locked and the source was not modified. Re-run refine to '
+                            f'keep resolving them, or resolve them manually and re-run.')
+                    gate_rechecks += 1
+                    print(f'Note: the spec-check gate still sees {len(gate_items)} open '
+                          f'ambiguity(ies); the assistant is resolving them (re-check '
+                          f'{gate_rechecks}/{REFINE_LOCK_RECHECK_LIMIT}).', file=sys.stderr)
+                    messages.append({'role': 'assistant', 'content': text})
+                    messages.append(
+                        {'role': 'user', 'content':
+                         'The locked design did not clear the spec-check gate (the same '
+                         'check `marsha diff` runs before implementing). It still reports '
+                         'these open items:\n- ' + '\n- '.join(gate_items) +
+                         '\nResolve every one of them in the specification and re-emit the '
+                         'locked design. Do not emit [[DESIGN:LOCKED]] until the design is '
+                         'complete enough that the gate finds no open items.'})
+                    continue
             if locked and payload is not None and not format_errors:
                 if _spec_urls(_payload_text(kind, payload), approved):
                     # The probe is network I/O on the lock path: say we are alive.
@@ -1064,7 +1140,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
             # result may change it): its payload stays off the screen — the narration is
             # shown, the proposal is not.
             _print_turn_hiding_lock_payload(text, kind)
-            if pending is not None:
+            if tool_budget_exhausted:
                 # The turn's tool-round budget ran out with the last tool result still
                 # unprocessed: the assistant has not seen that result yet. Say so, rather
                 # than prompting the user against an unfinished turn. A tool-request
@@ -1097,14 +1173,32 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                 if _signal_before_payload(text.split('\n'), '[[DESIGN:LOCKED]]', kind):
                     payload = parse_locked_output(text, kind)
                     followup_errors: list[str] = []
+                    followup_gate: list[str] = []
                     followup_endpoints: list[str] = []
                     if kind == 'mrsh' and payload is not None:
                         followup_errors = _mrsh_format_errors(payload['spec'])
                     if payload is not None and not followup_errors:
+                        # Final turn: a lock that does not clear the spec gate has no next turn
+                        # to be fed back, so it is reported and the session ends without locking
+                        # (consistent with the format/endpoint notes below).
+                        gate_ctx = None if kind == 'mrsh' else tool_ctx
+                        try:
+                            gate = await analyze_spec(
+                                _payload_text(kind, payload), tool_ctx=gate_ctx,
+                                debug=debug)
+                            followup_gate = list(gate['errors']) \
+                                + list(gate['ambiguities'])
+                        except Exception as e:
+                            return ChatResult(
+                                'error', None,
+                                f'The spec-check gate failed to run on the locked design '
+                                f'({e}); the source was not modified. Re-run refine.')
+                    if payload is not None and not followup_errors \
+                            and not followup_gate:
                         followup_endpoints = await _spec_endpoint_errors(
                             _payload_text(kind, payload), skip=approved)
                     if payload is not None and not followup_errors \
-                            and followup_endpoints:
+                            and not followup_gate and followup_endpoints:
                         choice, reply = _confirm_endpoint(
                             'The locked design', followup_endpoints, read_line)
                         if choice == 'bail':
@@ -1114,7 +1208,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                                             for e in followup_endpoints)
                             followup_endpoints = []
                     if payload is not None and not followup_errors \
-                            and not followup_endpoints:
+                            and not followup_gate and not followup_endpoints:
                         outcome = _propose_or_continue(text, kind, payload,
                                                        messages, read_line)
                         if outcome is not None:
@@ -1126,6 +1220,10 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                     if followup_errors:
                         print(f'Note: the rewrite is not a valid .mrsh '
                               f'({followup_errors[0]}).')
+                    elif followup_gate:
+                        print(f'Note: the spec-check gate still sees '
+                              f'{len(followup_gate)} open ambiguity(ies); the final turn '
+                              'has passed, so the session ends without locking.')
                     elif followup_endpoints:
                         print(f'Note: an endpoint named in the spec could not be '
                               f'verified as working ({followup_endpoints[0]}); the '
@@ -1200,6 +1298,13 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
 
 
 async def _apply_issue(num: int, title: str, body: str, cwd: str | None) -> None:
+    # The rendered issue shows its title under an `Issue #N:` header line, and a lock turn can
+    # copy that header into the rewritten [[NEW:TITLE]]: strip a leading prefix that names the
+    # issue itself, or the header would be baked into the stored title (which every later render
+    # of the issue and every design-gate/implementor prompt would then carry as a bogus line).
+    prefix = f'Issue #{num}: '
+    if title.startswith(prefix):
+        title = title[len(prefix):].strip()
     with tempfile.NamedTemporaryFile(
             'w', suffix='.md', delete=False, encoding='utf-8') as f:
         f.write(body)

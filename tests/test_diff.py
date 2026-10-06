@@ -74,6 +74,49 @@ def _spec_path(p: str) -> str:
     return os.path.join(p, 'spec.mrsh')
 
 
+def _mock_plan() -> Any:
+    """A minimal one-step plan for tests that drive the step loop."""
+    from marsha import plan as plan_mod
+    return plan_mod.Plan(
+        title='Test Plan',
+        scope_files=['a.py (test file)'],
+        scope_context='Test context',
+        constraints=['Use type hints'],
+        steps=[plan_mod.PlanStep(
+            id=1, goal='Implement X', files=['a.py'],
+            test_first='none', approach='Do X', validate='')])
+
+
+def _mock_threads(findings: Any) -> Any:
+    """Return a resolved-thread list for the given findings (all implemented)."""
+    from marsha.threads import ReviewThread, ThreadResponse
+    return [ReviewThread(
+        finding=f,
+        responses=[
+            ThreadResponse(role='reviewer', action='', text=f.get('desc', '')),
+            ThreadResponse(role='implementor', action='implemented', text='fixed'),
+        ],
+        resolved=True,
+    ) for f in findings]
+
+
+@pytest.fixture(autouse=True)
+def _mock_planning_phase() -> Any:
+    """Patch the planning phase, plan checker, and thread resolution so
+    tests that drive run_diff do not hit the LLM."""
+    from marsha import plan as _plan_mod
+    from marsha import threads as _threads_mod
+    with patch.object(diff, '_run_planning_phase',
+                      new=AsyncMock(
+                          return_value=(_mock_plan(), 'explorer map', 'rules'))), \
+         patch.object(_plan_mod, 'run_plan_checker',
+                      new=AsyncMock(return_value=(True, []))), \
+         patch.object(_threads_mod, 'resolve_threads',
+                      new=AsyncMock(side_effect=lambda *a, **k: (
+                          _mock_threads(a[0] if a else []), True))):
+        yield
+
+
 # --- pure helpers ---------------------------------------------------------------
 
 def test_short_title_first_sentence() -> None:
@@ -152,6 +195,61 @@ def test_validation_command_defaults_to_pytest(tmp_path: Any) -> None:
     assert diff._validation_command(str(tmp_path)) == 'pytest -q'
 
 
+def test_introspect_run_commands_empty(tmp_path: Any) -> None:
+    # No package.json, Makefile, or workflows: no introspected commands.
+    assert diff._introspect_run_commands(str(tmp_path)) == []
+
+
+def test_introspect_run_commands_makefile_targets(tmp_path: Any) -> None:
+    # Makefile targets become `make <target>` rules (non-network).
+    p = os.path.join(str(tmp_path), 'Makefile')
+    with open(p, 'w') as f:
+        f.write('build:\n\techo build\n\ntest:\n\tpytest -q\n\nlint:\n\truff check .\n')
+    rules = diff._introspect_run_commands(str(tmp_path))
+    displays = [r.display for r in rules]
+    assert 'make build' in displays
+    assert 'make test' in displays
+    assert 'make lint' in displays
+    assert all(not r.network for r in rules)
+
+
+def test_introspect_run_commands_npm_scripts(tmp_path: Any) -> None:
+    # package.json scripts become `npm run <script>` rules (network).
+    p = os.path.join(str(tmp_path), 'package.json')
+    with open(p, 'w') as f:
+        f.write('{"scripts": {"build": "tsc", "test": "jest", "lint": "eslint ."}}')
+    rules = diff._introspect_run_commands(str(tmp_path))
+    displays = [r.display for r in rules]
+    assert 'npm run build' in displays
+    assert 'npm run test' in displays
+    assert 'npm run lint' in displays
+    assert all(r.network for r in rules)
+
+
+def test_introspect_run_commands_ci_workflows(tmp_path: Any) -> None:
+    # CI workflow `run:` steps become whitelisted commands (network).
+    wf_dir = os.path.join(str(tmp_path), '.github', 'workflows')
+    os.makedirs(wf_dir)
+    with open(os.path.join(wf_dir, 'ci.yml'), 'w') as f:
+        f.write('steps:\n  - run: pytest -q\n  - run: mypy marsha\n')
+    rules = diff._introspect_run_commands(str(tmp_path))
+    displays = [r.display for r in rules]
+    assert 'pytest -q' in displays
+    assert 'mypy marsha' in displays
+    assert all(r.network for r in rules)
+
+
+def test_introspect_run_commands_skips_shell_metacharacters(tmp_path: Any) -> None:
+    # CI workflow commands with shell metacharacters or template variables are skipped.
+    wf_dir = os.path.join(str(tmp_path), '.github', 'workflows')
+    os.makedirs(wf_dir)
+    with open(os.path.join(wf_dir, 'ci.yml'), 'w') as f:
+        f.write('steps:\n  - run: echo ${{ secrets.TOKEN }}\n'
+                '  - run: pytest && make build\n')
+    rules = diff._introspect_run_commands(str(tmp_path))
+    assert rules == []
+
+
 def test_findings_block_one_line_per_finding() -> None:
     finding: Finding = {'name': 'r', 'label': 'L', 'severity': 'major',
                         'location': 'a.py:1', 'desc': 'the desc'}
@@ -170,6 +268,31 @@ def test_pr_title_and_body_has_required_sections() -> None:
     assert title == 'Implement X'
     assert '## Summary' in body and '## Validation' in body
     assert 'make test' in body
+
+
+def test_comments_section_extracts_comment_block() -> None:
+    rendered = ('Issue #7: T\n\nThe body.\n\n# Comments so far\n'
+                'alice: a note\nbob: another note')
+    assert diff._comments_section(rendered) == 'alice: a note\nbob: another note'
+
+
+def test_comments_section_absent() -> None:
+    assert diff._comments_section('Issue #7: T\n\nThe body.') == ''
+
+
+def test_impl_request_includes_comments_as_untrusted_block() -> None:
+    req = diff._impl_request('the spec', '', 'main', False, comments='alice: a note')
+    assert '[tool:spec]' in req and '[/tool:spec]' in req
+    assert '[tool:comments]' in req and '[/tool:comments]' in req
+    assert 'alice: a note' in req
+    # The comments follow the spec and are labeled untrusted background, not part of the spec.
+    assert req.index('[tool:spec]') < req.index('[tool:comments]')
+    assert 'untrusted background context' in req
+
+
+def test_impl_request_without_comments_has_no_comments_block() -> None:
+    req = diff._impl_request('the spec', '', 'main', False)
+    assert '[tool:comments]' not in req
 
 
 # --- mocked LLM/validation stages ----------------------------------------------
@@ -240,19 +363,20 @@ def test_run_diff_safe_refuses_remote_spec_source() -> None:
 
 
 def test_address_and_validation_fix_requests_are_safe_aware() -> None:
-    # In safe mode the implementor has no command tool (implement-safe omits exec), so the fix
-    # requests must not tell it to rerun validation with exec (the harness does that); the
-    # non-safe requests keep the exec instruction.
+    # In safe mode the implementor has no network access (implement-safe filters the run
+    # whitelist to local-only commands), so the fix requests must not tell it to rerun
+    # validation with the run tool (the harness does that); the non-safe requests keep
+    # the run-tool instruction (shown as `(run)` in the message).
     finding: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
                         'location': 'a.py:1', 'desc': 'fix this'}
     safe_req = diff._address_findings_request([finding], 'main', safe=True)
-    assert 'exec' not in safe_req and 'harness reruns' in safe_req
+    assert '(run)' not in safe_req and 'harness reruns' in safe_req
     normal_req = diff._address_findings_request([finding], 'main')
-    assert 'exec' in normal_req and 'harness reruns' not in normal_req
+    assert '(run)' in normal_req and 'harness reruns' not in normal_req
     safe_fix = diff._validation_fix_request('pytest', 'boom', safe=True)
-    assert 'exec' not in safe_fix and 'harness reruns' in safe_fix
+    assert '(run)' not in safe_fix and 'harness reruns' in safe_fix
     normal_fix = diff._validation_fix_request('pytest', 'boom')
-    assert 'exec' in normal_fix and 'harness reruns' not in normal_fix
+    assert '(run)' in normal_fix and 'harness reruns' not in normal_fix
 
 
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
@@ -284,13 +408,25 @@ def test_run_diff_dirty_tree_refused(tmp_path: Any, capsys: Any) -> None:
 
 
 def test_run_diff_review_not_clean_no_commit(tmp_path: Any, capsys: Any) -> None:
-    # Findings that survive the fix-and-review budget stop the run with no commit.
+    # Findings that survive the thread resolution stop the run with no commit.
     p = str(tmp_path)
     _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    from marsha import threads as _threads_mod
+    from marsha.threads import ReviewThread, ThreadResponse
+
+    def _unresolved_threads(findings: Any, *a: Any, **k: Any) -> Any:
+        return ([ReviewThread(
+            finding=f,
+            responses=[ThreadResponse(role='reviewer', action='', text=f.get('desc', ''))],
+            resolved=False,
+        ) for f in findings], False)
+
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_creates_file), \
          patch.object(diff, '_ensure_validated', new=_ok_validation), \
-         patch.object(diff, '_review_gate', new=_finding_review):
+         patch.object(diff, '_review_gate', new=_finding_review), \
+         patch.object(_threads_mod, 'resolve_threads',
+                      new=AsyncMock(side_effect=_unresolved_threads)):
         with _chdir(p):
             rc = asyncio.run(
                 diff.run_diff(_args(source=_spec_path(p), review_cycles=1)))
@@ -320,6 +456,48 @@ def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> No
     assert 'could not run' in capsys.readouterr().out
     # Only the initial commit exists: nothing was committed on a review that never ran.
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_run_diff_no_changes_is_a_clear_failure(tmp_path: Any, capsys: Any) -> None:
+    # A locked spec the implementer does not change is not implemented: the run stops with a clear
+    # "no changes" report (including the implementer's own report) instead of running validation /
+    # a "clean" review and then failing to commit an empty tree. No commit is made.
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+
+    async def _impl_noop(*a: Any, **k: Any) -> str:
+        return 'I read the code but decided there was nothing to change.'
+
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_noop), \
+         patch.object(diff, '_ensure_validated', new=_ok_validation), \
+         patch.object(diff, '_review_gate', new=_clean_review), \
+         patch.object(diff, '_commit', new=_assert_not_called):
+        with _chdir(p):
+            rc = asyncio.run(diff.run_diff(_args(source=_spec_path(p), review_cycles=1)))
+    assert rc == 1
+    cap = capsys.readouterr()
+    assert 'no changes' in cap.out  # the summary's no-changes lines (stdout)
+    assert 'nothing to change' in cap.out  # the implementer's own report surfaced (stdout)
+    assert 'git commit failed' not in (cap.out + cap.err)  # not a doomed commit failure
+    # No commit was made beyond the initial one.
+    assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_impl_request_canonical_spec_and_comments() -> None:
+    # The implementer implements the canonical spec the design gate analyzed
+    # (title + body — what the gate locked), not the rendered issue (whose
+    # `Issue #N:` header is not part of the locked design); the comments, when
+    # there are any, ride along as a separate untrusted context block.
+    spec_text = 'T\n\nThe locked body.'
+    comments = 'alice: context note'
+    req = diff._impl_request(spec_text, '', 'main', False, comments)
+    spec_block = req.split('[/tool:spec]')[0]
+    assert 'The locked body.' in spec_block  # the locked spec (title + body)
+    assert 'alice: context note' not in spec_block  # comments not in the spec
+    assert 'Issue #7:' not in spec_block  # no rendered header
+    comments_block = req.split('[tool:comments]')[1].split('[/tool:comments]')[0]
+    assert 'alice: context note' in comments_block  # ...they ride along as untrusted context
 
 
 def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> None:

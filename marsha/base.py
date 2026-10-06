@@ -199,10 +199,10 @@ diff_parser.add_argument('--linear', default=None,
                          help='A Linear ticket to implement by name (needs the linear CLI; '
                          'run inside a git repository). Mutually exclusive with the '
                          'positional path and --issue.')
-diff_parser.add_argument('--review-cycles', type=int, default=5, metavar='N',
+diff_parser.add_argument('--review-cycles', type=int, default=30, metavar='N',
                          help='Fix-and-review cycles after the initial review gate (N >= 0). '
                          '0 disables the code-quality review (a one-shot implementation '
-                         'plus the test suite only). Default: 5.')
+                         'plus the test suite only). Default: 30.')
 diff_parser.add_argument('--max-tool-failure', type=int, default=5, metavar='N',
                          help='Consecutive failed tool invocations before the implementor is '
                          'interrupted (N >= 1); a command that runs but reports failing '

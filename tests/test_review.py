@@ -507,9 +507,9 @@ def test_run_personas_attaches_sources_to_findings() -> None:
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
-def test_compaction_reattaches_notes() -> None:
-    # When the tool-loop prompt exceeds the budget, the history is summarized and the
-    # reviewer's notes are re-attached so they survive the compaction.
+def test_compaction_folds_overflow_into_summary() -> None:
+    # When the message history exceeds the recent window, the overflow is folded
+    # into a rolling summary and the history is rebuilt as [request+summary] + [recent].
     class SummarizeMapper:
         system = ''
         model = 'm'
@@ -523,35 +523,43 @@ def test_compaction_reattaches_notes() -> None:
     ctx = tools.ToolContext(phase='review', workdir='.',
                             notes=['a.txt:2 - off by one'])
     mapper = types.SimpleNamespace(model='m', system='')
-    messages = [
-        {'role': 'user', 'content': 'explore'},
-        {'role': 'assistant', 'content': '$ git show HEAD:a.txt'},
-        {'role': 'user', 'content': '[tool:git]\none\nTWO'},
-    ]
-    with patch.object(tools, 'get_client', new=lambda: object()), \
-         patch.object(tools, 'resolve_context_window',
+    # Build 25 messages (1 request + 12 assistant/user pairs) to exceed the window of 20.
+    messages = [{'role': 'user', 'content': 'explore the repo'}]
+    for i in range(12):
+        messages.append({'role': 'assistant', 'content': f'$ cmd{i}'})
+        messages.append({'role': 'user', 'content': f'[tool] output {i}'})
+    with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1)), \
-         patch.object(tools, 'fits', new=lambda prompt, window, cap=0.5: False), \
+         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: False), \
          patch.object(tools, 'get_mapper', new=lambda *a, **k: SummarizeMapper()):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
-    # The conversation was collapsed to a single message that carries the summary and notes.
-    assert len(out) == 1 and out[0]['role'] == 'user'
+    # The result is [first_msg_with_summary] + [recent_window].
+    assert out[0]['role'] == 'user'
     assert 'examined a.txt, found an off-by-one' in out[0]['content']
     assert 'a.txt:2 - off by one' in out[0]['content']
+    assert 'explore the repo' in out[0]['content']
+    # The summary is stored in ctx for the next compaction.
+    assert ctx.compact_summary == 'examined a.txt, found an off-by-one'
+    # The recent window is preserved (total = 1 + window, at most).
+    assert len(out) <= 1 + tools.SUMMARY_WINDOW
 
 
-def test_compaction_noop_when_fits() -> None:
+def test_compaction_noop_within_budget() -> None:
+    # When the prompt fits within the token budget, no compaction occurs.
     ctx = tools.ToolContext(phase='review', workdir='.', notes=['n'])
     mapper = types.SimpleNamespace(model='m', system='')
     messages = [{'role': 'user', 'content': 'small'}]
-    with patch.object(tools, 'get_client', new=lambda: object()), \
-         patch.object(tools, 'resolve_context_window',
+    for i in range(9):
+        messages.append({'role': 'assistant', 'content': f'$ cmd{i}'})
+        messages.append({'role': 'user', 'content': f'[tool] output {i}'})
+    with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1_000_000)), \
-         patch.object(tools, 'fits', new=lambda prompt, window, cap=0.5: True):
+         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: True):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
-    assert out is messages  # no compaction -> unchanged, notes not re-attached
+    assert out is messages  # no compaction -> unchanged
+    assert ctx.compact_summary == ''
 
 
 # --- the evidence gate (deterministic anti-hallucination filter) ---------------
