@@ -159,3 +159,10 @@ def global_cost() -> float:
 
 def global_tokens() -> tuple[int, int]:
     return _global_in_tokens, _global_out_tokens
+
+
+def format_cost() -> str:
+    in_tok, out_tok = global_tokens()
+    cost = global_cost()
+    return (f'Total cost: ${round(cost, 2)} '
+            f'({in_tok:,} input, {out_tok:,} output tokens)')

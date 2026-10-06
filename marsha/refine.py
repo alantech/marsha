@@ -1693,15 +1693,15 @@ async def run_refine(args: Any) -> int:
             print(f'error: failed to update the source: {e}', file=sys.stderr)
             return 1
         _print_summary(source.kind)
-        from marsha.stats import global_cost
-        print(f'Total cost: ${round(global_cost(), 2)}')
+        from marsha.stats import format_cost
+        print(format_cost())
         return 0
     if result.status == 'bail':
         print('Bailed out; the source was not modified.')
-        from marsha.stats import global_cost
-        print(f'Total cost: ${round(global_cost(), 2)}')
+        from marsha.stats import format_cost
+        print(format_cost())
         return 1
     print(result.detail)
-    from marsha.stats import global_cost
-    print(f'Total cost: ${round(global_cost(), 2)}')
+    from marsha.stats import format_cost
+    print(format_cost())
     return 1
