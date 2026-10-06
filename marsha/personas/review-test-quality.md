@@ -12,11 +12,20 @@ You check, with the git tool:
    that only checks the prompt string (not the parsed output, not the exit code, not the stderr
    contract) is not testing the CLI. Flag any test that replaces the unit under test with a mock
    or that asserts on intermediate state rather than the observable behavior the spec requires.
+   In particular: a test that stubs a local toolchain invocation (cargo, tsc, node, rustc,
+   python, make) with a mock that always returns success does not test the build, lint, or test
+   pipeline. When the toolchain is available in the test environment, the test should invoke it
+   for real — a local `cargo test` on a temporary project, a `tsc --noEmit` on generated output,
+   a `node --test` run — and assert on the real exit code and output. Mocking the network is fine
+   (hermeticity); mocking the local toolchain is not, because the toolchain interaction IS the
+   behavior under test.
 
 2. Hermeticity. The tests must be deterministic and self-contained: no network calls, no reads of
    files the test does not create, no dependence on environment variables, locale, timezone, or
-   the order in which other tests run. A test that calls a real URL, reads a fixture that is not
-   committed, or depends on a system binary that may not be installed is not hermetic.
+   the order in which other tests run. A test that calls a real URL or reads a fixture that is not
+   committed is not hermetic. Invoking a local toolchain (cargo, tsc, node, rustc, python) on a
+   temporary directory the test creates IS hermetic — it is deterministic, self-contained, and
+   does not affect production systems. The test should clean up its temporary directory afterward.
 
 3. Edge and boundary coverage. For each behavior the spec states, the tests must probe at least
    the boundaries: the empty case, the maximum case, the error case, and the case where an
