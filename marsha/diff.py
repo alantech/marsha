@@ -1108,6 +1108,18 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
                                   review=f'NOT clean ({unresolved} thread(s) unresolved)',
                                   commit='none (threads unresolved)')
                     return 1
+                if validation_allowed:
+                    passed, _out = await _ensure_validated(
+                        impl_ctx, cwd, validation_cmd, model,
+                        max_tool_failure, debug, safe)
+                    if not passed:
+                        await _report(cwd, base_ref, short, ticket_id,
+                                      design='locked',
+                                      validation='FAILED (post-thread validation)',
+                                      review='NOT clean (validation failed after '
+                                             'thread resolution)',
+                                      commit='none (validation failed)')
+                        return 1
             review_result = 'clean (all threads resolved)'
         else:
             # Safe mode: existing review gate (no threads, no planner).

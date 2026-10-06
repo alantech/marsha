@@ -334,5 +334,8 @@ async def run_plan_checker(p: Plan, cwd: str, model: str,
     gaps = []
     for m in _PLAN_GAP_RE.finditer(result):
         gaps.append(f'Step {m.group(1)}: {m.group(2).strip()}')
+    if not gaps:
+        log('plan: plan checker output unrecognized (no PLAN SATISFIED, no gaps)')
+        return False, ['Unrecognized plan checker output; cannot verify coverage.']
     log(f'plan: plan checker found {len(gaps)} gap(s)')
-    return (len(gaps) == 0), gaps
+    return False, gaps
