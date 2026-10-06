@@ -142,9 +142,8 @@ class ClaudeMapper(BaseMapper):
         }
         if self.max_tokens is not None:
             query_obj['max_tokens'] = self.max_tokens
-        if self.seed is not None:
-            # Best-effort sampling reproducibility (Anthropic honors seed).
-            query_obj['seed'] = self.seed
+        # The Anthropic SDK's stream() does not accept a seed kwarg, so the seed is
+        # silently dropped (reproducibility is best-effort on this provider).
         # Anthropic has no n parameter, so fan out one request per result
         if self.n_results > 1:
             reses = list(await asyncio.gather(*[
