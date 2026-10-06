@@ -16,9 +16,9 @@ from marsha.parse import split_preamble
 
 def test_registry_has_expected_personas() -> None:
     reg = p.build_registry()
-    assert len(reg) == 29
-    for name in ['ada', 'cleo', 'vera', 'sage', 'sasha', 'kit', 'dot', 'otto', 'sol', 'regan',
-                 'fay', 'hollis', 'penelope', 'scout', 'norm', 'check']:
+    assert len(reg) == 30
+    for name in ['ada', 'cleo', 'rosa', 'vera', 'sage', 'sasha', 'kit', 'dot', 'otto', 'sol',
+                 'regan', 'fay', 'hollis', 'penelope', 'scout', 'norm', 'check']:
         assert name in reg
     # Editors (and the review conventions gate) are excluded from the reviewer registry.
     for name in ['wren', 'cody', 'rex', 'norman']:
