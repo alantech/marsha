@@ -531,7 +531,8 @@ def test_compaction_folds_overflow_into_summary() -> None:
     with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1)), \
          patch.object(tools, 'fits', new=lambda p, w, cap=0.5: False), \
-         patch.object(tools, 'get_mapper', new=lambda *a, **k: SummarizeMapper()):
+         patch.object(tools, 'get_mapper', new=lambda *a, **k: SummarizeMapper()), \
+         patch.object(tools, 'get_client', new=lambda: None):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
     # The result is [first_msg_with_summary] + [recent_window].
@@ -555,7 +556,8 @@ def test_compaction_noop_within_budget() -> None:
         messages.append({'role': 'user', 'content': f'[tool] output {i}'})
     with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1_000_000)), \
-         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: True):
+         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: True), \
+         patch.object(tools, 'get_client', new=lambda: None):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
     assert out is messages  # no compaction -> unchanged
