@@ -719,6 +719,8 @@ async def _report(cwd: str, base_ref: str, short: str, ticket_id: str | None, *,
     print(f'Validation: {validation}')
     print(f'Review gate: {review}')
     print(f'Commit: {commit}')
+    from marsha.stats import global_cost
+    print(f'Total cost: ${round(global_cost(), 2)}')
 
 
 # --- PR proposal + refine-on-reject (async) ---------------------------------------

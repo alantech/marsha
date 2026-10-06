@@ -77,6 +77,8 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
                      f'started at {prettify_time_delta(t1 - t0)}, '
                      f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
             log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} (model={model})')
+            from marsha.stats import record_usage
+            record_usage(model, out.usage.input_tokens, out.usage.output_tokens)
             return out
         except anthropic.BadRequestError as e:
             message = str(getattr(getattr(e, 'error', None), 'message', ''))

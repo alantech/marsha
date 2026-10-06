@@ -2494,4 +2494,6 @@ async def run_review(args: Any) -> int:
             args.pr, actionable, full_diff, cwd, active_numbers=active_numbers,
             model=model, base_name=base_name, base_ref=base_ref, debug=args.debug,
             reasoning_effort=reasoning_effort)
+    from marsha.stats import global_cost
+    print(f'Total cost: ${round(global_cost(), 2)}')
     return 0
