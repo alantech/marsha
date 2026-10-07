@@ -2939,7 +2939,10 @@ def unretrieved_citations(
     return unret
 
 
-_FINISHED_MARKER_RE = re.compile(r'(?:^|\n)`?\$\s*finished`?\s*(?:\n|\Z)')
+_FINISHED_MARKER_RE = re.compile(
+    r'(?:^|\n)`?\$\s*finished`?\s*(?:\n|\Z)'  # own line
+    r'|[ \t]`?\$\s*finished`?\s*\Z'  # end of text, same line (after a space)
+)
 
 
 def _strip_finished_marker(text: Any) -> Any:
