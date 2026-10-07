@@ -84,7 +84,8 @@ Briefly state your reasoning after the ACTION line.
 
 async def ask_implementor_response(
         thread: ReviewThread, impl_ctx: tools.ToolContext, model: str,
-        max_failures: int, debug: bool = False) -> ThreadResponse:
+        max_failures: int, debug: bool = False,
+        spec_text: str = '') -> ThreadResponse:
     """Ask the implementor to respond to a review finding: implement the fix
     or push back. The implementor uses the tool loop (write-file, run) to make
     the change if it implements. Returns the ThreadResponse."""
@@ -94,9 +95,19 @@ async def ask_implementor_response(
         f"{thread.finding.get('location', '')} - "
         f"{thread.finding['desc']}\n"
         f"{thread.finding.get('support', '')}")
+    spec_block = ''
+    if spec_text:
+        spec_block = (
+            f'\n## Specification (source of truth)\n'
+            f'{spec_text[:12000]}\n\n')
     request = (
         f'A review of the working-tree changes found the following issue:\n\n'
         f'{finding_text}\n\n'
+        f'{spec_block}'
+        f'Before implementing, check the specification. If the spec explicitly '
+        f'requires the current behavior, push back citing the spec — do not '
+        f'implement a change that contradicts the spec. If the spec is silent '
+        f'on the point, apply your judgment.\n\n'
         f'Respond with exactly one of:\n'
         f'- ACTION: implemented — you made the fix. Briefly describe what you '
         f'changed.\n'
@@ -173,7 +184,8 @@ async def resolve_threads(
         for thread in unresolved:
             try:
                 response = await ask_implementor_response(
-                    thread, impl_ctx, model, max_failures, debug)
+                    thread, impl_ctx, model, max_failures, debug,
+                    spec_text=spec_text)
             except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
                 response = ThreadResponse(
                     role='implementor', action='', text='(implementor failed)')
