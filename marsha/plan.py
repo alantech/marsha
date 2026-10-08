@@ -24,7 +24,7 @@ from marsha.mappers import get_mapper
 from marsha.personas import load_persona, personas_dir
 
 
-# --- plan data structures -----------------------------------------------------
+# --- plan data structures -----------------------------------------------
 
 
 @dataclasses.dataclass
@@ -48,7 +48,7 @@ class Plan:
     steps: list[PlanStep]
 
 
-# --- markdown plan parser -----------------------------------------------------
+# --- markdown plan parser -----------------------------------------------
 
 _PLAN_TITLE_RE = re.compile(r'^# Plan:\s*(.+)', re.MULTILINE)
 _SCOPE_RE = re.compile(r'^## Scope\s*\n(.*?)(?=^## |\Z)',
@@ -159,7 +159,7 @@ def format_step(step: PlanStep) -> str:
     return '\n'.join(lines)
 
 
-# --- planner prompt -----------------------------------------------------------
+# --- planner prompt -----------------------------------------------------
 
 PLANNER_PROMPT = '''\
 You are the planner. You are given a design-locked specification, an explorer's \
@@ -216,7 +216,7 @@ Produce only the markdown plan, with no preamble or commentary.
 '''
 
 
-# --- runner functions ---------------------------------------------------------
+# --- runner functions ---------------------------------------------------
 
 
 async def run_explorer(spec_text: str, cwd: str, model: str,
@@ -336,6 +336,42 @@ async def run_plan_checker(p: Plan, cwd: str, model: str,
         gaps.append(f'Step {m.group(1)}: {m.group(2).strip()}')
     if not gaps:
         log('plan: plan checker output unrecognized (no PLAN SATISFIED, no gaps)')
-        return False, ['Unrecognized plan checker output; cannot verify coverage.']
+        return False, [
+            'Unrecognized plan checker output; cannot verify coverage.']
     log(f'plan: plan checker found {len(gaps)} gap(s)')
     return False, gaps
+
+
+_PLAN_MISSING_RE = re.compile(r'^-\s*MISSING:\s*(.+)', re.MULTILINE)
+
+
+async def run_plan_completeness_check(spec_text: str, p: Plan, model: str,
+                                      debug: bool = False) -> tuple[bool, list[str]]:
+    """Verify the plan covers every requirement in the spec. Returns
+    (complete, missing) where missing is a list of uncovered requirements."""
+    name, body = load_persona(
+        os.path.join(personas_dir(), 'plan-completeness-review.md'))
+    mapper = get_mapper(
+        body, n_results=1, model=model, label=f'plan:{name}',
+        reasoning_effort='high')
+    plan_text = format_plan(p)
+    request = (
+        f'## Specification\n\n{spec_text}\n\n'
+        f'## Plan\n\n{plan_text}\n\n'
+        'Verify that the plan covers every requirement in the specification. '
+        'Produce your output in the required format.')
+    result = await mapper.run(request)
+    result = cast(str, result or '')
+    if 'PLAN COMPLETE' in result:
+        log('plan: plan completeness check passed')
+        return True, []
+    missing = []
+    for m in _PLAN_MISSING_RE.finditer(result):
+        missing.append(m.group(1).strip())
+    if not missing:
+        log('plan: plan completeness output unrecognized')
+        return False, ['Unrecognized completeness check output.']
+    log(
+        f'plan: completeness check found {
+            len(missing)} missing requirement(s)')
+    return False, missing

@@ -40,14 +40,18 @@ from marsha.utils import run_subprocess
 
 # The implementor's tool budget: it reads, edits, and validates over many commands, so it gets
 # more rounds than the read-only reviewers (which cap at 150); 250 leaves room for a full
-# implement-validate-diagnose-fix cycle without the budget being the limiting factor.
+# implement-validate-diagnose-fix cycle without the budget being the
+# limiting factor.
 IMPL_MAX_TOOL_ROUNDS = 250
 # How many times the harness will hand a failing validation back to the implementor to fix and
-# rerun before it gives up (a hard cap so a genuinely broken build cannot loop forever).
+# rerun before it gives up (a hard cap so a genuinely broken build cannot
+# loop forever).
 MAX_VALIDATION_FIX_PASSES = 3
-# How much of a spec / conventions doc is handed to a prompt (the rest is retrievable via tools).
+# How much of a spec / conventions doc is handed to a prompt (the rest is
+# retrievable via tools).
 DIFF_SOURCE_LIMIT = 48_000
-# The timeout (seconds) for the harness's own re-verification run of the validation command.
+# The timeout (seconds) for the harness's own re-verification run of the
+# validation command.
 VALIDATION_TIMEOUT = 600
 
 VM_WARNING = (
@@ -56,7 +60,7 @@ VM_WARNING = (
     'a failure. Do not run it against a working tree you cannot afford to lose.')
 
 
-# --- pure helpers (deterministic and unit-testable) -------------------------------
+# --- pure helpers (deterministic and unit-testable) ---------------------
 
 def _short_title(title: str) -> str:
     # A short form of the spec title for a commit/PR title: the first sentence, trimmed to a
@@ -78,7 +82,8 @@ def _slugify(title: str) -> str:
 
 def _conventions_text(cwd: str) -> str:
     # The repository's stated conventions (AGENTS.md / CLAUDE.md), bounded; '' when neither
-    # exists. This is untrusted reference data the implementor is told to follow.
+    # exists. This is untrusted reference data the implementor is told to
+    # follow.
     parts: list[str] = []
     for name in ('AGENTS.md', 'CLAUDE.md'):
         path = os.path.join(cwd, name)
@@ -98,7 +103,8 @@ _COMMIT_PREFIX_RE = re.compile(r'^([A-Za-z][A-Za-z0-9-]*)\s*:')
 def _detect_commit_prefix(subjects: list[str]) -> str:
     # A change-type prefix ("feat: ", "fix: ") the repository clearly and consistently uses. Only
     # a dominant single prefix (enough signal, and >= 60% of the subjects that carry a prefix)
-    # counts as a convention; a mixed history yields no prefix so the default title is used.
+    # counts as a convention; a mixed history yields no prefix so the default
+    # title is used.
     prefixed: list[str] = []
     for s in subjects:
         m = _COMMIT_PREFIX_RE.match(s)
@@ -112,7 +118,8 @@ def _detect_commit_prefix(subjects: list[str]) -> str:
     return f'{word}: '
 
 
-def _commit_title(subjects: list[str], short_title: str, ticket_id: str | None) -> str:
+def _commit_title(
+        subjects: list[str], short_title: str, ticket_id: str | None) -> str:
     # The commit title: a detected change-type prefix (if the repo clearly uses one) followed by
     # `Implement <short spec title>`; a Linear ticket id is appended after the title.
     title = f'{_detect_commit_prefix(subjects)}Implement {short_title}'
@@ -124,7 +131,8 @@ def _commit_title(subjects: list[str], short_title: str, ticket_id: str | None) 
 def _validation_command(cwd: str) -> str:
     # The project's test command, best-effort: a Makefile `test` target if there is one,
     # otherwise the common Python default. The implementor (which reads the repo's own docs) is
-    # the authority on what to run; this is the harness's own re-verification command.
+    # the authority on what to run; this is the harness's own re-verification
+    # command.
     makefile = os.path.join(cwd, 'Makefile')
     if os.path.isfile(makefile):
         try:
@@ -206,7 +214,8 @@ def _introspect_run_commands(cwd: str) -> list[tools.RunRule]:
 
 
 def _findings_block(findings: list[Finding]) -> str:
-    # The findings rendered for an implementor to address: one line per finding.
+    # The findings rendered for an implementor to address: one line per
+    # finding.
     lines: list[str] = []
     for f in findings:
         lines.append(f"- [{f['label']}] {f['severity']} {f.get('location', '')}: "
@@ -235,17 +244,22 @@ def _comments_section(spec_text: str) -> str:
 def _pr_title_and_body(commit_title: str, spec_text: str, validation_cmd: str,
                        review_result: str) -> tuple[str, str]:
     # The proposed PR title and body. The title follows the commit-title policy; the body has the
-    # required ## Summary and ## Validation sections (validation reports what was actually run).
+    # required ## Summary and ## Validation sections (validation reports what
+    # was actually run).
     validation = f'Ran `{validation_cmd}` (passed). Review gate: {review_result}.'
-    body = f'## Summary\n\n{_spec_summary(spec_text, 400)}\n\n## Validation\n\n{validation}\n'
+    body = f'## Summary\n\n{
+        _spec_summary(
+            spec_text,
+            400)}\n\n## Validation\n\n{validation}\n'
     return commit_title, body
 
 
-# --- Git helpers (async) ----------------------------------------------------------
+# --- Git helpers (async) ------------------------------------------------
 
 async def _recent_commit_subjects(cwd: str) -> list[str]:
     # The 20 most recent non-merge commit subjects, used to detect the local commit-title
-    # convention; best-effort (an empty list means no convention is detectable).
+    # convention; best-effort (an empty list means no convention is
+    # detectable).
     rc, out, _err = await _git('log', '--no-merges', '--pretty=%s', '-20', cwd=cwd)
     if rc != 0:
         return []
@@ -253,7 +267,8 @@ async def _recent_commit_subjects(cwd: str) -> list[str]:
 
 
 async def _head_commit(cwd: str) -> tuple[str, str]:
-    # The current HEAD's (short sha, subject), for the final summary; best-effort.
+    # The current HEAD's (short sha, subject), for the final summary;
+    # best-effort.
     rc, out, _err = await _git('log', '-1', '--pretty=%h %s', cwd=cwd)
     if rc != 0 or not out.strip():
         return ('(unknown)', '(unknown)')
@@ -279,7 +294,8 @@ async def _unique_branch(base: str, cwd: str) -> str:
 async def _create_branch(name: str, base_ref: str, cwd: str) -> None:
     # Base the new branch on the default branch (the review gate and the eventual PR both diff
     # against it), not on the arbitrary current HEAD: if the clean starting branch were not the
-    # default, basing on HEAD would fold those extra commits into the reviewed/committed change.
+    # default, basing on HEAD would fold those extra commits into the
+    # reviewed/committed change.
     rc, _o, err = await _git('checkout', '-b', name, base_ref, cwd=cwd)
     if rc != 0:
         raise Exception(f'git checkout -b {name} {base_ref} failed: {err}')
@@ -304,7 +320,8 @@ async def _changed_files(cwd: str, base_ref: str) -> list[str]:
 
 
 async def _commit(cwd: str, title: str, body: str) -> str:
-    # Stage the implementation and commit it on the current branch; returns the short sha.
+    # Stage the implementation and commit it on the current branch; returns
+    # the short sha.
     rc, _o, err = await _git('add', '-A', cwd=cwd)
     if rc != 0:
         raise Exception(f'git add -A failed: {err}')
@@ -315,7 +332,7 @@ async def _commit(cwd: str, title: str, body: str) -> str:
     return sha.strip() if rc == 0 else '(unknown)'
 
 
-# --- validation (async) -----------------------------------------------------------
+# --- validation (async) -------------------------------------------------
 
 async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     # Run the validation command and report whether it passed (a clean exit). The tail of the
@@ -334,7 +351,7 @@ async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     return (proc.returncode == 0, (out or '').strip()[-4000:])
 
 
-# --- implementor prompts and loop (async) -----------------------------------------
+# --- implementor prompts and loop (async) -------------------------------
 
 IMPL_SYSTEM_PROMPT = (
     'You are a senior software engineer implementing a design-locked specification in the current '
@@ -393,7 +410,8 @@ def _address_findings_request(findings: list[Finding], base_name: str,
                               safe: bool = False) -> str:
     # The request that sends review findings back to the implementor to address. In safe mode the
     # implementor has no command tool (the implement-safe phase omits exec), so it cannot rerun
-    # the validation itself — the harness does that — and is told to just make the fix.
+    # the validation itself — the harness does that — and is told to just make
+    # the fix.
     if safe:
         action = ('fix the code (write-file); you have no command tool, so the harness reruns the '
                   'project\'s validation for you — make the fix by editing files.')
@@ -410,7 +428,8 @@ def _validation_fix_request(validation_cmd: str, failure_output: str,
                             safe: bool = False) -> str:
     # The request that hands a failing validation back to the implementor. In safe mode the
     # implementor has no command tool (the implement-safe phase omits exec), so it cannot rerun
-    # the validation itself — the harness does that — and is told to just make the fix.
+    # the validation itself — the harness does that — and is told to just make
+    # the fix.
     if safe:
         action = ('you have no command tool, so the harness reruns it for you — make the fix by '
                   'editing files.')
@@ -424,7 +443,8 @@ def _validation_fix_request(validation_cmd: str, failure_output: str,
 async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
                            max_failures: int, debug: bool) -> str:
     # One implementor pass: drive the tool loop with the implementor persona. Raises
-    # tools.ToolFailureLimitExceeded when the consecutive-failure budget is exhausted.
+    # tools.ToolFailureLimitExceeded when the consecutive-failure budget is
+    # exhausted.
     system = IMPL_SYSTEM_PROMPT + tools.tool_instructions(ctx)
     if ctx.run_whitelist:
         cmd_lines = '\n'.join(f'  {r.display}' for r in ctx.run_whitelist)
@@ -444,7 +464,8 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
     # Run the validation; on a failure, hand it to the implementor to fix and rerun, up to
     # MAX_VALIDATION_FIX_PASSES. Returns (passed, last_output). A validation that cannot even be
     # run counts as a failure and is also handed back for a workaround. In safe mode the fix
-    # request omits the exec instruction (the implement-safe phase has no command tool).
+    # request omits the exec instruction (the implement-safe phase has no
+    # command tool).
     passed, out = await _run_validation(cwd, validation_cmd)
     fix_passes = 0
     while not passed and fix_passes < MAX_VALIDATION_FIX_PASSES:
@@ -461,22 +482,41 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
     return passed, out
 
 
-# --- planning phase and step loop (async) ---------------------------------------
+# --- planning phase and step loop (async) -------------------------------
+
+
+PLAN_COMPLETENESS_MAX_CYCLES = 3
 
 
 async def _run_planning_phase(spec_text: str, cwd: str, model: str,
                               debug: bool) -> tuple[plan_mod.Plan, str, str]:
-    """Run the planning phase: explorer, rule checker, then planner. Returns
-    (plan, explorer_output, rules). The explorer maps relevant files, the
-    rule checker extracts constraints, and the planner produces the sequential
-    step list. The explorer output and rules are passed through so the step
-    loop can pre-seed the implementor's context (avoiding re-discovery)."""
+    """Run the planning phase: explorer, rule checker, planner, then a
+    plan-completeness review loop. Returns (plan, explorer_output, rules).
+    The explorer maps relevant files, the rule checker extracts constraints,
+    the planner produces the sequential step list, and the completeness
+    reviewer verifies the plan covers every spec requirement (re-planning
+    with the gaps as context if not)."""
     debug_print('Exploring the repository...')
     explorer_output = await plan_mod.run_explorer(spec_text, cwd, model, debug)
     debug_print('Checking conventions...')
     rules = await plan_mod.run_rule_checker(cwd, model, debug)
     debug_print('Planning the implementation...')
     p = await plan_mod.run_planner(spec_text, explorer_output, rules, model, debug)
+    for cycle in range(PLAN_COMPLETENESS_MAX_CYCLES):
+        complete, missing = await plan_mod.run_plan_completeness_check(
+            spec_text, p, model, debug)
+        if complete:
+            break
+        debug_print(
+            f'Plan completeness: {len(missing)} missing requirement(s); '
+            f're-planning (cycle {cycle + 1}/{PLAN_COMPLETENESS_MAX_CYCLES})...')
+        gap_text = '\n'.join(f'- {m}' for m in missing)
+        revised_spec = (
+            f'{spec_text}\n\n'
+            f'## Plan completeness gaps (MUST be addressed in the revised plan)\n'
+            f'{gap_text}')
+        p = await plan_mod.run_planner(
+            revised_spec, explorer_output, rules, model, debug)
     debug_print(f'Plan: {len(p.steps)} steps')
     return p, explorer_output, rules
 
@@ -621,7 +661,7 @@ async def _run_step_loop(ctx: tools.ToolContext, p: plan_mod.Plan, base_name: st
     return last_report
 
 
-# --- review gate (async) ----------------------------------------------------------
+# --- review gate (async) ------------------------------------------------
 
 class ReviewGateFailed(Exception):
     """Raised by _review_gate when the review could not complete (a reviewer failed with nothing
@@ -642,7 +682,8 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     # with `git add -A`. Stage the working tree first so the review sees exactly what the commit
     # will capture (this is the same non-destructive staging the commit performs). If staging
     # fails, the tree may not be fully captured (untracked changes would be absent from the diff
-    # yet committed later), so the gate must not review — or clear — an incomplete tree.
+    # yet committed later), so the gate must not review — or clear — an
+    # incomplete tree.
     rc, _o, err = await _git('add', '-A', cwd=cwd)
     if rc != 0:
         raise ReviewGateFailed(
@@ -689,7 +730,8 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
             reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED)
         findings = dedup_findings(consolidated)
         # Re-attach the reviewer's support and evidence by (name, label) (the consolidator only
-        # guarantees the [Name-Label]), then re-run the deterministic gate on the rewritten set.
+        # guarantees the [Name-Label]), then re-run the deterministic gate on
+        # the rewritten set.
         for f in findings:
             key = (f['name'], f['label'])
             f['support'] = support.get(key, '')
@@ -702,11 +744,12 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
     return findings
 
 
-# --- reporting --------------------------------------------------------------------
+# --- reporting ----------------------------------------------------------
 
 async def _report(cwd: str, base_ref: str, short: str, ticket_id: str | None, *,
                   design: str, validation: str, review: str, commit: str) -> None:
-    # The human-readable summary: changed files plus the design/validation/review/commit results.
+    # The human-readable summary: changed files plus the
+    # design/validation/review/commit results.
     print('\n' + '=' * 64)
     print('marsha diff — summary')
     print('=' * 64)
@@ -723,7 +766,7 @@ async def _report(cwd: str, base_ref: str, short: str, ticket_id: str | None, *,
     print(format_cost())
 
 
-# --- PR proposal + refine-on-reject (async) ---------------------------------------
+# --- PR proposal + refine-on-reject (async) -----------------------------
 
 async def _propose_and_maybe_refine(
         read_line: Callable[[], str], cwd: str, source: SpecSource, spec_text: str,
@@ -751,7 +794,8 @@ async def _propose_and_maybe_refine(
         if answer in ('y', 'yes'):
             print('Accepted. No PR was pushed or created.')
             return (0, commit_title, sha)
-        # Rejection: offer to refine the source (the existing interactive refine flow).
+        # Rejection: offer to refine the source (the existing interactive
+        # refine flow).
         print(
             'Proposal rejected. Refine the specification and re-implement? [y/N] ')
         refine_answer = read_line().strip().lower()
@@ -761,7 +805,8 @@ async def _propose_and_maybe_refine(
         if refine_answer not in ('y', 'yes'):
             print('Leaving the existing commit intact; no further implementation pass.')
             return (0, commit_title, sha)
-        # Run the interactive refine chat; a lock yields the updated source to re-implement from.
+        # Run the interactive refine chat; a lock yields the updated source to
+        # re-implement from.
         try:
             result = await run_refine_chat(
                 kind=source.kind, spec_text=spec_text, ambiguities=[], errors=[],
@@ -774,7 +819,8 @@ async def _propose_and_maybe_refine(
         if result.status != 'locked' or result.payload is None:
             print('Refinement did not lock; leaving the existing commit intact.')
             return (0, commit_title, sha)
-        # Apply the refined source (a staleness re-read guards against a concurrent edit).
+        # Apply the refined source (a staleness re-read guards against a
+        # concurrent edit).
         try:
             if source.kind == 'mrsh':
                 current, _fields = await load_spec_with_fields(source, cwd)
@@ -791,7 +837,8 @@ async def _propose_and_maybe_refine(
             if source.kind != 'mrsh':
                 # The source now holds the refined fields; refresh the staleness baseline so a
                 # later reject-and-refine cycle compares against them (not the pre-refinement
-                # originals), or a legitimate second refinement would read as a concurrent edit.
+                # originals), or a legitimate second refinement would read as a
+                # concurrent edit.
                 original_fields = await _source_fields(source, cwd)
         except (Exception, KeyboardInterrupt) as e:
             print(f'error: failed to update the source: {e}. Leaving the existing commit '
@@ -804,7 +851,9 @@ async def _propose_and_maybe_refine(
                      else (result.payload.get('title', '') + '\n\n'
                            + result.payload.get('body', '')))
         try:
-            print('Re-implementing the refined specification...', file=sys.stderr)
+            print(
+                'Re-implementing the refined specification...',
+                file=sys.stderr)
             await _run_implementor(
                 impl_ctx, _impl_request(
                     spec_text, _conventions_text(cwd), base_name, False),
@@ -822,7 +871,8 @@ async def _propose_and_maybe_refine(
                 return (0, commit_title, sha)
         except ReviewGateFailed as e:
             # The review gate could not run (a reviewer failed with nothing to fall back on); do
-            # not make the follow-up commit on the strength of a review that could not complete.
+            # not make the follow-up commit on the strength of a review that
+            # could not complete.
             print(f'Review gate could not run after refinement ({e}); leaving the existing commit '
                   'intact.', file=sys.stderr)
             return (0, commit_title, sha)
@@ -847,11 +897,13 @@ async def _propose_and_maybe_refine(
         # Present the updated proposal (loop back).
 
 
-# --- orchestrator (async) ---------------------------------------------------------
+# --- orchestrator (async) -----------------------------------------------
 
-async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int:
+async def run_diff(
+        args: Any, read_line: Callable[[], str] | None = None) -> int:
     # The marsha diff orchestrator. Returns 0 on success (including a successful --safe run), 1
-    # on a design/implementation/validation/review failure, 2 on a command-usage error.
+    # on a design/implementation/validation/review failure, 2 on a
+    # command-usage error.
     read_line = read_line or _read_line
     cwd = os.getcwd()
     debug = bool(getattr(args, 'debug', False)
@@ -860,19 +912,24 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     safe = bool(getattr(args, 'safe', False))
     # `--review-cycles` must be a non-negative integer and `--max-tool-failure` a positive one (the
     # CLI contract). An out-of-range value is a usage error (exit 2), never silently clamped:
-    # clamping a negative --review-cycles to 0 would disable the review gate — a safety bypass.
+    # clamping a negative --review-cycles to 0 would disable the review gate —
+    # a safety bypass.
     try:
         review_cycles = int(args.review_cycles)
         max_tool_failure = int(args.max_tool_failure)
     except (TypeError, ValueError):
-        print('error: --review-cycles and --max-tool-failure must be integers.', file=sys.stderr)
+        print(
+            'error: --review-cycles and --max-tool-failure must be integers.',
+            file=sys.stderr)
         return 2
     if review_cycles < 0:
         print('error: --review-cycles must be a non-negative integer (0 disables the review gate).',
               file=sys.stderr)
         return 2
     if max_tool_failure < 1:
-        print('error: --max-tool-failure must be a positive integer.', file=sys.stderr)
+        print(
+            'error: --max-tool-failure must be a positive integer.',
+            file=sys.stderr)
         return 2
     model = resolve_model()
 
@@ -884,7 +941,8 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
         return 2
     # Safe mode is a no-network mode. `--issue`/`--linear` load their spec over the network (via
     # gh/linear) inside load_spec_with_fields, before any safe-mode restriction could apply, so a
-    # remote spec source is a usage error in safe mode; only a local *.mrsh spec is allowed.
+    # remote spec source is a usage error in safe mode; only a local *.mrsh
+    # spec is allowed.
     if safe and source.kind in ('issue', 'linear'):
         print('error: --safe cannot load a remote spec via --issue/--linear (that reaches the '
               'network, which safe mode disables). Use a local *.mrsh spec with the positional '
@@ -900,7 +958,8 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         return 1
-    # A .mrsh has no title field; the branch slug falls back to its filename stem.
+    # A .mrsh has no title field; the branch slug falls back to its filename
+    # stem.
     title = (original_fields[0] if original_fields else '').strip()
     if not title and source.kind == 'mrsh' and source.path:
         title = os.path.splitext(os.path.basename(source.path))[0]
@@ -912,7 +971,8 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     design_tool_ctx = None
     if source.kind != 'mrsh':
         # Safe mode disables the network: the design gate (which uses the `refine` phase, that has
-        # the web category) must not get web tools, so drop them from its category set.
+        # the web category) must not get web tools, so drop them from its
+        # category set.
         design_categories = tools.PHASE_CATEGORIES['refine']
         if safe:
             design_categories = design_categories - {tools.CATEGORY_WEB}
@@ -985,7 +1045,8 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
     p: plan_mod.Plan | None = None
     try:
         if safe:
-            # Safe mode: single-pass implement (no planning phase, no step loop).
+            # Safe mode: single-pass implement (no planning phase, no step
+            # loop).
             debug_print('Implementing the spec in the working tree...')
             impl_report = await _run_implementor(
                 impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
@@ -1151,7 +1212,8 @@ async def run_diff(args: Any, read_line: Callable[[], str] | None = None) -> int
                 if remaining:
                     await _report(cwd, base_ref, short, ticket_id, design='locked',
                                   validation=validation,
-                                  review=f'NOT clean ({len(remaining)} finding(s) remain)',
+                                  review=f'NOT clean ({
+                                      len(remaining)} finding(s) remain)',
                                   commit='none (review not clean)')
                     return 1
             except ReviewGateFailed as e:
