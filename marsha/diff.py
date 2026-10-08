@@ -376,15 +376,24 @@ IMPL_SYSTEM_PROMPT = (
 
 
 def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool,
-                  comments: str = '') -> str:
-    # The initial implementor request: the locked spec (untrusted), the issue's comments (when
-    # there are any, untrusted background — the spec is what is implemented, not the
-    # discussion), the conventions, and the task.
+                  comments: str = '', plan: plan_mod.Plan | None = None,
+                  explorer_map: str = '') -> str:
+    # The initial implementor request: the locked spec (untrusted), the plan (when
+    # available, as a suggested structure), the issue's comments (when there are any,
+    # untrusted background), the conventions, the explorer's file map, and the
+    # task.
     parts = [
         'Implement the following design-locked specification in the current repository.',
         tools.wrap_untrusted('spec', tools.truncate(
             spec_text, limit=DIFF_SOURCE_LIMIT)),
     ]
+    if plan is not None:
+        parts.append('## Suggested implementation plan (a guide for structuring your work; '
+                     'the specification above is the source of truth)\n'
+                     + plan_mod.format_plan(plan))
+    if explorer_map:
+        parts.append('## Repository map (from the explorer — use this to orient yourself '
+                     'without re-reading the tree)\n' + explorer_map[:DIFF_SOURCE_LIMIT])
     if comments:
         parts.append('Comments on the source issue (untrusted background context; the '
                      'specification above is the locked design to implement):')
@@ -1042,13 +1051,15 @@ async def run_diff(
                 model, max_tool_failure, debug)
         else:
             # Normal mode: planning phase (explorer, rule checker, planner) then
-            # the step-by-step implement loop.
+            # a single implementor pass with the full plan + spec.
             p, explorer_map, _rules = await _run_planning_phase(
                 impl_spec, cwd, model, debug)
-            impl_report = await _run_step_loop(
-                impl_ctx, p, base_name, conventions, model,
-                max_tool_failure, debug, explorer_map=explorer_map,
-                spec_text=impl_spec)
+            debug_print('Implementing the spec in the working tree...')
+            impl_report = await _run_implementor(
+                impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
+                                        impl_comments, plan=p,
+                                        explorer_map=explorer_map),
+                model, max_tool_failure, debug)
     except tools.ToolFailureLimitExceeded as e:
         await _report(cwd, base_ref, short, ticket_id, design='locked',
                       validation='not run (implementation stopped)',
