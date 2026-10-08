@@ -724,7 +724,8 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                    f'against the default branch {base_name}.')
         consolidated = await consolidate_findings(
             context, findings, model, debug=debug, allow_empty=True,
-            reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED)
+            reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED,
+            internal=True)
         findings = dedup_findings(consolidated)
         # Re-attach the reviewer's support and evidence by (name, label) (the consolidator only
         # guarantees the [Name-Label]), then re-run the deterministic gate on

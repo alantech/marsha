@@ -29,7 +29,9 @@ Then, with the git tool, you examine the diff and check:
    not ask for test removal, and the deletion eliminates a safety net for behavior the change
    does not touch. You flag any test file that shrinks significantly, any test that is deleted or
    commented out, and any assertion that is weakened (a specific check replaced with a broader
-   one) unless the spec explicitly scopes that test as part of the change.
+   one) unless the spec explicitly scopes that test as part of the change. Removal or weakening
+   of existing test coverage is ALWAYS at least MAJOR severity: it is a regression in the
+   project's safety net, not a nitpick or a minor style issue.
 
 4. Dependency and interface containment. Does the diff add new dependencies, change public
    interfaces, or alter configuration in ways the spec does not request? A new top-level
