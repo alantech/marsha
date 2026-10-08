@@ -485,38 +485,19 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
 # --- planning phase and step loop (async) -------------------------------
 
 
-PLAN_COMPLETENESS_MAX_CYCLES = 3
-
-
 async def _run_planning_phase(spec_text: str, cwd: str, model: str,
                               debug: bool) -> tuple[plan_mod.Plan, str, str]:
-    """Run the planning phase: explorer, rule checker, planner, then a
-    plan-completeness review loop. Returns (plan, explorer_output, rules).
-    The explorer maps relevant files, the rule checker extracts constraints,
-    the planner produces the sequential step list, and the completeness
-    reviewer verifies the plan covers every spec requirement (re-planning
-    with the gaps as context if not)."""
+    """Run the planning phase: explorer, rule checker, then planner. Returns
+    (plan, explorer_output, rules). The explorer maps relevant files, the
+    rule checker extracts constraints, and the planner produces the sequential
+    step list. The explorer output and rules are passed through so the step
+    loop can pre-seed the implementor's context (avoiding re-discovery)."""
     debug_print('Exploring the repository...')
     explorer_output = await plan_mod.run_explorer(spec_text, cwd, model, debug)
     debug_print('Checking conventions...')
     rules = await plan_mod.run_rule_checker(cwd, model, debug)
     debug_print('Planning the implementation...')
     p = await plan_mod.run_planner(spec_text, explorer_output, rules, model, debug)
-    for cycle in range(PLAN_COMPLETENESS_MAX_CYCLES):
-        complete, missing = await plan_mod.run_plan_completeness_check(
-            spec_text, p, model, debug)
-        if complete:
-            break
-        debug_print(
-            f'Plan completeness: {len(missing)} missing requirement(s); '
-            f're-planning (cycle {cycle + 1}/{PLAN_COMPLETENESS_MAX_CYCLES})...')
-        gap_text = '\n'.join(f'- {m}' for m in missing)
-        revised_spec = (
-            f'{spec_text}\n\n'
-            f'## Plan completeness gaps (MUST be addressed in the revised plan)\n'
-            f'{gap_text}')
-        p = await plan_mod.run_planner(
-            revised_spec, explorer_output, rules, model, debug)
     debug_print(f'Plan: {len(p.steps)} steps')
     return p, explorer_output, rules
 
@@ -524,9 +505,10 @@ async def _run_planning_phase(spec_text: str, cwd: str, model: str,
 def _step_request(p: plan_mod.Plan, step: plan_mod.PlanStep, base_name: str,
                   conventions: str, explorer_map: str = '',
                   prior_files: list[str] | None = None,
-                  cwd: str = '') -> str:
+                  cwd: str = '', spec_text: str = '') -> str:
     """Build the implementor request for one step: the full plan for context,
-    the explorer's file map (so the model knows the repo layout without
+    the specification (the source of truth for intended behavior), the
+    explorer's file map (so the model knows the repo layout without
     re-discovering it), what previous steps already wrote, the current
     step's target files pre-read (so the model can edit without re-reading),
     the current step's details, and the constraints."""
@@ -598,9 +580,14 @@ def _step_request(p: plan_mod.Plan, step: plan_mod.PlanStep, base_name: str,
                 '\n## Files you will CREATE in this step (do not exist yet — '
                 'write them from scratch, do not try to read them)\n'
                 + '\n'.join(f'- {f}' for f in to_create) + '\n')
+    spec_block = ''
+    if spec_text:
+        spec_block = (f'## Specification (source of truth)\n'
+                      f'{tools.truncate(spec_text, limit=DIFF_SOURCE_LIMIT)}\n\n')
     return (
         f'You are implementing step {step.id} of {len(p.steps)}.\n\n'
         f'## Full plan\n{plan_text}\n\n'
+        f'{spec_block}'
         f'{explorer_text}\n'
         f'{prior_text}\n'
         f'{pre_read_text}\n'
@@ -618,11 +605,12 @@ def _step_request(p: plan_mod.Plan, step: plan_mod.PlanStep, base_name: str,
 
 async def _run_step_loop(ctx: tools.ToolContext, p: plan_mod.Plan, base_name: str,
                          conventions: str, model: str, max_failures: int,
-                         debug: bool, explorer_map: str = '') -> str:
+                         debug: bool, explorer_map: str = '',
+                         spec_text: str = '') -> str:
     """Run the step-by-step implement loop. For each step in the plan, feed the
-    implementor the step context (including the explorer's file map and what
-    previous steps already wrote) and let it work. Returns the final report
-    from the last step."""
+    implementor the step context (including the explorer's file map, the full
+    spec, and what previous steps already wrote) and let it work. Returns the
+    final report from the last step."""
     last_report = ''
     prior_files: list[str] = []
     for step in p.steps:
@@ -634,7 +622,7 @@ async def _run_step_loop(ctx: tools.ToolContext, p: plan_mod.Plan, base_name: st
         request = _step_request(p, step, base_name, conventions,
                                 explorer_map=explorer_map,
                                 prior_files=prior_files or None,
-                                cwd=os.getcwd())
+                                cwd=os.getcwd(), spec_text=spec_text)
         try:
             last_report = await _run_implementor(
                 ctx, request, model, max_failures, debug)
@@ -1059,7 +1047,8 @@ async def run_diff(
                 impl_spec, cwd, model, debug)
             impl_report = await _run_step_loop(
                 impl_ctx, p, base_name, conventions, model,
-                max_tool_failure, debug, explorer_map=explorer_map)
+                max_tool_failure, debug, explorer_map=explorer_map,
+                spec_text=impl_spec)
     except tools.ToolFailureLimitExceeded as e:
         await _report(cwd, base_ref, short, ticket_id, design='locked',
                       validation='not run (implementation stopped)',
