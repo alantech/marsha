@@ -2022,6 +2022,58 @@ async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> st
     return f'wrote {len(content)} chars to {rel}'
 
 
+async def edit_file_tool(args: list[str], ctx: ToolContext | None = None) -> str:
+    # edit-file <path> "<old-text>" "<new-text>" — replace an exact text match
+    # in a file. The old-text must appear exactly once; if absent or ambiguous,
+    # the command reports an error. Use for targeted modifications to existing
+    # files (no need to rewrite unchanged portions).
+    if len(args) < 3:
+        return ('error: edit-file needs a path, old text, and new text, '
+                'e.g. $ edit-file src/foo.py """old code""" """new code"""')
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: edit-file has no working tree to edit into.'
+    path = args[0]
+    old_text = _decode_content(args[1])
+    new_text = _decode_content(args[2])
+    target = os.path.normpath(os.path.join(root, path))
+    if target != root and not target.startswith(root + os.sep):
+        return f'error: edit-file cannot edit outside the working tree: {path}'
+    real_root = os.path.realpath(root)
+    real_target = os.path.realpath(target)
+    if real_target != real_root and not real_target.startswith(real_root + os.sep):
+        return f'error: edit-file cannot edit outside the working tree: {path}'
+    if '.git' in os.path.relpath(real_target, real_root).split(os.sep):
+        return f'error: edit-file cannot modify Git metadata: {path}'
+    if not os.path.isfile(target):
+        return f'error: edit-file: file not found: {path}'
+    try:
+        with open(target, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        return f'error: edit-file could not read {path}: {e}'
+    count = content.count(old_text)
+    if count == 0:
+        snippet = old_text[:120].replace('\n', '\\n')
+        return (f'error: edit-file: old text not found in {path} '
+                f'(searched: "{snippet}...")')
+    if count > 1:
+        snippet = old_text[:120].replace('\n', '\\n')
+        return (f'error: edit-file: old text found {count} times in {path} '
+                f'(ambiguous; include more surrounding context): "{snippet}..."')
+    new_content = content.replace(old_text, new_text, 1)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+    except Exception as e:
+        return f'error: edit-file could not write {path}: {e}'
+    rel = os.path.relpath(target, root)
+    if ctx is not None and rel not in ctx.step_files:
+        ctx.step_files.append(rel)
+    return f'edited {rel} (replaced {len(old_text)} chars with {len(new_text)} chars)'
+
+
 def _check_run_whitelist(argv: list[str],
                          whitelist: list[RunRule]) -> RunRule | None:
     # The first whitelist rule whose argv prefix matches `argv`, or None when the command
@@ -2308,8 +2360,16 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                                   '$ write-file <path> """<content>"""',
                                   'write content to a file in the working tree (creating parent '
                                   'directories); wrap the content in triple quotes ("""...""") so '
-                                  'newlines, quotes, and backslashes pass through verbatim',
+                                  'newlines, quotes, and backslashes pass through verbatim; use '
+                                  'for new files or full rewrites',
                                   lambda args, _c=ctx: write_file_tool(args, _c)),
+        'edit-file': ToolCommand('edit-file', CATEGORY_WRITE,
+                                 '$ edit-file <path> """<old-text>""" """<new-text>"""',
+                                 'replace an exact text match in an existing file (targeted edit; '
+                                 'the old text must appear exactly once — include surrounding '
+                                 'context to disambiguate); prefer over write-file when modifying '
+                                 'a small part of a larger file',
+                                 lambda args, _c=ctx: edit_file_tool(args, _c)),
         'run': ToolCommand('run', CATEGORY_RUN,
                            '$ run <command...>',
                            'run a whitelisted command in the working tree (tests, builds, lint, '
@@ -2394,7 +2454,7 @@ def tool_instructions(ctx: ToolContext | None = None, *, interactive: bool = Fal
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
         protocol,
-        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation.',
+        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation. For modifying existing files, prefer edit-file (targeted replacement) over write-file (full rewrite) — read the file first to get the exact text to match.',
         'Available commands:',
     ]
     for cmd in commands.values():

@@ -282,6 +282,7 @@ def test_implement_safe_phase_keeps_run_drops_network() -> None:
     impl = set(tools.build_commands(tools.ToolContext('implement', backend=b)))
     impl_safe = set(tools.build_commands(tools.ToolContext('implement-safe', backend=b)))
     assert 'write-file' in impl and 'write-file' in impl_safe
+    assert 'edit-file' in impl and 'edit-file' in impl_safe
     assert 'run' in impl and 'run' in impl_safe  # run tool available in both modes
     assert 'web-search' in impl and 'web-search' not in impl_safe  # no network in safe mode
 
@@ -292,7 +293,7 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
     assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | \
-        {'git', 'notes', 'write-file', 'run', 'review-request', 'punt'}
+        {'git', 'notes', 'write-file', 'edit-file', 'run', 'review-request', 'punt'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
@@ -302,7 +303,7 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
         == {'list-tree', 'summarize', 'find-in-file'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WRITE} \
-        == {'write-file'}
+        == {'write-file', 'edit-file'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_RUN} == {'run'}
 
 
