@@ -1086,18 +1086,19 @@ async def run_diff(
                     'Its final report:\n' + (impl_report.strip() or '(no report)'))
         return 1
 
-    # --- Plan checker (normal mode only): verify the implementation covers the plan. ---
+    # --- Plan checker (normal mode only): verify the implementation covers the spec. ---
     if p is not None:
-        debug_print('Checking plan coverage...')
-        satisfied, gaps = await plan_mod.run_plan_checker(p, cwd, model, debug)
+        debug_print('Checking spec coverage...')
+        satisfied, gaps = await plan_mod.run_plan_checker(
+            p, cwd, model, debug, spec_text=impl_spec)
         plan_fix_passes = 0
         while not satisfied and plan_fix_passes < review_cycles:
             plan_fix_passes += 1
-            debug_print(f'Plan checker found {len(gaps)} gap(s); asking the implementor '
+            debug_print(f'Spec checker found {len(gaps)} gap(s); asking the implementor '
                         f'to address them (pass {plan_fix_passes}/{review_cycles})...')
             gap_text = '\n'.join(f'- {g}' for g in gaps)
             gap_request = (
-                f'The plan checker found gaps in the implementation:\n\n'
+                f'The spec checker found gaps in the implementation:\n\n'
                 f'{gap_text}\n\n'
                 f'Address each gap: read the relevant files, make the changes, '
                 f'and verify with the run tool. When done, give a short report '
@@ -1107,7 +1108,8 @@ async def run_diff(
                     impl_ctx, gap_request, model, max_tool_failure, debug)
             except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
                 pass
-            satisfied, gaps = await plan_mod.run_plan_checker(p, cwd, model, debug)
+            satisfied, gaps = await plan_mod.run_plan_checker(
+                p, cwd, model, debug, spec_text=impl_spec)
         if not satisfied:
             await _report(cwd, base_ref, short, ticket_id, design='locked',
                           validation='not run (plan gaps)', review='not run',

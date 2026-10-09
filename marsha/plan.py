@@ -308,8 +308,9 @@ _PLAN_GAP_RE = re.compile(r'^-\s*Step\s+(\d+):\s*GAP\s*-\s*(.+)', re.MULTILINE)
 
 
 async def run_plan_checker(p: Plan, cwd: str, model: str,
-                           debug: bool = False) -> tuple[bool, list[str]]:
-    """Run the plan checker: it verifies the working tree covers the plan.
+                           debug: bool = False,
+                           spec_text: str = '') -> tuple[bool, list[str]]:
+    """Run the plan checker: it verifies the working tree implements the spec.
     Returns (satisfied, gaps) where gaps is a list of gap descriptions."""
     name, body = load_persona(
         os.path.join(personas_dir(), 'plan-checker-coverage.md'))
@@ -319,10 +320,16 @@ async def run_plan_checker(p: Plan, cwd: str, model: str,
         system, n_results=1, model=model, label=f'plan:{name}',
         reasoning_effort='high')
     plan_text = format_plan(p)
+    spec_block = ''
+    if spec_text:
+        spec_block = (f'## Specification (source of truth)\n'
+                      f'{spec_text}\n\n')
     request = (
-        f'Verify that the working tree covers the plan below. For each step, '
-        f'check that the required files exist and the goal is addressed.\n\n'
-        f'## Plan\n{plan_text}\n\n'
+        f'Verify that the working tree implements the specification below. '
+        f'For each requirement, check that it is implemented and tested.\n\n'
+        f'{spec_block}'
+        f'## Implementation plan (the structure the implementor followed)\n'
+        f'{plan_text}\n\n'
         'Use the git tool and list-tree / find-in-file to read the working '
         'tree. Produce the plan check in the required format.')
     result = await tools.run_with_tools(
