@@ -2066,7 +2066,11 @@ async def edit_file_tool(args: list[str], ctx: ToolContext | None = None) -> str
         _stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             err = stderr.decode('utf-8', errors='replace').strip()
-            return f'error: edit-file: git apply failed: {err}'
+            return ('error: edit-file: the diff did not apply '
+                    f'({err}). The file has likely changed since you last read it '
+                    '(your line numbers or context are stale). Re-read the file '
+                    'with `git show` or `find-in-file` to get the current content '
+                    'and line numbers, then retry with a corrected diff.')
     except FileNotFoundError:
         return 'error: edit-file: git not found'
     finally:
@@ -2374,8 +2378,9 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                                  'apply a unified diff to an existing file (supports insertions, '
                                  'deletions, and modifications); the diff uses standard unified '
                                  'format with --- / +++ / @@ headers; read the file first to get '
-                                 'the correct line numbers and context; prefer over write-file '
-                                 'when modifying part of a larger file',
+                                 'the correct line numbers and context; if the edit fails, '
+                                 're-read the file and retry with corrected line numbers; '
+                                 'prefer over write-file when modifying part of a larger file',
                                  lambda args, _c=ctx: edit_file_tool(args, _c)),
         'run': ToolCommand('run', CATEGORY_RUN,
                            '$ run <command...>',
