@@ -1711,9 +1711,9 @@ def test_review_loop_revises_when_gate_rebuts(repo: Any, capsys: Any) -> None:
     assert 'Previous review round' in panel_calls[1]
     assert 'conventions review' in panel_calls[1]
     assert '[Sage-A1]' in panel_calls[1]
-    # The revision round tells the reviewer to drop rebutted findings unless very confident.
+    # The revision round tells the reviewer to drop or defend rebutted findings.
     assert 'Handling the conventions review' in panel_calls[1]
-    assert 'very confident' in panel_calls[1]
+    assert 'DEFEND' in panel_calls[1]
 
 
 def test_review_loop_revises_when_critic_refutes(repo: Any, capsys: Any) -> None:

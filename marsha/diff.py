@@ -351,6 +351,103 @@ async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     return (proc.returncode == 0, (out or '').strip()[-4000:])
 
 
+_VALIDATION_SURVEY_PROMPT = (
+    'You are a build-system analyst. Read the project files provided below and determine '
+    'which validation commands should be run to verify the code is correct beyond the '
+    'primary test command. Look for: type-checking commands (mypy, tsc, cargo check), '
+    'lint commands (ruff, eslint, clippy, oxlint), formatting checks, and any other '
+    'verification the project documents (in its README, Makefile, CI config, or tool '
+    'config files).\n'
+    '\n'
+    'Respond with a JSON array of command strings (e.g. ["make typecheck", "cargo clippy '
+    '-- -D warnings"]). Each command must be a single shell command that can be run '
+    'from the repository root. Include at most 4 commands. If there are no additional '
+    'validation commands beyond the primary test command, respond with an empty array []. '
+    'Do not include the primary test command itself. Do not include commands that require '
+    'network access (package installs). Do not include commands that modify the working '
+    'tree (formatters that write files, code generators).\n'
+    '\n'
+    '# Project files\n')
+
+
+async def _validation_survey(cwd: str, model: str, debug: bool) -> str:
+    """Discover and run additional validation commands (typecheck, lint, etc.) beyond
+    the primary test command. Returns a combined output string for the review panel,
+    or '' if no additional commands were found or all passed cleanly."""
+    import json as _json
+
+    snippets: list[str] = []
+    for fname in ('README.md', 'Makefile', 'package.json', 'pyproject.toml',
+                  'Cargo.toml', 'tsconfig.json'):
+        path = os.path.join(cwd, fname)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding='utf-8') as f:
+                    content = f.read()
+                if len(content) > 4000:
+                    content = content[:4000] + '\n…[truncated]'
+                snippets.append(f'## {fname}\n{content}')
+            except OSError:
+                pass
+    wf_dir = os.path.join(cwd, '.github', 'workflows')
+    if os.path.isdir(wf_dir):
+        for fn in sorted(os.listdir(wf_dir)):
+            if fn.endswith(('.yml', '.yaml')):
+                try:
+                    with open(os.path.join(wf_dir, fn), encoding='utf-8') as f:
+                        snippets.append(f'## .github/workflows/{fn}\n'
+                                        + f.read()[:3000])
+                except OSError:
+                    pass
+    if not snippets:
+        return ''
+
+    system = _VALIDATION_SURVEY_PROMPT + '\n\n'.join(snippets)
+    mapper = get_mapper(system, n_results=1, model=model,
+                        label='diff:validation-survey')
+    try:
+        raw = cast(str, await mapper.run('List the validation commands.'))
+    except Exception as e:
+        log(f'validation survey failed: {e}')
+        return ''
+    raw = (raw or '').strip()
+    start = raw.find('[')
+    end = raw.rfind(']')
+    if start == -1 or end == -1 or end <= start:
+        return ''
+    try:
+        commands = _json.loads(raw[start:end + 1])
+    except _json.JSONDecodeError:
+        return ''
+    if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
+        return ''
+    commands = [c for c in commands if c.strip()][:4]
+    if not commands:
+        return ''
+
+    results: list[str] = []
+    for cmd in commands:
+        if debug:
+            debug_print(f'[diff] validation survey running: `{cmd}`')
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out, _err = await run_subprocess(proc, 120, max_bytes=tools.RUN_MAX_BYTES)
+        except Exception as e:
+            results.append(f'### {cmd}\n[error: {e}]')
+            continue
+        code = proc.returncode if proc.returncode is not None else -1
+        body = (out or '').strip()
+        if len(body) > 3000:
+            body = body[:3000] + '\n…[truncated]'
+        status = 'PASSED' if code == 0 else f'FAILED (exit {code})'
+        results.append(f'### {cmd} — {status}\n{body}')
+    if not results:
+        return ''
+    return '\n\n'.join(results)
+
+
 # --- implementor prompts and loop (async) -------------------------------
 
 IMPL_SYSTEM_PROMPT = (
@@ -660,6 +757,14 @@ async def _run_step_loop(ctx: tools.ToolContext, p: plan_mod.Plan, base_name: st
 
 # --- review gate (async) ------------------------------------------------
 
+def _reviewer_run_whitelist(cwd: str) -> list[tools.RunRule]:
+    """Build the restricted run whitelist for the review phase: read-only validation
+    commands (typecheck, lint, check) that reviewers can run to verify their claims.
+    Excludes network commands and anything that modifies the working tree."""
+    rules = _introspect_run_commands(cwd)
+    return [r for r in rules if not r.network]
+
+
 class ReviewGateFailed(Exception):
     """Raised by _review_gate when the review could not complete (a reviewer failed with nothing
     to fall back on, so the result would be a false "no findings"). That is not a clean review:
@@ -690,14 +795,20 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
         return []
     context_blocks = [tools.wrap_untrusted(
         'spec', tools.truncate(spec_text, limit=REVIEW_CONTEXT_LIMIT))]
+    survey_output = await _validation_survey(cwd, model, debug)
+    if survey_output:
+        context_blocks.append(tools.wrap_untrusted(
+            'validation', survey_output))
     message = build_review_message(
         stat_text, base_name, base_ref, context_blocks, working_tree=True)
     registry = build_registry()
     combined = (resolve_loop_reviewers('impl', None, registry)
                 + resolve_loop_reviewers('review', None, registry))
     reviewers = [(n, b, i + 1) for i, (n, b, _) in enumerate(combined)]
+    run_whitelist = _reviewer_run_whitelist(cwd)
     tool_ctx = tools.ToolContext(
-        phase='review', workdir=cwd, notes=[], require_evidence=True)
+        phase='review', workdir=cwd, notes=[], require_evidence=True,
+        run_whitelist=run_whitelist)
     guidance = backends.current().persona_guidance()
     try:
         findings = await _review_pass(

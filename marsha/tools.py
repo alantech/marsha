@@ -213,7 +213,7 @@ PHASE_CATEGORIES = {
     'oracle-opt': _BASE_CATEGORIES,
     'impl-opt': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
     'correction': _BASE_CATEGORIES | {CATEGORY_INSTALLED_ENV},
-    'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ},
+    'review': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_RUN},
     'refine': {CATEGORY_GIT, CATEGORY_NOTES, CATEGORY_READ, CATEGORY_WEB},
     'implement': _BASE_CATEGORIES | {CATEGORY_GIT, CATEGORY_NOTES,
                                      CATEGORY_WRITE, CATEGORY_RUN,
@@ -2420,6 +2420,9 @@ def build_commands(ctx: ToolContext | None = None) -> dict[str, ToolCommand]:
         if cmd.category not in allowed:
             continue
         if cmd.category == CATEGORY_INSTALLED_ENV and not env_ok:
+            continue
+        if (cmd.category == CATEGORY_RUN and ctx.phase == 'review'
+                and not ctx.run_whitelist):
             continue
         out[name] = cmd
     return out

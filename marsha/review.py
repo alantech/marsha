@@ -57,17 +57,20 @@ REVIEW_MAX_TOOL_ROUNDS = 150
 # reproduces a pass, so consensus passes below use distinct seeds).
 REVIEW_REASONING_EFFORT = 'high'
 REVIEW_SEED = 1
-# Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the conventions
-# review rebutted should be dropped unless the reviewer is very confident the rebuttal is wrong;
-# without this, a reviewer re-raises rebutted findings (and, anchored on them, adds new noise).
+# Appended to a reviewer's prompt in round >= 2 of the review loop. A finding the critic or
+# conventions review rebutted can be dropped or defended; the reviewer decides with evidence.
 _REFUTE_CONFIDENCE_RULE = (
     '\n# Handling the conventions review and the critic\n'
     'You are re-reviewing after the conventions review and the critic pushed back on some of '
-    'your findings. For each of your findings from last round that they rebutted, DROP it. '
-    'Re-raise it only if you are very confident the rebuttal misreads the codebase, and only '
-    'after re-verifying your position with the git tool (git show / git grep). When in doubt, '
-    'drop the finding. Keep the findings they did not rebut, and add a new one only if you have '
-    'verified it with the git tool. Do not re-raise a rebutted finding on a hunch.')
+    'your findings. For each of your findings from last round that they rebutted, you may '
+    'either DROP it or DEFEND it. To defend a finding, provide specific counter-evidence: '
+    'code you read with the git tool that contradicts the rebuttal, a source you retrieved '
+    'that supports your claim, or a `run` command whose output confirms the bug. If you '
+    'cannot defend it with concrete evidence, drop it. A finding that rests on standard '
+    'toolchain or language-runtime behavior (Cargo defaults, npm behavior, compiler '
+    'semantics) does not need a retrieved source — the behavior is established knowledge. '
+    'Keep the findings they did not rebut, and add a new one only if you have verified it '
+    'with the git tool. Do not re-raise a rebutted finding on a hunch alone.')
 
 
 def gh_available() -> bool:
@@ -488,6 +491,14 @@ def build_review_message(stat_text: str, base_name: str, base_ref: str,
          'annotations if the surrounding code has none, or specific exception types if the '
          'codebase uses bare `Exception`. A convention finding must point to a pattern the '
          'codebase clearly and consistently follows elsewhere that the changed code breaks.'),
+        ('When reviewing validation, parsing, or configuration-checking code, check BOTH '
+         'directions: does it accept valid inputs (a validator that rejects a valid '
+         'configuration is a bug), and does it reject invalid inputs (a validator that '
+         'accepts a malformed one is a bug). A regex that matches inside string literals, '
+         'a manifest check that omits a required field, or a path construction that points '
+         'to the wrong directory are all findings. If you have a `run` tool available and '
+         'the change includes a type-checking or compilation step, you may execute the '
+         'project\'s type-checker to confirm a suspected type error before reporting.'),
     ]
     if context_blocks:
         parts.append(
@@ -701,10 +712,16 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
         f'knowledge (a performance characteristic, a security property, a known-bad pattern, or a '
         f'style best practice) must name, in its support, a source the reviewer actually retrieved '
         f'(listed under "Sources the reviewers retrieved"); if such a claim names no retrieved '
-        f'source, it is an ungrounded assertion — refute it. Use the code the reviewer already '
-        f'read below as your starting point and probe only what you still need. Report, in the '
-        f'fixed form, only the findings the code plainly contradicts or that rest on an ungrounded '
-        f'general-knowledge claim.\n\n# Findings under review\n\n'
+        f'source, it is an ungrounded assertion — refute it. EXCEPTION: standard toolchain and '
+        f'language-runtime behavior (Cargo defaults, npm install behavior, TypeScript compiler '
+        f'options, Python typing semantics, regex engine behavior, OS conventions) is established '
+        f'knowledge and does NOT require a retrieved source. Do not refute a finding on the '
+        f'ground of "no source cited" when its claim is about such standard behavior, unless '
+        f'you can show the behavior is actually wrong. Use the code the reviewer already read '
+        f'below as your starting point and probe only what you still need. Report, in the '
+        f'fixed form, only the findings the code plainly contradicts or that rest on an '
+        f'ungrounded general-knowledge claim that is not standard toolchain behavior.\n\n'
+        f'# Findings under review\n\n'
         + findings_block + evidence_block + sources_block)
     mapper = get_mapper(system, n_results=1, stats_stage='review',
                         model=model, label='review:critic',
