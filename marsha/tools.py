@@ -2023,19 +2023,20 @@ async def write_file_tool(args: list[str], ctx: ToolContext | None = None) -> st
 
 
 async def edit_file_tool(args: list[str], ctx: ToolContext | None = None) -> str:
-    # edit-file <path> "<old-text>" "<new-text>" — replace an exact text match
-    # in a file. The old-text must appear exactly once; if absent or ambiguous,
-    # the command reports an error. Use for targeted modifications to existing
-    # files (no need to rewrite unchanged portions).
-    if len(args) < 3:
-        return ('error: edit-file needs a path, old text, and new text, '
-                'e.g. $ edit-file src/foo.py """old code""" """new code"""')
+    # edit-file <path> """<unified-diff>""" — apply a unified diff to a file.
+    # The diff uses standard unified format (---, +++, @@ hunk headers, -/+/space
+    # lines). Supports insertions, deletions, and modifications. Applied via
+    # git apply for robustness.
+    if len(args) < 2:
+        return ('error: edit-file needs a path and a unified diff, '
+                'e.g. $ edit-file src/foo.py """--- a/src/foo.py\\n'
+                '+++ b/src/foo.py\\n@@ -1,3 +1,4 @@\\n'
+                ' line1\\n+new line\\n line3"""')
     root = _workdir_root(ctx)
     if root is None:
         return 'error: edit-file has no working tree to edit into.'
     path = args[0]
-    old_text = _decode_content(args[1])
-    new_text = _decode_content(args[2])
+    diff_text = _decode_content(args[1])
     target = os.path.normpath(os.path.join(root, path))
     if target != root and not target.startswith(root + os.sep):
         return f'error: edit-file cannot edit outside the working tree: {path}'
@@ -2047,31 +2048,36 @@ async def edit_file_tool(args: list[str], ctx: ToolContext | None = None) -> str
         return f'error: edit-file cannot modify Git metadata: {path}'
     if not os.path.isfile(target):
         return f'error: edit-file: file not found: {path}'
+    if not diff_text.strip():
+        return 'error: edit-file: empty diff'
+    # Write the diff to a temp file and apply via git apply.
+    import tempfile
     try:
-        with open(target, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        return f'error: edit-file could not read {path}: {e}'
-    count = content.count(old_text)
-    if count == 0:
-        snippet = old_text[:120].replace('\n', '\\n')
-        return (f'error: edit-file: old text not found in {path} '
-                f'(searched: "{snippet}...")')
-    if count > 1:
-        snippet = old_text[:120].replace('\n', '\\n')
-        return (f'error: edit-file: old text found {count} times in {path} '
-                f'(ambiguous; include more surrounding context): "{snippet}..."')
-    new_content = content.replace(old_text, new_text, 1)
-    try:
-        fd = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-    except Exception as e:
-        return f'error: edit-file could not write {path}: {e}'
+        with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.patch', delete=False,
+                encoding='utf-8') as tmp:
+            tmp.write(diff_text)
+            tmp_path = tmp.name
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'apply', '--unsafe-paths', '--', tmp_path,
+            cwd=root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode('utf-8', errors='replace').strip()
+            return f'error: edit-file: git apply failed: {err}'
+    except FileNotFoundError:
+        return 'error: edit-file: git not found'
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
     rel = os.path.relpath(target, root)
     if ctx is not None and rel not in ctx.step_files:
         ctx.step_files.append(rel)
-    return f'edited {rel} (replaced {len(old_text)} chars with {len(new_text)} chars)'
+    return f'applied diff to {rel}'
 
 
 def _check_run_whitelist(argv: list[str],
@@ -2364,11 +2370,12 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                                   'for new files or full rewrites',
                                   lambda args, _c=ctx: write_file_tool(args, _c)),
         'edit-file': ToolCommand('edit-file', CATEGORY_WRITE,
-                                 '$ edit-file <path> """<old-text>""" """<new-text>"""',
-                                 'replace an exact text match in an existing file (targeted edit; '
-                                 'the old text must appear exactly once — include surrounding '
-                                 'context to disambiguate); prefer over write-file when modifying '
-                                 'a small part of a larger file',
+                                 '$ edit-file <path> """<unified diff>"""',
+                                 'apply a unified diff to an existing file (supports insertions, '
+                                 'deletions, and modifications); the diff uses standard unified '
+                                 'format with --- / +++ / @@ headers; read the file first to get '
+                                 'the correct line numbers and context; prefer over write-file '
+                                 'when modifying part of a larger file',
                                  lambda args, _c=ctx: edit_file_tool(args, _c)),
         'run': ToolCommand('run', CATEGORY_RUN,
                            '$ run <command...>',
@@ -2454,7 +2461,7 @@ def tool_instructions(ctx: ToolContext | None = None, *, interactive: bool = Fal
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
         protocol,
-        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation. For modifying existing files, prefer edit-file (targeted replacement) over write-file (full rewrite) — read the file first to get the exact text to match.',
+        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation. For modifying existing files, prefer edit-file (unified diff) over write-file (full rewrite) — read the file first to get correct line numbers and context for the diff.',
         'Available commands:',
     ]
     for cmd in commands.values():
