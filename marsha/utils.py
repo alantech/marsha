@@ -191,11 +191,13 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
         total = 0
 
         async def _bounded() -> tuple[bytes, bytes]:
-            assert stream.stdout is not None and stream.stderr is not None
+            assert stream.stdout is not None
 
-            # Both pipes are drained concurrently: a child that fills one pipe while keeping
-            # the other open would otherwise block on the full pipe and never close the
-            # other, deadlocking a read that only ever looked at one of them.
+            # A caller may merge stderr into stdout (stderr=STDOUT, as exec and validation do);
+            # then stream.stderr is None and only stdout carries output, so err_chunks stays empty.
+            # Otherwise both pipes exist and are drained concurrently: a child that fills one pipe
+            # while keeping the other open would otherwise block on the full pipe and never close
+            # the other, deadlocking a read that only ever looked at one of them.
             async def _drain(reader: asyncio.StreamReader, sink: list[bytes]) -> None:
                 nonlocal total
                 while True:
@@ -209,14 +211,18 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
                     sink.append(chunk)
 
             out_task = asyncio.ensure_future(_drain(stream.stdout, chunks))
-            err_task = asyncio.ensure_future(_drain(stream.stderr, err_chunks))
+            err_task = (asyncio.ensure_future(_drain(stream.stderr, err_chunks))
+                        if stream.stderr is not None else None)
             try:
-                await asyncio.gather(out_task, err_task)
+                if err_task is not None:
+                    await asyncio.gather(out_task, err_task)
+                else:
+                    await out_task
             except BaseException:
                 # Any failure (overflow, outer cancellation): cancel and reap the drain that
                 # is still running so it does not linger as an unhandled task.
                 for task in (out_task, err_task):
-                    if not task.done():
+                    if task is not None and not task.done():
                         task.cancel()
                         try:
                             await task

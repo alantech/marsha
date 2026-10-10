@@ -66,6 +66,21 @@ def test_extract_single_command() -> None:
     assert pending.malformed is False
 
 
+def test_extract_triple_quoted_multiline() -> None:
+    # A triple-quoted argument spans multiple lines; the content is literal.
+    tq = '"""'
+    text = ('$ write-file src/foo.py """\n'
+            'line1\n'
+            'line2 with "quotes" and \\backslash\n'
+            '"""\n'
+            '$ finished\n')
+    cmds = tools.extract_pending_commands(text)
+    assert len(cmds) == 2
+    assert cmds[0].name == 'write-file'
+    assert cmds[0].args == ['src/foo.py', 'line1\nline2 with "quotes" and \\backslash\n']
+    assert cmds[1].name == 'finished'
+
+
 def test_extract_page_prefixed_command() -> None:
     # A `PAGE=<n>` env-var prefix selects a page of a paged command's output; it is stripped
     # from the name/args and surfaced on pending.page. A plain command has page None.
@@ -259,12 +274,26 @@ def test_phase_scoping_no_backend_is_agnostic_only() -> None:
     assert set(tools.build_commands(tools.ToolContext('gen'))) == AGNOSTIC
 
 
+def test_implement_safe_phase_keeps_run_drops_network() -> None:
+    # Safe mode (marsha diff --safe) keeps the run tool (with a non-network-only whitelist,
+    # filtered by the caller) but drops the network categories: the implementor can run local
+    # build/test/lint commands but cannot reach the network or install dependencies.
+    b = backends.current()
+    impl = set(tools.build_commands(tools.ToolContext('implement', backend=b)))
+    impl_safe = set(tools.build_commands(tools.ToolContext('implement-safe', backend=b)))
+    assert 'write-file' in impl and 'write-file' in impl_safe
+    assert 'edit-file' in impl and 'edit-file' in impl_safe
+    assert 'run' in impl and 'run' in impl_safe  # run tool available in both modes
+    assert 'web-search' in impl and 'web-search' not in impl_safe  # no network in safe mode
+
+
 def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # The point of the per-target design: a backend supplies the language-specific
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set
     # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | \
+        {'git', 'notes', 'write-file', 'edit-file', 'run', 'review-request', 'punt'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
@@ -273,6 +302,149 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
         == {'list-tree', 'summarize', 'find-in-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WRITE} \
+        == {'write-file', 'edit-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_RUN} == {'run'}
+
+
+def test_write_file_writes_inside_tree(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['src/foo.py', 'print(1)\\n'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'src' / 'foo.py').read_text() == 'print(1)\n'
+
+
+def test_write_file_refuses_dotdot_escape(tmp_path: Any) -> None:
+    # A `..` path that leaves the working tree is refused before anything is written.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['../escape.txt', 'x'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert not (tmp_path / 'escape.txt').exists()
+
+
+def test_write_file_refuses_git_metadata(tmp_path: Any) -> None:
+    # The working tree includes the repo's .git directory; write-file must refuse to touch Git
+    # metadata (it would corrupt the repo), while a normal source file still writes.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ok = asyncio.run(tools.write_file_tool(
+        ['src/a.py', 'print(1)'], tools.ToolContext(workdir=str(repo))))
+    assert ok.startswith('wrote')
+    bad = asyncio.run(tools.write_file_tool(
+        ['.git/config', '[core]'], tools.ToolContext(workdir=str(repo))))
+    assert bad.startswith('error:') and 'Git metadata' in bad
+    assert not (repo / '.git' / 'config').exists()
+
+
+def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
+    # A path inside the tree that traverses an outside-pointing symlink must be refused: a lexical
+    # prefix check alone would let open(..., 'w') follow the link and write outside the tree.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('original')
+    os.symlink(outside, repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert outside.read_text() == 'original'  # the outside file is untouched
+
+
+# --- run tool (whitelisted command execution) ------------------------------------
+
+def test_run_tool_refuses_without_whitelist(tmp_path: Any) -> None:
+    # No whitelist: the run tool refuses with a clear error.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.run_tool(
+        ['pytest', '-q'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:') and 'no whitelist' in result
+
+
+def test_run_tool_refuses_non_whitelisted_command(tmp_path: Any) -> None:
+    # A command not in the whitelist is refused, naming the allowed set.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    wl = [tools.RunRule(('pytest',), 'pytest [args]')]
+    result = asyncio.run(tools.run_tool(
+        ['rm', '-rf', '/'], tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('error:') and 'not in the allowed command set' in result
+
+
+def test_run_tool_runs_whitelisted_command(tmp_path: Any) -> None:
+    # A whitelisted command runs and returns its exit code and output.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'script.py').write_text('print("hello")\n')
+    wl = [tools.RunRule(('python',), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        ['python', 'script.py'], tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('[exit 0]')
+    assert 'hello' in result
+
+
+def test_run_tool_reports_nonzero_exit(tmp_path: Any) -> None:
+    # A command that runs but exits nonzero is a successful tool invocation (feedback), not an error.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'fail.py').write_text('import sys; sys.exit(42)\n')
+    wl = [tools.RunRule(('python',), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        ['python', 'fail.py'], tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('[exit 42]')
+    assert not result.startswith('error:')
+
+
+def test_run_tool_refuses_network_in_safe_mode(tmp_path: Any) -> None:
+    # A network command is refused in safe mode.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    wl = [tools.RunRule(('pip', 'install'), 'pip install <package>', network=True)]
+    result = asyncio.run(tools.run_tool(
+        ['pip', 'install', 'requests'],
+        tools.ToolContext(phase='implement-safe', workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('error:') and 'safe mode' in result
+
+
+def test_run_tool_no_args() -> None:
+    # An empty command is an error.
+    result = asyncio.run(tools.run_tool([], tools.ToolContext()))
+    assert result.startswith('error:') and 'needs a command' in result
+
+
+def test_check_run_whitelist_prefix_match() -> None:
+    # The whitelist check matches on argv prefix: a longer command still matches its prefix rule.
+    wl = [tools.RunRule(('pytest',), 'pytest [args]')]
+    assert tools._check_run_whitelist(['pytest', '-q'], wl) is not None
+    assert tools._check_run_whitelist(['pytest', '-q', 'tests/'], wl) is not None
+    assert tools._check_run_whitelist(['rm', '-rf', '/'], wl) is None
+    assert tools._check_run_whitelist([], wl) is None
+
+
+def test_write_file_never_follows_a_symlink(tmp_path: Any) -> None:
+    # O_NOFOLLOW: even an in-tree symlink (which passes the realpath boundary check) is not
+    # written through — the final component is refused at the syscall level, so the tool never
+    # follows a symlink.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'real.txt').write_text('original')
+    os.symlink(repo / 'real.txt', repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert (repo / 'real.txt').read_text() == 'original'  # not written through the link
+
+
+def test_summarize_refuses_url_in_safe_mode() -> None:
+    # Safe mode forbids the network: summarize must refuse a URL (before any fetch) rather than
+    # let the safe implementor reach the web through this read tool.
+    result = asyncio.run(tools.summarize(
+        ['https://example.com/page'], tools.ToolContext(phase='implement-safe')))
+    assert result.startswith('error:') and 'safe mode' in result
 
 
 def test_tool_instructions_lists_phase_tools() -> None:
@@ -764,6 +936,29 @@ def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
     assert beyond.startswith('error: page 99 is out of range')
 
 
+def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
+    # Safe mode is a no-network mode: read-only but network-contacting git operations (ls-remote,
+    # remote show) are refused in the implement-safe phase, while local read-only commands are
+    # still allowed and the same subcommands are not blocked by the safe-mode check outside it.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'a.txt').write_text('x\n')
+    subprocess.run(['git', 'add', 'a.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    safe = tools.ToolContext('implement-safe', workdir=str(tmp_path))
+    for cmd in (['ls-remote', 'origin'], ['remote', 'show', 'origin']):
+        refused = asyncio.run(tools.git(cmd, safe))
+        assert refused.startswith('error:') and 'safe mode' in refused
+    # A local read-only command is still permitted in safe mode.
+    log = asyncio.run(tools.git(['log', '--oneline'], safe))
+    assert not log.startswith('error:')
+    # The same subcommands are not blocked by the safe-mode check outside safe mode.
+    review = tools.ToolContext('review', workdir=str(tmp_path))
+    assert 'safe mode' not in asyncio.run(tools.git(['ls-remote', 'origin'], review))
+    assert 'safe mode' not in asyncio.run(tools.git(['remote', 'show', 'origin'], review))
+
+
 def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:
     # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
     # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first
@@ -908,12 +1103,14 @@ def test_run_with_tools_does_not_record_error_evidence(tmp_path: Any) -> None:
     # Bare request for a file over the cap -> "name a page" error (no content) -> not recorded.
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     asyncio.run(tools.run_with_tools(
-        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC]), 'REQ', ctx))
+        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC + '\n$ finished']),
+        'REQ', ctx))
     assert ctx.evidence == []
     # A named page -> real content -> recorded.
     ctx2 = tools.ToolContext('review', workdir=str(tmp_path))
     asyncio.run(tools.run_with_tools(
-        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC]), 'REQ', ctx2))
+        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC + '\n$ finished']),
+        'REQ', ctx2))
     assert len(ctx2.evidence) == 1
     assert 'hello world' in ctx2.evidence[0][1]
 
@@ -936,7 +1133,7 @@ class ScriptedMapper:
 
 def test_run_with_tools_wraps_result_untrusted() -> None:
     doc_with_cmd = DOC + '\n$ web-search "pandas read_csv"\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
@@ -951,7 +1148,7 @@ def test_run_with_tools_wraps_result_untrusted() -> None:
 
 
 def test_run_with_tools_single_call_without_commands() -> None:
-    mapper = ScriptedMapper([DOC])
+    mapper = ScriptedMapper([DOC + '\n$ finished'])
     with patch.object(tools, 'execute_command', new=AsyncMock()) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
@@ -971,7 +1168,7 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     with_cmd = 'A1 [MAJOR] mid.py:2 - beta is wrong'
-    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd])
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == with_cmd
     assert len(ctx.evidence) == 1
@@ -982,7 +1179,7 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
 
 def test_run_with_tools_does_not_record_non_git_evidence() -> None:
     # Only git output is evidence; a web-search result is not evidence (it is a retrieved source).
-    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
+    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('gen')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -993,7 +1190,7 @@ def test_run_with_tools_does_not_record_non_git_evidence() -> None:
 def test_run_with_tools_records_retrieved_sources() -> None:
     # A retrieval tool (view-web-page) records its output on ctx.sources, not ctx.evidence, so the
     # evidence gate's citation check can prove a finding's cited URL was really fetched.
-    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='PAGE-CONTENT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1005,7 +1202,7 @@ def test_run_with_tools_records_retrieved_sources() -> None:
 
 
 def test_run_with_tools_records_summarize_as_source() -> None:
-    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC])
+    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command',
                       new=AsyncMock(return_value='Summary of docs/NOTES.md: overflow.')):
@@ -1018,7 +1215,7 @@ def test_run_with_tools_records_summarize_as_source() -> None:
 def test_run_with_tools_list_tree_is_not_a_source() -> None:
     # list-tree proves a doc EXISTS, not that its contents were read, so it is not a source: a
     # directory listing must not satisfy a citation.
-    mapper = ScriptedMapper(['$ list-tree docs\n', DOC])
+    mapper = ScriptedMapper(['$ list-tree docs\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='docs/NOTES.md')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1028,7 +1225,7 @@ def test_run_with_tools_list_tree_is_not_a_source() -> None:
 def test_run_with_tools_does_not_record_error_source() -> None:
     # An `error:` result from a retrieval tool carries no retrieved content, so it is not recorded
     # as a source (mirroring the git evidence rule).
-    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='error: bad url')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1055,14 +1252,15 @@ def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
     finding = 'A1 [MAJOR] mid.py:2 - beta is wrong'
     ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
     # Reports a finding (no probe yet) -> bounced -> probes -> reports again (accepted).
-    mapper = ScriptedMapper([finding, '$ git show HEAD:mid.py\n', finding])
+    mapper = ScriptedMapper(
+        [finding + '\n$ finished', '$ git show HEAD:mid.py\n', finding + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == finding
     assert len(ctx.evidence) == 1  # it was forced to probe before the finding was accepted
     # A "NO FINDINGS" answer is exempt: accepted without any probe.
     ctx2 = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
     out2 = asyncio.run(
-        tools.run_with_tools(ScriptedMapper(['NO FINDINGS']), 'REQ', ctx2))
+        tools.run_with_tools(ScriptedMapper(['NO FINDINGS\n$ finished']), 'REQ', ctx2))
     assert out2 == 'NO FINDINGS' and ctx2.evidence == []
 
 
@@ -1083,9 +1281,9 @@ def test_run_with_tools_bounces_unretrieved_citation(tmp_path: Any) -> None:
     # git probe -> finding citing an unread doc (bounced) -> retrieve the doc -> finding (kept).
     mapper = ScriptedMapper([
         '$ git show HEAD:mid.py\n',
-        finding,
+        finding + '\n$ finished',
         '$ git show HEAD:docs/NOTES.md\n',
-        finding,
+        finding + '\n$ finished',
     ])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == finding
@@ -1108,6 +1306,53 @@ def test_run_with_tools_citation_bounce_is_bounded(tmp_path: Any) -> None:
     mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', finding, finding, finding])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx, max_rounds=10))
     assert out == finding
+
+
+def test_run_with_tools_bounces_implementor_before_first_command() -> None:
+    # An implement-phase response that gives up before issuing any command (e.g. claiming the
+    # terminal "is not responding") violates the $ protocol (every response must end with a
+    # `$` line): the harness bounces it with the protocol-violation reminder, and the
+    # exchange continues once the model issues a command (the implementer's task is to edit
+    # the working tree).
+    give_up = ("I'm unable to inspect or modify the repository because the terminal tool "
+               'is not responding.')
+    ctx = tools.ToolContext('implement', workdir='.')
+    mapper = ScriptedMapper([give_up, '$ list-tree\n', DOC + '\n$ finished'])
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='TREE')):
+        out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == DOC
+    assert len(mapper.calls) == 3
+    nudge = mapper.calls[1][2]['content']
+    assert 'not acceptable' in nudge
+    assert 'required to implement' in nudge
+    assert '$' in nudge
+
+
+def test_run_with_tools_implement_start_bounce_is_bounded() -> None:
+    # The start bounce is bounded: a model that never issues a command is accepted as-is after
+    # IMPL_START_BOUNCES nudges (the caller's zero-change guard then reports the failure), so
+    # the loop cannot spin on a stuck implementer.
+    give_up = 'the terminal tool is not responding'
+    ctx = tools.ToolContext('implement', workdir='.')
+    mapper = ScriptedMapper([give_up] * tools.IMPL_START_BOUNCES + [give_up])
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == give_up
+    assert len(mapper.calls) == tools.IMPL_START_BOUNCES + 1
+
+
+def test_run_with_tools_start_bounce_only_in_implement_phases() -> None:
+    # Under the $ protocol the start bounce is no longer implement-phase only: in every phase
+    # a commandless response is a protocol violation (every response must end with a `$`
+    # line), so it is bounced (bounded by IMPL_START_BOUNCES) and returned as-is once the
+    # bounce budget is spent.
+    give_up = 'the terminal tool is not responding'
+    ctx = tools.ToolContext('review', workdir='.')
+    mapper = ScriptedMapper([give_up] * (tools.IMPL_START_BOUNCES + 1))
+    out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == give_up
+    assert len(mapper.calls) == tools.IMPL_START_BOUNCES + 1
+    nudge = mapper.calls[1][2]['content']
+    assert 'PROTOCOL VIOLATION' in nudge
 
 
 def test_unretrieved_citations_extraction() -> None:
@@ -1321,7 +1566,7 @@ def test_cited_sources_strips_angle_bracket_autolinks() -> None:
 
 def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
     followup = mapper.calls[1][2]['content']
@@ -1331,7 +1576,7 @@ def test_run_with_tools_unknown_command_feeds_error() -> None:
 
 def test_run_with_tools_malformed_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
     assert 'error' in mapper.calls[1][2]['content'].lower()
@@ -1377,7 +1622,7 @@ def test_oracle_stage_appends_tool_instructions_when_enabled() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_ORACLE]
+        m.responses = [VALID_ORACLE + '\n$ finished']
         seen['mapper'] = m
         return m
 
@@ -1412,7 +1657,8 @@ def test_oracle_stage_follows_up_on_commands() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_ORACLE + '\n$ web-search "pandas read_csv"\n', VALID_ORACLE]
+        m.responses = [VALID_ORACLE + '\n$ web-search "pandas read_csv"\n',
+                       VALID_ORACLE + '\n$ finished']
         seen['mapper'] = m
         return m
 
@@ -1428,7 +1674,8 @@ def test_impl_stage_tool_use_runs_one_conversation_per_candidate() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_IMPL + '\n$ web-search "httpx post"\n', VALID_IMPL]
+        m.responses = [VALID_IMPL + '\n$ web-search "httpx post"\n',
+                       VALID_IMPL + '\n$ finished']
         seen.append(m)
         return m
 

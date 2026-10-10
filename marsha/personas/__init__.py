@@ -45,7 +45,8 @@ A finding must be a concrete, actionable problem in the current code. Do NOT com
 Before reporting a robustness or error-handling concern (for example "this swallows an error", "this can hide a failure", or "this leaves resources open"), check with the git tool how the code is actually used; if every caller already handles the case the concern is about, it is not a finding.
 Do NOT report a performance or micro-optimization suggestion (precomputing, hoisting, caching, batching, parallelizing, or a complexity claim) unless you can show it is in a hot loop or works on data large enough to measurably affect overall performance; a one-off call, a pairwise pass over a single-digit-sized collection, or any complexity or allocation change with no evidence of real impact is not a finding.
 Do NOT base a finding on a project convention, style rule, or requirement unless you can point to it in a config file, the PR or issue, or the surrounding code; a rule you cannot find written in the repository is not a finding.
-When a finding rests on a general-knowledge claim — a performance characteristic, a style best practice, a known-bad pattern, or a security property — rather than purely on what the code or the spec says, your support must name the specific source you retrieved that backs it: a documentation file you opened, a URL you viewed or searched, or the codebase's own config. A claim you cannot point to a retrieved source for is a guess, and a guess is not a finding. The codebase's own config and conventions (its linter/format config, its existing patterns, AGENTS.md / CONTRIBUTING.md) OVERRIDE any external source: before you cite an outside article or guide, check the repository's own config, and if the two disagree, follow the repository — never raise a finding that pushes the code away from how this repository is actually configured.
+When a finding rests on a general-knowledge claim — a performance characteristic, a style best practice, a known-bad pattern, or a security property — rather than purely on what the code or the spec says, your support must name the specific source you retrieved that backs it: a documentation file you opened, a URL you viewed or searched, or the codebase's own config. EXCEPTION: standard toolchain and language-runtime behavior (Cargo's default edition, npm's network behavior during install, TypeScript compiler defaults, Python typing semantics, regex engine behavior, OS filesystem conventions) is established knowledge and does NOT require a retrieved source — you may report a finding based on such behavior without citing a doc. A speculative claim about non-standard behavior still needs a source. The codebase's own config and conventions (its linter/format config, its existing patterns, AGENTS.md / CONTRIBUTING.md) OVERRIDE any external source: before you cite an outside article or guide, check the repository's own config, and if the two disagree, follow the repository — never raise a finding that pushes the code away from how this repository is actually configured.
+You may use the `run` tool to execute read-only validation commands (typecheck, lint, check) to confirm a suspected bug before reporting it. A finding confirmed by a `run` command's output is grounded even without a retrieved doc.
 Every variable, class, function, file path, and line you name in a finding or its support must be one you actually opened with the git tool this session — cite only symbols that exist. Do not describe, quote, or reason about code you did not open, and do not infer a file or a line number from a naming convention (for example, that a class must live in a file of its own name) without opening it to confirm. If you cannot point to a real, existing symbol or line, do NOT report the finding: an invented or unverified detail disqualifies it, and a finding whose evidence you did not actually read will be rejected.
 If you have no new, verified finding, respond with exactly: NO FINDINGS
 Do not restate your own name. Do not add any prose outside a finding (the supporting paragraphs are part of that finding).
@@ -381,6 +382,29 @@ def prior_round_block(findings: list[Finding], preamble: str,
     return block
 
 
+def _collect_personas_results(results: list[Any], total: int,
+                              fail_on_incomplete: bool) -> list[Finding]:
+    # A reviewer that failed is a failure, not an empty result. An incomplete review (any reviewer
+    # failed) must never be mistaken for a clean "no findings" verdict. With fail_on_incomplete, an
+    # incomplete review that produced no findings raises so the caller refuses to treat it as clean;
+    # one that DID find things still returns them (the findings are real and must be surfaced).
+    # Without the flag, the survivors' findings are always returned.
+    findings: list[Finding] = []
+    failures = 0
+    for r in results:
+        if isinstance(r, BaseException):
+            failures += 1
+        else:
+            findings.extend(r)
+    if failures and fail_on_incomplete and not findings:
+        raise Exception(
+            f'personas: {failures}/{total} reviewer(s) failed with no findings returned; the '
+            'review did not complete and is not a clean verdict')
+    if failures:
+        log(f'personas: {failures}/{total} reviewer(s) failed; using the survivors')
+    return findings
+
+
 async def run_personas(
         reviewers: list[tuple[str, str, int]],
         user_message: str,
@@ -395,6 +419,7 @@ async def run_personas(
         prior_labels_by_number: dict[int, set[str]] | None = None,
         reasoning_effort: str | None = None,
         seed: int | None = None,
+        fail_on_incomplete: bool = False,
 ) -> list[Finding]:
     # Run every reviewer independently; return the flattened labeled findings. On a local
     # (serial) backend the reviewers run one at a time so each gets the whole server; otherwise
@@ -448,7 +473,7 @@ async def run_personas(
             if debug:
                 print(f'[Personas] {name} failed: {e}')
             log(f'personas: {label} failed: {e}')
-            return []
+            raise
         findings = parse_findings(
             text, name, review_number, prior_labels=prior_labels)
         # The contract requires 1-2 supporting paragraphs; a headline with no support is a bare,
@@ -464,8 +489,14 @@ async def run_personas(
             f['sources'] = sources
         return findings
     if is_local_backend():
-        results = [await one(s) for s in reviewers]
+        results: list[Any] = []
+        for s in reviewers:
+            try:
+                results.append(await one(s))
+            except Exception as e:
+                results.append(e)
     else:
         # A generator (not a list) avoids the intermediate list of coroutines gather would build.
-        results = await asyncio.gather(*(one(s) for s in reviewers))
-    return [f for sub in results for f in sub]
+        results = list(await asyncio.gather(
+            *(one(s) for s in reviewers), return_exceptions=True))
+    return _collect_personas_results(results, len(reviewers), fail_on_incomplete)

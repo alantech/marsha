@@ -19,6 +19,13 @@ from marsha.mappers.chatgpt import uses_completion_tokens
 # A bounded round budget for the codebase-grounded analysis (the read-only tool loop): enough to
 # probe the codebase before answering, not so many that a wandering model exhausts it first.
 SPEC_CHECK_MAX_TOOL_ROUNDS = 25
+# The spec-check gate (the "is this spec locked?" analysis) runs the SAME way from `refine` and
+# from `diff`. A fixed seed makes its sampling as reproducible as the provider allows (as
+# REVIEW_SEED does for the review panel): a non-deterministic gate would let refine lock a design
+# and then have diff's fresh pass over the identical spec re-flag something refine already
+# resolved (or the reverse), so the refine -> diff loop could never converge. With a shared seed,
+# a spec refine finds clean, diff finds clean too.
+SPEC_CHECK_SEED = 1
 
 SPEC_CHECK_PROMPT = '''You are a senior software engineer assessing whether a specification is complete enough to implement. The specification may be a structured assignment (for example a `.mrsh` listing functions with their inputs, outputs, descriptions, and usage examples), a GitHub issue, or a Linear ticket — each with a title and a body/description and possibly comments.
 
@@ -86,11 +93,14 @@ def _spec_check_kwargs() -> dict[str, Any]:
     # Reasoning models need a larger output budget for their chain of thought. GPT-6 has no
     # 'minimal' tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that
     # still reasons. Local OpenAI-compatible servers: leave the output budget to the server.
+    # Every path carries the fixed seed (SPEC_CHECK_SEED) so the gate is reproducible across the
+    # refine and diff call sites (see the constant's note).
+    kwargs: dict[str, Any] = {'seed': SPEC_CHECK_SEED}
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        return {'max_tokens': 8192, 'reasoning_effort': 'low'}
+        return {**kwargs, 'max_tokens': 8192, 'reasoning_effort': 'low'}
     if resolve_provider() == 'anthropic':
-        return {'max_tokens': 4096}
-    return {}
+        return {**kwargs, 'max_tokens': 4096}
+    return kwargs
 
 
 async def analyze_spec(spec_text: str, *, tool_ctx: 'tools.ToolContext | None' = None,

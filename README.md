@@ -23,7 +23,7 @@ make install    # Linux / macOS
 install.bat     # Windows
 ```
 
-This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (`~/.local/bin/marsha.bat` on Windows; override the location with `make install PREFIX=/usr/local` or `install.bat C:\tools`) that simply runs `python -m marsha` from that virtualenv, passing your arguments through. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` / `uninstall.bat` remove the launcher.
+This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (`~/.local/bin/marsha.bat` on Windows; override the location with `make install PREFIX=/usr/local` or `install.bat C:\tools`) that runs `python -P -m marsha` from that virtualenv, passing your arguments through. The `-P` flag (PEP 670) keeps your current working directory off Python's module search path, so `marsha` always uses the installed copy in the virtualenv rather than a `marsha/` folder that happens to sit in the directory you run it from. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` / `uninstall.bat` remove the launcher.
 
 ## Syntax
 

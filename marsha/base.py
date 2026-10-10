@@ -18,6 +18,7 @@ from marsha.model_match import apply_available_models
 from marsha import log
 from marsha.llm import generate_code, review_and_fix
 from marsha.llm_client import create_client, set_client
+from marsha.diff import run_diff
 from marsha.meta import MarshaMeta
 from marsha.refine import run_refine
 from marsha.review import run_review
@@ -182,13 +183,59 @@ refine_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
 refine_parser.add_argument('--api-base',
                            help='OpenAI-compatible API base URL for the LLM.')
+diff_parser = sub.add_parser(
+    'diff',
+    help='Implement a design-locked spec (.mrsh, GitHub issue, or Linear ticket) in the '
+    'current Git repository, with a validation and a review gate before committing.')
+diff_parser.add_argument('source', nargs='?', default=None,
+                         help='A *.mrsh file to implement. Mutually exclusive with '
+                         '--issue and --linear.')
+diff_parser.add_argument('--issue', default=None,
+                         help='A GitHub issue to implement: a number (219), owner/repo#219, '
+                         'or an issue URL (needs the gh CLI; run inside its '
+                         'repository). Mutually exclusive with the positional path and '
+                         '--linear.')
+diff_parser.add_argument('--linear', default=None,
+                         help='A Linear ticket to implement by name (needs the linear CLI; '
+                         'run inside a git repository). Mutually exclusive with the '
+                         'positional path and --issue.')
+diff_parser.add_argument('--review-cycles', type=int, default=30, metavar='N',
+                         help='Fix-and-review cycles after the initial review gate (N >= 0). '
+                         '0 disables the code-quality review (a one-shot implementation '
+                         'plus the test suite only). Default: 30.')
+diff_parser.add_argument('--max-tool-failure', type=int, default=5, metavar='N',
+                         help='Consecutive failed tool invocations before the implementor is '
+                         'interrupted (N >= 1); a command that runs but reports failing '
+                         'tests is validation feedback, not a failure. Default: 5.')
+diff_parser.add_argument('--safe', action='store_true',
+                         help='Restricted mode: no network, no dependency installation, no '
+                         'destructive git operations, and no automatic commit (a '
+                         'successful run leaves its edits uncommitted and skips the PR '
+                         'proposal).')
+diff_parser.add_argument('--target', default='python',
+                         help='Target language (for runtime setup; the implementation follows '
+                         'the repository\'s own conventions). Default: python.')
+diff_parser.add_argument('--target-version', default=None,
+                         help='Target language version (for runtime setup).')
+diff_parser.add_argument('-d', '--debug', action='store_true',
+                         help='Turn on debug logging')
+diff_parser.add_argument('--trace', action='store_true',
+                         help='Live progress trace to stderr. Implies -d.')
+diff_parser.add_argument('--trace-full', action='store_true',
+                         help='As --trace, but also dump full prompts/responses.')
+diff_parser.add_argument('--model',
+                         help='Model to use for the analysis, implementation, and review.')
+diff_parser.add_argument('--provider', choices=['openai', 'anthropic'],
+                         help='LLM provider: openai (default) or anthropic (Claude).')
+diff_parser.add_argument('--api-base',
+                         help='OpenAI-compatible API base URL for the LLM.')
 
 
 def _normalize_argv(argv: list[str]) -> tuple[list[str], bool]:
     # The deprecated bare form `marsha <source> [flags]` maps onto
     # `marsha compile <source> [flags]`. `compile`/`help` are real
     # subcommands; a top-level -h/--help shows the subcommand overview.
-    if not argv or argv[0] in ('compile', 'help', 'review', 'refine', '-h', '--help'):
+    if not argv or argv[0] in ('compile', 'help', 'review', 'refine', 'diff', '-h', '--help'):
         return argv, False
     return ['compile'] + argv, True
 
@@ -214,6 +261,11 @@ def print_help(topic: str | None) -> None:
         '            Example: marsha refine spec.mrsh or marsha refine --issue 218\n'
         '            Key flags: --issue, --linear, --check, --dry-run.\n'
         '\n'
+        '  diff      Implement a design-locked spec (.mrsh, GitHub issue, or Linear\n'
+        '            ticket) in the current Git repository, with a validation and a\n'
+        '            review gate before committing. Example: marsha diff spec.mrsh\n'
+        '            Key flags: --issue, --linear, --review-cycles, --safe.\n'
+        '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'
         '\n'
@@ -223,9 +275,10 @@ def print_help(topic: str | None) -> None:
     )
     if topic is None:
         print(overview)
-    elif topic in ('compile', 'help', 'review', 'refine'):
+    elif topic in ('compile', 'help', 'review', 'refine', 'diff'):
         submap = {'compile': compile_parser, 'help': help_parser,
-                  'review': review_parser, 'refine': refine_parser}
+                  'review': review_parser, 'refine': refine_parser,
+                  'diff': diff_parser}
         print(submap[topic].format_help())
     else:
         print(f'Unknown command: {topic}', file=sys.stderr)
@@ -269,6 +322,11 @@ def run(argv: list[str] | None = None) -> int:
         log.set_progress(args.check)
         _setup_runtime(args, require_toolchain=False)
         return asyncio.run(run_refine(args))
+    if args.command == 'diff':
+        # Like compile and review this is a long headless run (the brief PR-proposal prompt at
+        # the end is on stdout; the progress heartbeat is on stderr, so they do not collide).
+        _setup_runtime(args, require_toolchain=False)
+        return asyncio.run(run_diff(args))
     if args.command != 'compile':
         parser.print_help(sys.stderr)
         return 2

@@ -11,4 +11,6 @@ if [ ! -x "$venv/bin/python" ]; then
     exit 1
 fi
 
-exec "$venv/bin/python" -m marsha "$@"
+# -P (PEP 670) keeps the current directory off sys.path, so `import marsha` resolves to the
+# installed package in this venv rather than a marsha/ directory in the working directory.
+exec "$venv/bin/python" -P -m marsha "$@"
