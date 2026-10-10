@@ -3087,11 +3087,22 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
                                 f'{IMPL_START_BOUNCES})')
                 log(f'tools: no $ command line (bounce {start_bounces}/'
                     f'{IMPL_START_BOUNCES})')
-                block = (
-                    'PROTOCOL VIOLATION: Your response must end with a line beginning with `$`. '
-                    'If you are done, end with exactly: `$ finished`. '
-                    'If you need to do more work, end with your next command(s). '
-                    'Do not describe what you will do — issue the command.')
+                refusal = any(w in text.lower() for w in
+                              ('unable', 'cannot', "can't", 'won\'t', 'refuse',
+                               'impossible', 'not able', 'not possible'))
+                if refusal:
+                    block = (
+                        'That is not acceptable. You are required to implement the '
+                        'specification. The task is large but you make it one edit at '
+                        'a time. Start now: read the most relevant existing file, then '
+                        'make your first change. End your response with a `$` command '
+                        'line. Do not refuse — begin the work.')
+                else:
+                    block = (
+                        'PROTOCOL VIOLATION: Your response must end with a line beginning '
+                        'with `$`. If you are done, end with exactly: `$ finished`. '
+                        'If you need to do more work, end with your next command(s). '
+                        'Do not describe what you will do — issue the command.')
                 messages.extend([
                     {'role': 'assistant', 'content': text},
                     {'role': 'user', 'content': block},

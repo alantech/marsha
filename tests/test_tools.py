@@ -1323,9 +1323,9 @@ def test_run_with_tools_bounces_implementor_before_first_command() -> None:
     assert out == DOC
     assert len(mapper.calls) == 3
     nudge = mapper.calls[1][2]['content']
-    assert 'PROTOCOL VIOLATION' in nudge
-    assert '$ finished' in nudge
-    assert 'command' in nudge
+    assert 'not acceptable' in nudge
+    assert 'required to implement' in nudge
+    assert '$' in nudge
 
 
 def test_run_with_tools_implement_start_bounce_is_bounded() -> None:
