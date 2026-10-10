@@ -13,8 +13,18 @@ For each concrete requirement in the specification, verify:
    not met by code that returns 404. A requirement that says "use inline
    #[cfg(test)] tests in src/lib.rs" is not met by a separate tests/ directory.
 
-2. **Tested**: If the spec requires a behavior, does a test exercise it? A
-   requirement with no test is a gap, even if the implementation looks correct.
+2. **Tested (for real)**: If the spec requires a behavior, does a test
+   actually exercise it? A test that only checks that a prompt string contains
+   a phrase does NOT exercise the behavior — it tests the prompt, not the code.
+   A test that mocks the local toolchain (cargo, tsc, node) with a fake
+   success does NOT exercise the build pipeline. A test that exercises the
+   behavior must invoke the real code path: build a real temporary project,
+   run the real toolchain (or skip if unavailable), and assert on the
+   observable output (exit code, stdout, stderr, HTTP status/body). Check the
+   test's assertions: do they verify the specific behavior the spec names
+   (exact error message format, exact HTTP status code, exact output mode
+   selection), or only a vague proxy (prompt contains a substring, function
+   returns without exception)? The latter is a gap.
 
 3. **Files present**: Do the files the spec names (or implies) exist in the
    working tree?
