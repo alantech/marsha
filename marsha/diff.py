@@ -21,7 +21,7 @@ from typing import Any, Callable, cast
 
 from marsha import backends, threads, tools
 from marsha import plan as plan_mod
-from marsha.plan import format_step
+
 from marsha.config import resolve_model
 from marsha.findings import Finding
 from marsha.llm import consolidate_findings
@@ -467,6 +467,14 @@ IMPL_SYSTEM_PROMPT = (
     'specification. Investigate before you change: read the relevant files and their callers, '
     'and update any affected call sites and tests.\n'
     '\n'
+    'Completeness is non-negotiable. The specification is the complete list of what must be '
+    'built. Every behavior it names — every error format, every output mode, every edge case, '
+    'every file it references — must be implemented and tested. Do not simplify, omit, or '
+    'defer any requirement because it seems minor, redundant, or easier to skip. A '
+    'requirement you decide to "handle later" or "simplify for now" is a requirement you '
+    'failed to implement. If you are unsure whether something is required, re-read the '
+    'specification: when in doubt, implement it.\n'
+    '\n'
     'Use the tools: read files (list-tree, summarize, find-in-file, git), write files '
     '(write-file), edit files (edit-file), and run the project\'s validation/build/lint '
     'commands (run). Only commands in the allowed set are run; anything else is refused. '
@@ -500,21 +508,18 @@ IMPL_SYSTEM_PROMPT = (
 
 
 def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool,
-                  comments: str = '', plan: plan_mod.Plan | None = None,
-                  explorer_map: str = '') -> str:
-    # The initial implementor request: the locked spec (untrusted), the plan (when
-    # available, as a suggested structure), the issue's comments (when there are any,
-    # untrusted background), the conventions, the explorer's file map, and the
-    # task.
+                  comments: str = '', explorer_map: str = '') -> str:
+    # The initial implementor request: the locked spec (the source of truth and
+    # the plan), the issue's comments (when there are any, untrusted background),
+    # the conventions, the explorer's file map, and the task.
     parts = [
-        'Implement the following design-locked specification in the current repository.',
+        'Implement the following design-locked specification in the current '
+        'repository. The specification is your plan: implement every requirement '
+        'it names, completely. Do not skip requirements, and do not stop until '
+        'every behavior the spec describes is implemented and tested.',
         tools.wrap_untrusted('spec', tools.truncate(
             spec_text, limit=DIFF_SOURCE_LIMIT)),
     ]
-    if plan is not None:
-        parts.append('## Suggested implementation plan (a guide for structuring your work; '
-                     'the specification above is the source of truth)\n'
-                     + plan_mod.format_plan(plan))
     if explorer_map:
         parts.append('## Repository map (from the explorer — use this to orient yourself '
                      'without re-reading the tree)\n' + explorer_map[:DIFF_SOURCE_LIMIT])
@@ -615,171 +620,20 @@ async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: st
     return passed, out
 
 
-# --- planning phase and step loop (async) -------------------------------
+# --- planning phase (async) ----------------------------------------------
 
 
 async def _run_planning_phase(spec_text: str, cwd: str, model: str,
-                              debug: bool) -> tuple[plan_mod.Plan, str, str]:
-    """Run the planning phase: explorer, rule checker, then planner. Returns
-    (plan, explorer_output, rules). The explorer maps relevant files, the
-    rule checker extracts constraints, and the planner produces the sequential
-    step list. The explorer output and rules are passed through so the step
-    loop can pre-seed the implementor's context (avoiding re-discovery)."""
+                              debug: bool) -> tuple[None, str, str]:
+    """Run the planning phase: explorer and rule checker. Returns
+    (None, explorer_output, rules). The spec is the plan for the implementor;
+    the explorer maps relevant files and the rule checker extracts constraints
+    so the implementor can orient itself without re-discovering the tree."""
     debug_print('Exploring the repository...')
     explorer_output = await plan_mod.run_explorer(spec_text, cwd, model, debug)
     debug_print('Checking conventions...')
     rules = await plan_mod.run_rule_checker(cwd, model, debug)
-    debug_print('Planning the implementation...')
-    p = await plan_mod.run_planner(spec_text, explorer_output, rules, model, debug)
-    debug_print(f'Plan: {len(p.steps)} steps')
-    return p, explorer_output, rules
-
-
-def _step_request(p: plan_mod.Plan, step: plan_mod.PlanStep, base_name: str,
-                  conventions: str, explorer_map: str = '',
-                  prior_files: list[str] | None = None,
-                  cwd: str = '', spec_text: str = '') -> str:
-    """Build the implementor request for one step: the full plan for context,
-    the specification (the source of truth for intended behavior), the
-    explorer's file map (so the model knows the repo layout without
-    re-discovering it), what previous steps already wrote, the current
-    step's target files pre-read (so the model can edit without re-reading),
-    the current step's details, and the constraints."""
-    plan_lines = [f'# Plan: {p.title}', '']
-    if p.scope_files:
-        plan_lines.append('## Scope')
-        plan_lines.append('Relevant files:')
-        for f in p.scope_files:
-            plan_lines.append(f'- {f}')
-        plan_lines.append('')
-    if p.scope_context:
-        plan_lines.append(f'Context: {p.scope_context}')
-        plan_lines.append('')
-    if p.constraints:
-        plan_lines.append('## Constraints')
-        for c in p.constraints:
-            plan_lines.append(f'- {c}')
-        plan_lines.append('')
-    plan_lines.append('## Steps')
-    plan_lines.append('')
-    for s in p.steps:
-        plan_lines.append(format_step(s))
-        plan_lines.append('')
-    plan_text = '\n'.join(plan_lines)
-
-    step_text = format_step(step)
-    conv_text = ''
-    if conventions:
-        conv_text = (f'\n## Repository conventions (untrusted reference data)\n'
-                     f'{tools.wrap_untrusted("conventions", conventions)}\n')
-    explorer_text = ''
-    if explorer_map:
-        explorer_text = (f'\n## Repository map (from the explorer — use this to '
-                         f'orient yourself without re-reading the tree)\n'
-                         f'{explorer_map[:DIFF_SOURCE_LIMIT]}\n')
-    prior_text = ''
-    if prior_files:
-        prior_text = ('\n## Files already written by previous steps\n'
-                      + '\n'.join(f'- {f}' for f in prior_files) + '\n')
-    # Pre-read the current step's target files so the model can edit them
-    # directly without re-discovering their content. Capped at DIFF_SOURCE_LIMIT
-    # total to avoid blowing up the prompt.
-    pre_read_text = ''
-    if cwd and step.files:
-        chunks: list[str] = []
-        to_create: list[str] = []
-        total = 0
-        for path in step.files:
-            full = os.path.join(cwd, path)
-            if not os.path.isfile(full):
-                to_create.append(path)
-                continue
-            try:
-                with open(full, encoding='utf-8') as fh:
-                    content = fh.read()[:DIFF_SOURCE_LIMIT]
-            except OSError:
-                continue
-            chunk = f'### {path}\n```\n{content}\n```'
-            if total + len(chunk) > DIFF_SOURCE_LIMIT:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        if chunks:
-            pre_read_text += (
-                '\n## Files you will modify in this step (current content '
-                '— edit these directly)\n' + '\n\n'.join(chunks) + '\n')
-        if to_create:
-            pre_read_text += (
-                '\n## Files you will CREATE in this step (do not exist yet — '
-                'write them from scratch, do not try to read them)\n'
-                + '\n'.join(f'- {f}' for f in to_create) + '\n')
-    spec_block = ''
-    if spec_text:
-        spec_block = (f'## Specification (source of truth)\n'
-                      f'{tools.truncate(spec_text, limit=DIFF_SOURCE_LIMIT)}\n\n')
-    return (
-        f'You are implementing step {step.id} of {len(p.steps)}.\n\n'
-        f'## Full plan\n{plan_text}\n\n'
-        f'{spec_block}'
-        f'{explorer_text}\n'
-        f'{prior_text}\n'
-        f'{pre_read_text}\n'
-        f'## Current step\n{step_text}\n\n'
-        f'{conv_text}\n'
-        f'The default branch is `{base_name}`. Work in the working tree; do not commit.\n\n'
-        f'Work on this step: the files you will modify are shown above with their '
-        f'current content — edit them directly. Write the test (if the step says '
-        f'"Test first"), run it to confirm it fails, implement, run it again to '
-        f'confirm it passes. You may request a focused review with '
-        f'`$ review-request <focus>` and punt back with `$ punt <target> <reason>` '
-        f'if the plan needs adjustment. When the step is complete, give a short '
-        f'report with no trailing command.')
-
-
-async def _run_step_loop(ctx: tools.ToolContext, p: plan_mod.Plan, base_name: str,
-                         conventions: str, model: str, max_failures: int,
-                         debug: bool, explorer_map: str = '',
-                         spec_text: str = '') -> str:
-    """Run the step-by-step implement loop. For each step in the plan, feed the
-    implementor the step context (including the explorer's file map, the full
-    spec, and what previous steps already wrote) and let it work. Returns the
-    final report from the last step."""
-    last_report = ''
-    prior_files: list[str] = []
-    for step in p.steps:
-        ctx.current_step = step
-        ctx.plan = p
-        ctx.step_files.clear()
-        total = len(p.steps)
-        debug_print(f'Step {step.id}/{total}: {step.goal}')
-        request = _step_request(p, step, base_name, conventions,
-                                explorer_map=explorer_map,
-                                prior_files=prior_files or None,
-                                cwd=os.getcwd(), spec_text=spec_text)
-        try:
-            last_report = await _run_implementor(
-                ctx, request, model, max_failures, debug)
-        except tools.ToolFailureLimitExceeded:
-            raise
-        except KeyboardInterrupt:
-            raise
-        # Accumulate files written by this step for the next step's context.
-        prior_files.extend(ctx.step_files)
-        # Validate the step (if it has a validate command).
-        if step.validate:
-            passed, out = await _run_validation(os.getcwd(), step.validate)
-            if not passed:
-                if debug:
-                    debug_print(f'[diff] step {step.id} validation failed; asking the '
-                                f'implementor to fix')
-                fix_request = _validation_fix_request(
-                    step.validate, out, safe=False)
-                try:
-                    await _run_implementor(
-                        ctx, fix_request, model, max_failures, debug)
-                except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                    raise
-    return last_report
+    return None, explorer_output, rules
 
 
 # --- review gate (async) ------------------------------------------------
@@ -801,10 +655,13 @@ class ReviewGateFailed(Exception):
 
 
 async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
-                       model: str, debug: bool) -> list[Finding]:
+                       model: str, debug: bool,
+                       impl_spec: str = '', validation_cmd: str = '',
+                       validation_allowed: bool = True,
+                       safe: bool = False) -> tuple[list[Finding], str]:
     # The review gate over the implementation's working-tree changes (uncommitted): the review
-    # personas plus the deterministic evidence gate, over `git diff <base>` (which includes
-    # uncommitted work). A clean gate has zero findings at any severity.
+    # personas + the plan checker + the validation command, over `git diff <base>` (which
+    # includes uncommitted work). A clean gate has zero findings at any severity.
     #
     # `git diff <base>` shows only tracked files, so a change that consists solely of NEW files
     # (still untracked) would read as empty and skip the gate — yet `_commit` stages everything
@@ -819,7 +676,7 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
             f'the review gate could not stage the working tree: {err}')
     stat_text = await working_tree_diff_stat(base_ref, cwd)
     if not stat_text.strip():
-        return []
+        return [], ''
     context_blocks = [tools.wrap_untrusted(
         'spec', tools.truncate(spec_text, limit=REVIEW_CONTEXT_LIMIT))]
     survey_output = await _validation_survey(cwd, model, debug)
@@ -847,6 +704,42 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
         # not fully run.
         raise ReviewGateFailed(str(e)) from e
     findings = await evidence_gate(findings, cwd, base_ref, debug=debug, working_tree=True)
+    # Plan checker strike: remove review findings that contradict the spec.
+    if impl_spec and findings:
+        strike_idx = await plan_mod.strike_findings_against_spec(
+            findings, impl_spec, model, debug)
+        if strike_idx:
+            strike_set = set(strike_idx)
+            findings = [f for i, f in enumerate(findings) if i not in strike_set]
+    # Plan checker: verify the implementation covers the spec (as a pseudo-reviewer).
+    if impl_spec:
+        satisfied, gaps = await plan_mod.run_plan_checker(
+            None, cwd, model, debug, spec_text=impl_spec)
+        if not satisfied:
+            for i, gap in enumerate(gaps):
+                findings.append({
+                    'name': 'Check', 'label': f'{chr(65 + i)}99',
+                    'severity': 'MAJOR', 'location': '',
+                    'desc': gap, 'support': 'Plan checker: spec coverage gap.',
+                    'evidence': [], 'sources': [],
+                })
+    # Validation pseudo-persona: run the project's validation command.
+    validation = ''
+    if validation_allowed and validation_cmd:
+        passed, out = await _run_validation(cwd, validation_cmd)
+        if passed:
+            validation = f'passed (`{validation_cmd}`)'
+        else:
+            validation = f'FAILED (`{validation_cmd}`)'
+            tail = out[-3000:] if len(out) > 3000 else out
+            findings.append({
+                'name': 'Validation', 'label': 'A98',
+                'severity': 'MAJOR',
+                'location': '',
+                'desc': f'The project validation command `{validation_cmd}` failed.',
+                'support': f'Validation output (tail):\n{tail}',
+                'evidence': [], 'sources': [],
+            })
     if findings:
         # Collapse same-location findings first (model-independent), run the semantic pass on the
         # smaller list, then collapse again; the semantic pass also drops non-defects, so a change
@@ -877,7 +770,7 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
             findings, cwd, base_ref, debug=debug, post_consolidation=True, working_tree=True)
         findings = dedup_findings(findings)
         findings = dedup_by_location(findings)
-    return findings
+    return findings, validation
 
 
 # --- reporting ----------------------------------------------------------
@@ -1000,7 +893,10 @@ async def _propose_and_maybe_refine(
                 print('Validation failed after refinement; leaving the existing commit intact.',
                       file=sys.stderr)
                 return (0, commit_title, sha)
-            remaining = await _review_gate(cwd, base_name, base_ref, spec_text, model, debug)
+            remaining, _v = await _review_gate(
+                cwd, base_name, base_ref, spec_text, model, debug,
+                impl_spec=spec_text, validation_cmd=validation_cmd,
+                validation_allowed=True, safe=False)
             if remaining:
                 print(f'Review gate not clean after refinement ({len(remaining)} finding(s)); '
                       'leaving the existing commit intact.', file=sys.stderr)
@@ -1178,25 +1074,23 @@ async def run_diff(
     if not safe:
         print(VM_WARNING)
     impl_report = ''
-    p: plan_mod.Plan | None = None
     try:
         if safe:
-            # Safe mode: single-pass implement (no planning phase, no step
-            # loop).
+            # Safe mode: single-pass implement (no planning phase).
             debug_print('Implementing the spec in the working tree...')
             impl_report = await _run_implementor(
                 impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
                                         impl_comments),
                 model, max_tool_failure, debug)
         else:
-            # Normal mode: planning phase (explorer, rule checker, planner) then
-            # a single implementor pass with the full plan + spec.
-            p, explorer_map, _rules = await _run_planning_phase(
+            # Normal mode: planning phase (explorer, rule checker) then
+            # a single implementor pass with the spec + explorer map.
+            _p, explorer_map, _rules = await _run_planning_phase(
                 impl_spec, cwd, model, debug)
             debug_print('Implementing the spec in the working tree...')
             impl_report = await _run_implementor(
                 impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
-                                        impl_comments, plan=p,
+                                        impl_comments,
                                         explorer_map=explorer_map),
                 model, max_tool_failure, debug)
     except tools.ToolFailureLimitExceeded as e:
@@ -1224,44 +1118,8 @@ async def run_diff(
                     'Its final report:\n' + (impl_report.strip() or '(no report)'))
         return 1
 
-    # --- Plan checker (normal mode only): verify the implementation covers the spec. ---
-    if p is not None:
-        debug_print('Checking spec coverage...')
-        satisfied, gaps = await plan_mod.run_plan_checker(
-            p, cwd, model, debug, spec_text=impl_spec)
-        plan_fix_passes = 0
-        while not satisfied and plan_fix_passes < review_cycles:
-            plan_fix_passes += 1
-            debug_print(f'Spec checker found {len(gaps)} gap(s); asking the implementor '
-                        f'to address them (pass {plan_fix_passes}/{review_cycles})...')
-            gap_text = '\n'.join(f'- {g}' for g in gaps)
-            gap_request = (
-                f'The spec checker found gaps in the implementation:\n\n'
-                f'{gap_text}\n\n'
-                f'Address each gap: read the relevant files, make the changes, '
-                f'and verify with the run tool. When done, give a short report '
-                f'with no trailing command.')
-            try:
-                await _run_implementor(
-                    impl_ctx, gap_request, model, max_tool_failure, debug)
-            except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                pass
-            satisfied, gaps = await plan_mod.run_plan_checker(
-                p, cwd, model, debug, spec_text=impl_spec)
-        if not satisfied:
-            await _report(cwd, base_ref, short, ticket_id, design='locked',
-                          validation='not run (plan gaps)', review='not run',
-                          commit='none (plan gaps remain)')
-            debug_print(f'Plan checker still found {len(gaps)} gap(s) after '
-                        f'{plan_fix_passes} fix attempt(s).')
-            return 1
-        debug_print('Plan checker: plan is satisfied.')
-
-    # --- Validation (the project's own checks; fix-and-rerun until green or the cap is hit). ---
+    # --- Validation command (used by the review gate and post-thread re-validation). ---
     validation_cmd = _validation_command(cwd)
-    # Safe mode: the validation command may build the environment or install dependencies, so it
-    # is not run silently — the user approves or declines it. A decline skips the validation (the
-    # run still completes, leaving edits uncommitted); it is not a failure.
     validation_allowed = True
     if safe:
         print(f'Safe mode: about to run the validation command `{validation_cmd}`. It may build '
@@ -1273,26 +1131,17 @@ async def run_diff(
         validation_allowed = answer in ('y', 'yes')
         if not validation_allowed:
             debug_print('Skipping validation (declined in safe mode).')
-    if validation_allowed:
-        debug_print(f'Running validation: `{validation_cmd}`')
-        passed, _out = await _ensure_validated(
-            impl_ctx, cwd, validation_cmd, model, max_tool_failure, debug, safe)
-        if not passed:
-            await _report(cwd, base_ref, short, ticket_id, design='locked',
-                          validation=f'FAILED (`{validation_cmd}`)', review='not run',
-                          commit='none (validation failed)')
-            return 1
-        validation = f'passed (`{validation_cmd}`)'
-    else:
-        validation = 'skipped (--safe: validation declined)'
 
-    # --- Review (working-tree changes vs base). ---
+    # --- Review gate (includes plan checker + validation as pseudo-reviewers). ---
+    validation = ''
     if review_cycles >= 1:
-        if p is not None:
-            # Normal mode: full review panel + thread-based resolution.
+        if not safe:
+            # Normal mode: full review panel + plan checker + validation + threads.
             try:
-                findings = await _review_gate(
-                    cwd, base_name, base_ref, spec_text, model, debug)
+                findings, validation = await _review_gate(
+                    cwd, base_name, base_ref, spec_text, model, debug,
+                    impl_spec=impl_spec, validation_cmd=validation_cmd,
+                    validation_allowed=validation_allowed, safe=safe)
             except ReviewGateFailed as e:
                 await _report(cwd, base_ref, short, ticket_id, design='locked',
                               validation=validation,
@@ -1303,7 +1152,7 @@ async def run_diff(
                 debug_print(f'Review found {len(findings)} finding(s); resolving '
                             f'threads...')
                 _threads, all_resolved = await threads.resolve_threads(
-                    findings, impl_ctx, p, impl_spec, model,
+                    findings, impl_ctx, impl_spec, model,
                     max_tool_failure, debug, max_cycles=review_cycles)
                 if not all_resolved:
                     unresolved = sum(1 for t in _threads if not t.resolved)
@@ -1326,10 +1175,12 @@ async def run_diff(
                         return 1
             review_result = 'clean (all threads resolved)'
         else:
-            # Safe mode: existing review gate (no threads, no planner).
+            # Safe mode: review gate with implementor fix loop (no threads).
             try:
-                remaining = await _review_gate(
-                    cwd, base_name, base_ref, spec_text, model, debug)
+                remaining, validation = await _review_gate(
+                    cwd, base_name, base_ref, spec_text, model, debug,
+                    impl_spec=impl_spec, validation_cmd=validation_cmd,
+                    validation_allowed=validation_allowed, safe=safe)
                 cycles = 0
                 while remaining and cycles < review_cycles:
                     debug_print(f'Review found {len(remaining)} finding(s); addressing '
@@ -1341,14 +1192,10 @@ async def run_diff(
                             model, max_tool_failure, debug)
                     except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
                         break
-                    if validation_allowed:
-                        passed, _out = await _ensure_validated(
-                            impl_ctx, cwd, validation_cmd, model,
-                            max_tool_failure, debug, safe)
-                        if not passed:
-                            break
-                    remaining = await _review_gate(
-                        cwd, base_name, base_ref, spec_text, model, debug)
+                    remaining, validation = await _review_gate(
+                        cwd, base_name, base_ref, spec_text, model, debug,
+                        impl_spec=impl_spec, validation_cmd=validation_cmd,
+                        validation_allowed=validation_allowed, safe=safe)
                     cycles += 1
                 if remaining:
                     await _report(cwd, base_ref, short, ticket_id, design='locked',

@@ -15,7 +15,7 @@ import dataclasses
 import re
 from typing import cast
 
-from marsha import plan as plan_mod
+
 from marsha import tools
 from marsha.findings import Finding
 from marsha.log import debug_print, log
@@ -88,8 +88,12 @@ async def ask_implementor_response(
         spec_text: str = '') -> ThreadResponse:
     """Ask the implementor to respond to a review finding: implement the fix
     or push back. The implementor uses the tool loop (write-file, run) to make
-    the change if it implements. Returns the ThreadResponse."""
+    the change if it implements. Returns the ThreadResponse.
+
+    Plan-checker findings (name='Check') are spec-coverage gaps: the
+    implementor must implement them and cannot push back."""
     from marsha.diff import IMPL_SYSTEM_PROMPT
+    is_plan_check = thread.finding.get('name', '') == 'Check'
     finding_text = (
         f"[{thread.finding['severity']}] "
         f"{thread.finding.get('location', '')} - "
@@ -100,23 +104,40 @@ async def ask_implementor_response(
         spec_block = (
             f'\n## Specification (source of truth)\n'
             f'{spec_text[:12000]}\n\n')
-    request = (
-        f'A review of the working-tree changes found the following issue:\n\n'
-        f'{finding_text}\n\n'
-        f'{spec_block}'
-        f'Before implementing, check the specification. If the spec explicitly '
-        f'requires the current behavior, push back citing the spec — do not '
-        f'implement a change that contradicts the spec. If the spec is silent '
-        f'on the point, apply your judgment.\n\n'
-        f'Respond with exactly one of:\n'
-        f'- ACTION: implemented — you made the fix. Briefly describe what you '
-        f'changed.\n'
-        f'- ACTION: pushed_back — you disagree with the finding. Briefly '
-        f'explain why.\n\n'
-        f'If you implement the fix, use the write-file and run tools to make '
-        f'the change and verify it. If you push back, do not make any code '
-        f'changes. End your response with the ACTION line and a brief '
-        f'explanation.')
+    if is_plan_check:
+        request = (
+            f'The plan checker identified a gap in the working-tree '
+            f'implementation against the specification:\n\n'
+            f'{finding_text}\n\n'
+            f'{spec_block}'
+            f'This is a spec-coverage gap: the specification requires this '
+            f'behavior and it is missing or incomplete in the implementation. '
+            f'You must implement it. Read the specification, find the '
+            f'requirement, and add the missing code and tests.\n\n'
+            f'Respond with:\n'
+            f'- ACTION: implemented — you made the fix. Briefly describe what '
+            f'you changed.\n\n'
+            f'Use the write-file and run tools to make the change and verify '
+            f'it. End your response with the ACTION line and a brief '
+            f'explanation.')
+    else:
+        request = (
+            f'A review of the working-tree changes found the following issue:\n\n'
+            f'{finding_text}\n\n'
+            f'{spec_block}'
+            f'Before implementing, check the specification. If the spec explicitly '
+            f'requires the current behavior, push back citing the spec — do not '
+            f'implement a change that contradicts the spec. If the spec is silent '
+            f'on the point, apply your judgment.\n\n'
+            f'Respond with exactly one of:\n'
+            f'- ACTION: implemented — you made the fix. Briefly describe what you '
+            f'changed.\n'
+            f'- ACTION: pushed_back — you disagree with the finding. Briefly '
+            f'explain why.\n\n'
+            f'If you implement the fix, use the write-file and run tools to make '
+            f'the change and verify it. If you push back, do not make any code '
+            f'changes. End your response with the ACTION line and a brief '
+            f'explanation.')
     system = IMPL_SYSTEM_PROMPT + tools.tool_instructions(impl_ctx)
     if impl_ctx.run_whitelist:
         cmd_lines = '\n'.join(f'  {r.display}' for r in impl_ctx.run_whitelist)
@@ -136,20 +157,18 @@ async def ask_implementor_response(
 
 
 async def ask_planner_adjudication(
-        thread: ReviewThread, p: plan_mod.Plan, spec_text: str, model: str,
+        thread: ReviewThread, spec_text: str, model: str,
         debug: bool = False) -> ThreadResponse:
     """Ask the planner to adjudicate a pushback: accepted (finding not
     actionable) or rejected (finding stands). Returns the ThreadResponse."""
     pushback = next(
         (r.text for r in reversed(thread.responses) if r.role == 'implementor'),
         '')
-    plan_text = plan_mod.format_plan(p)
     request = (
         f'The implementor pushed back on a review finding. Decide if the '
         f'pushback is valid.\n\n'
         f'## Finding\n{thread.finding["desc"]}\n\n'
         f'## Implementor\'s pushback\n{pushback}\n\n'
-        f'## Plan\n{plan_text}\n\n'
         f'## Specification\n{spec_text[:48000]}\n\n'
         'Respond with the ACTION line and a brief reasoning.')
     mapper = get_mapper(
@@ -163,7 +182,7 @@ async def ask_planner_adjudication(
 
 async def resolve_threads(
         findings: list[Finding], impl_ctx: tools.ToolContext,
-        p: plan_mod.Plan, spec_text: str, model: str, max_failures: int,
+        spec_text: str, model: str, max_failures: int,
         debug: bool = False, max_cycles: int = 3) -> tuple[list[ReviewThread], bool]:
     """Resolve review findings via threads. For each finding, the implementor
     responds (implement or push back). Pushbacks go to the planner for
@@ -195,14 +214,25 @@ async def resolve_threads(
                 log(f'threads: finding at {thread.finding.get("location", "?")} '
                     f'resolved (implemented)')
             elif response.action == 'pushed_back':
-                try:
-                    adjudication = await ask_planner_adjudication(
-                        thread, p, spec_text, model, debug)
-                except Exception as e:
-                    log(f'threads: planner adjudication failed: {e}')
+                if thread.finding.get('name', '') == 'Check':
+                    # Plan-checker findings are spec-coverage gaps: the
+                    # implementor cannot push back on them.
+                    log(f'threads: pushback on plan-checker finding at '
+                        f'{thread.finding.get("location", "?")} '
+                        f'auto-rejected (spec coverage is not negotiable)')
                     adjudication = ThreadResponse(
                         role='planner', action='rejected',
-                        text='(adjudication failed; finding stands)')
+                        text='(auto-rejected: plan-checker findings are '
+                             'spec-coverage gaps and cannot be pushed back)')
+                else:
+                    try:
+                        adjudication = await ask_planner_adjudication(
+                            thread, spec_text, model, debug)
+                    except Exception as e:
+                        log(f'threads: planner adjudication failed: {e}')
+                        adjudication = ThreadResponse(
+                            role='planner', action='rejected',
+                            text='(adjudication failed; finding stands)')
                 thread.responses.append(adjudication)
                 if adjudication.action == 'accepted':
                     thread.resolved = True

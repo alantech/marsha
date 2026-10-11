@@ -315,13 +315,13 @@ async def _ok_validation(*a: Any, **k: Any) -> tuple[bool, str]:
     return (True, 'ok')
 
 
-async def _clean_review(*a: Any, **k: Any) -> list[Any]:
-    return []
+async def _clean_review(*a: Any, **k: Any) -> tuple[list[Any], str]:
+    return [], ''
 
 
-async def _finding_review(*a: Any, **k: Any) -> list[Any]:
-    return [{'name': 'r', 'label': 'L', 'severity': 'major',
-             'location': 'a.py:1', 'desc': 'd'}]
+async def _finding_review(*a: Any, **k: Any) -> tuple[list[Any], str]:
+    return ([{'name': 'r', 'label': 'L', 'severity': 'major',
+             'location': 'a.py:1', 'desc': 'd'}], '')
 
 
 async def _assert_not_called(*a: Any, **k: Any) -> str:
@@ -600,8 +600,8 @@ def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
     async def fake_validated(*a: Any, **k: Any) -> Any:
         return (True, 'ok')
 
-    async def fake_review_gate(*a: Any, **k: Any) -> list[Any]:
-        return []
+    async def fake_review_gate(*a: Any, **k: Any) -> tuple[list[Any], str]:
+        return [], ''
 
     async def fake_commit(cwd: Any, title: Any, body: Any) -> str:
         return f'sha-{len(applied)}'

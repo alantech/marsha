@@ -19,6 +19,7 @@ import re
 from typing import cast
 
 from marsha import tools
+from marsha.findings import Finding
 from marsha.log import log
 from marsha.mappers import get_mapper
 from marsha.personas import load_persona, personas_dir
@@ -307,11 +308,12 @@ def format_plan(p: Plan) -> str:
 _PLAN_GAP_RE = re.compile(r'^-\s*Step\s+(\d+):\s*GAP\s*-\s*(.+)', re.MULTILINE)
 
 
-async def run_plan_checker(p: Plan, cwd: str, model: str,
+async def run_plan_checker(p: Plan | None, cwd: str, model: str,
                            debug: bool = False,
                            spec_text: str = '') -> tuple[bool, list[str]]:
     """Run the plan checker: it verifies the working tree implements the spec.
-    Returns (satisfied, gaps) where gaps is a list of gap descriptions."""
+    Returns (satisfied, gaps) where gaps is a list of gap descriptions.
+    `p` is optional (legacy); the spec is the authority."""
     name, body = load_persona(
         os.path.join(personas_dir(), 'plan-checker-coverage.md'))
     ctx = tools.ToolContext(phase='review', workdir=cwd)
@@ -319,17 +321,18 @@ async def run_plan_checker(p: Plan, cwd: str, model: str,
     mapper = get_mapper(
         system, n_results=1, model=model, label=f'plan:{name}',
         reasoning_effort='high')
-    plan_text = format_plan(p)
     spec_block = ''
     if spec_text:
         spec_block = (f'## Specification (source of truth)\n'
                       f'{spec_text}\n\n')
+    plan_block = ''
+    if p is not None:
+        plan_block = (f'## Implementation plan (the structure the implementor '
+                      f'followed)\n{format_plan(p)}\n\n')
     request = (
         f'Verify that the working tree implements the specification below. '
         f'For each requirement, check that it is implemented and tested.\n\n'
-        f'{spec_block}'
-        f'## Implementation plan (the structure the implementor followed)\n'
-        f'{plan_text}\n\n'
+        f'{spec_block}{plan_block}'
         'Use the git tool and list-tree / find-in-file to read the working '
         'tree. Produce the plan check in the required format.')
     result = await tools.run_with_tools(
@@ -347,3 +350,65 @@ async def run_plan_checker(p: Plan, cwd: str, model: str,
             'Unrecognized plan checker output; cannot verify coverage.']
     log(f'plan: plan checker found {len(gaps)} gap(s)')
     return False, gaps
+
+
+_STRIKE_PROMPT = '''\
+You are the plan checker. You are given a specification (the source of \
+truth) and a list of review findings. Your charge is to strike any finding \
+that would cause the implementor to deviate from the specification.
+
+A finding should be struck if:
+- It asks the implementor to remove, simplify, or change behavior that the \
+specification explicitly requires.
+- It asks the implementor to add behavior that contradicts the specification.
+- It is based on a misreading of what the specification requires.
+
+A finding should NOT be struck if:
+- It identifies a bug, security issue, or correctness problem that the \
+specification does not address.
+- It asks for a code-quality improvement that does not conflict with the \
+specification.
+- It asks for a test that verifies specification-required behavior.
+
+For each finding, respond with either:
+- KEEP <index> — the finding is compatible with the specification.
+- STRIKE <index> — the finding contradicts the specification. <brief reason>
+
+Respond with one line per finding, in order. No preamble, no commentary.
+'''
+
+
+async def strike_findings_against_spec(
+        findings: list[Finding], spec_text: str, model: str,
+        debug: bool = False) -> list[int]:
+    """Check review findings against the spec; return indices of findings to
+    strike (those that contradict the spec). Returns an empty list when the
+    spec is empty or the LLM call fails."""
+    if not spec_text or not findings:
+        return []
+    findings_text = '\n'.join(
+        f'{i}. [{f.get("severity", "?")}] {f.get("location", "")} — '
+        f'{f.get("desc", "")}'
+        for i, f in enumerate(findings))
+    request = (
+        f'## Specification (source of truth)\n{spec_text[:48000]}\n\n'
+        f'## Review findings\n{findings_text}\n\n'
+        'For each finding, respond with KEEP or STRIKE and a brief reason.')
+    mapper = get_mapper(
+        _STRIKE_PROMPT, n_results=1, model=model, label='plan:strike',
+        reasoning_effort='high')
+    try:
+        text = await mapper.run(request)
+    except Exception as e:
+        log(f'plan: strike check failed: {e}')
+        return []
+    strike_indices: list[int] = []
+    import re as _re
+    for m in _re.finditer(r'^STRIKE\s+(\d+)', text or '', _re.MULTILINE):
+        idx = int(m.group(1))
+        if 0 <= idx < len(findings):
+            strike_indices.append(idx)
+    if strike_indices:
+        log(f'plan: strike check struck {len(strike_indices)} finding(s): '
+            f'{strike_indices}')
+    return strike_indices
