@@ -744,6 +744,17 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                 'support': f'Validation output (tail):\n{tail}',
                 'evidence': [], 'sources': [],
             })
+    # Survey failures (mypy, tsc, clippy, etc.) become findings too.
+    if validation_allowed and survey_output and 'FAILED' in survey_output:
+        findings.append({
+            'name': 'Validation', 'label': 'A97',
+            'severity': 'MAJOR',
+            'location': '',
+            'desc': 'One or more project validation commands (typecheck, lint, '
+                    'etc.) failed.',
+            'support': f'Survey output:\n{survey_output[-4000:]}',
+            'evidence': [], 'sources': [],
+        })
     # Separate synthetic findings (plan checker, validation) from review-panel
     # findings: the evidence gate requires code citations, which synthetic
     # findings do not have. Consolidate and gate only the review findings,

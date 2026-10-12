@@ -755,6 +755,13 @@ def _read_line() -> str:
         return _prompt_read_line()
     except EOFError:
         return '!bail'
+    except Exception:
+        # prompt_toolkit can fail to import (e.g. a C API version mismatch in
+        # a dependency); fall back to a plain line read rather than crashing.
+        try:
+            return input('\nyou> ')
+        except EOFError:
+            return '!bail'
 
 
 # The reply history for the terminal reader (the up arrow recalls earlier
