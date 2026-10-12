@@ -740,36 +740,38 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                 'support': f'Validation output (tail):\n{tail}',
                 'evidence': [], 'sources': [],
             })
-    if findings:
-        # Collapse same-location findings first (model-independent), run the semantic pass on the
-        # smaller list, then collapse again; the semantic pass also drops non-defects, so a change
-        # with no real issue can reduce to zero (allow_empty).
-        findings = dedup_by_location(findings)
+    # Separate synthetic findings (plan checker, validation) from review-panel
+    # findings: the evidence gate requires code citations, which synthetic
+    # findings do not have. Consolidate and gate only the review findings,
+    # then re-attach the synthetic ones.
+    synthetic = [f for f in findings if f.get('name') in ('Check', 'Validation')]
+    review_findings = [f for f in findings if f.get('name') not in ('Check', 'Validation')]
+    if review_findings:
+        review_findings = dedup_by_location(review_findings)
         support = {(f['name'], f['label']): f.get('support', '')
-                   for f in findings}
+                   for f in review_findings}
         evidence = {(f['name'], f['label']): list(
-            f.get('evidence') or []) for f in findings}
+            f.get('evidence') or []) for f in review_findings}
         sources = {(f['name'], f['label']): list(
-            f.get('sources') or []) for f in findings}
+            f.get('sources') or []) for f in review_findings}
         context = (f'Consolidate findings from a code review of the working-tree changes '
                    f'against the default branch {base_name}.')
         consolidated = await consolidate_findings(
-            context, findings, model, debug=debug, allow_empty=True,
+            context, review_findings, model, debug=debug, allow_empty=True,
             reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED,
             internal=True)
-        findings = dedup_findings(consolidated)
-        # Re-attach the reviewer's support and evidence by (name, label) (the consolidator only
-        # guarantees the [Name-Label]), then re-run the deterministic gate on
-        # the rewritten set.
-        for f in findings:
+        review_findings = dedup_findings(consolidated)
+        for f in review_findings:
             key = (f['name'], f['label'])
             f['support'] = support.get(key, '')
             f['evidence'] = evidence.get(key, [])
             f['sources'] = sources.get(key, [])
-        findings = await evidence_gate(
-            findings, cwd, base_ref, debug=debug, post_consolidation=True, working_tree=True)
-        findings = dedup_findings(findings)
-        findings = dedup_by_location(findings)
+        review_findings = await evidence_gate(
+            review_findings, cwd, base_ref, debug=debug, post_consolidation=True,
+            working_tree=True)
+        review_findings = dedup_findings(review_findings)
+        review_findings = dedup_by_location(review_findings)
+    findings = review_findings + synthetic
     return findings, validation
 
 
