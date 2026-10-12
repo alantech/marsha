@@ -2460,11 +2460,14 @@ def tool_instructions(ctx: ToolContext | None = None, *, interactive: bool = Fal
             'with `$` (up to 5 per turn). Each `$` line is a command that will be executed; '
             'all outputs are returned together in the next message. This lets you batch '
             'independent lookups (e.g. reading several files) in a single turn. A `$` '
-            'anywhere earlier in your response is not a command and will not run. When you '
-            'are completely done and have produced your final answer, end your response '
-            'with exactly: `$ finished`. A response without a trailing `$` line will be '
-            'rejected and you will be asked to start again. Do not describe what you will '
-            'do — do it.'
+            'anywhere earlier in your response is not a command and will not run. The `$` '
+            'command lines MUST be the very last lines of your response: any text after '
+            'them — even an ellipsis, a period, or a blank line — causes the commands to '
+            'be silently ignored. If you have more work to do, put the `$` commands last, '
+            'with nothing after them. When you are completely done and have produced your '
+            'final answer, end your response with exactly: `$ finished`. A response '
+            'without a trailing `$` line will be rejected and you will be asked to start '
+            'again. Do not describe what you will do — do it.'
         )
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
@@ -3100,8 +3103,11 @@ async def run_with_tools(mapper: _MapperLike, request: str, ctx: ToolContext | N
                 else:
                     block = (
                         'PROTOCOL VIOLATION: Your response must end with a line beginning '
-                        'with `$`. If you are done, end with exactly: `$ finished`. '
-                        'If you need to do more work, end with your next command(s). '
+                        'with `$`. The `$` command lines must be the very last lines of '
+                        'your response — any text after them (an ellipsis, a period, a '
+                        'blank line) causes the commands to be silently ignored. If you '
+                        'are done, end with exactly: `$ finished`. If you need to do more '
+                        'work, end with your next command(s), with nothing after them. '
                         'Do not describe what you will do — issue the command.')
                 messages.extend([
                     {'role': 'assistant', 'content': text},
