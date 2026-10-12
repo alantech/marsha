@@ -1190,6 +1190,34 @@ async def run_diff(
                                              'thread resolution)',
                                       commit='none (validation failed)')
                         return 1
+                    # Re-run the validation survey (mypy, flake8, etc.) after
+                    # thread resolution: the implementor may have introduced
+                    # type errors or lint violations while fixing findings.
+                    survey_out = await _validation_survey(cwd, model, debug)
+                    if survey_out and 'FAILED' in survey_out:
+                        if debug:
+                            debug_print('[diff] post-thread survey failed; '
+                                        'asking the implementor to fix')
+                        try:
+                            await _run_implementor(
+                                impl_ctx, _validation_fix_request(
+                                    'validation survey (mypy, flake8, etc.)',
+                                    survey_out, safe),
+                                model, max_tool_failure, debug)
+                        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+                            pass
+                        passed2, out2 = await _run_validation(cwd, validation_cmd)
+                        if not passed2:
+                            await _report(cwd, base_ref, short, ticket_id,
+                                          design='locked',
+                                          validation='FAILED (post-thread '
+                                                     'survey fix)',
+                                          review='NOT clean (validation failed '
+                                                 'after survey fix)',
+                                          commit='none (validation failed)')
+                            return 1
+                        validation = (
+                            f'passed (`{validation_cmd}`, post-thread survey fix)')
             review_result = 'clean (all threads resolved)'
         else:
             # Safe mode: review gate with implementor fix loop (no threads).
