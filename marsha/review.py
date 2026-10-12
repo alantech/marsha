@@ -1802,12 +1802,24 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
             # present in the tree: the claim is falsified, so the finding is dropped. Only a
             # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
             # does not drop the finding.
-            for symbol in _asserted_absent_symbols(f):
-                if await _symbol_present(symbol, cwd, symbol_cache, working_tree) is True:
-                    ok, reason = (False,
-                                  f'asserts {symbol} is undefined or absent, but '
-                                  f'it is present in the reviewed tree')
-                    break
+            #
+            # Exempt when the finding references a function call (identifier + '('): that means
+            # it describes *behavior* (a code path that writes, deletes, or transforms the
+            # symbol) rather than a *static absence*. A finding like "compose() inlines tests.rs
+            # into lib.rs and deletes the separate file, but base.py still looks it up" is about
+            # a sequence of operations — the symbol can be present in the tree (written by the
+            # code) while the finding is still correct.
+            _f_text = ' '.join(
+                filter(None, [f.get('desc', ''), f.get('support', '')]))
+            _references_function = re.search(r'\b\w+\s*\(', _f_text) is not None
+            if not _references_function:
+                for symbol in _asserted_absent_symbols(f):
+                    if await _symbol_present(symbol, cwd, symbol_cache,
+                                             working_tree) is True:
+                        ok, reason = (False,
+                                      f'asserts {symbol} is undefined or absent, but '
+                                      f'it is present in the reviewed tree')
+                        break
         if ok:
             # (citation) a finding that names a documentation file or a URL as the basis of its
             # claim must have actually retrieved it — opened the doc via git, or fetched it via
