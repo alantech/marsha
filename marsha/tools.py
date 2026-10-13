@@ -2084,6 +2084,149 @@ async def edit_file_tool(args: list[str], ctx: ToolContext | None = None) -> str
     return f'applied diff to {rel}'
 
 
+def _parse_line_range(arg: str) -> tuple[int, int] | None:
+    # Parse "start..end" into a 1-based inclusive (start, end) tuple, or None.
+    m = re.fullmatch(r'(\d+)\.\.(\d+)', arg.strip())
+    if m is None:
+        return None
+    start, end = int(m.group(1)), int(m.group(2))
+    if start < 1 or end < start:
+        return None
+    return (start, end)
+
+
+def _resolve_write_target(root: str, path: str,
+                          tool: str) -> tuple[str, str] | str:
+    # Shared path resolution + boundary checks for the write-family tools.
+    # Returns (target, rel) on success or an error string.
+    target = os.path.normpath(os.path.join(root, path))
+    if target != root and not target.startswith(root + os.sep):
+        return f'error: {tool} cannot write outside the working tree: {path}'
+    real_root = os.path.realpath(root)
+    real_target = os.path.realpath(target)
+    if real_target != real_root and not real_target.startswith(real_root + os.sep):
+        return f'error: {tool} cannot write outside the working tree: {path}'
+    if '.git' in os.path.relpath(real_target, real_root).split(os.sep):
+        return f'error: {tool} cannot modify Git metadata: {path}'
+    return (target, os.path.relpath(target, root))
+
+
+def _touch_step(ctx: ToolContext | None, rel: str) -> None:
+    if ctx is not None and rel not in ctx.step_files:
+        ctx.step_files.append(rel)
+
+
+async def remove_lines_tool(args: list[str],
+                            ctx: ToolContext | None = None) -> str:
+    """`remove-lines-from-file <path> <start>..<end>` — delete lines start through end
+    (1-based, inclusive) from a file in the working tree."""
+    if len(args) < 2:
+        return ('error: remove-lines-from-file needs a path and a line range, '
+                'e.g. $ remove-lines-from-file src/foo.py 3..7')
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: remove-lines-from-file has no working tree.'
+    path = args[0]
+    rng = _parse_line_range(args[1])
+    if rng is None:
+        return (f'error: invalid line range {args[1]!r} (expected start..end, '
+                '1-based, inclusive)')
+    start, end = rng
+    resolved = _resolve_write_target(root, path, 'remove-lines-from-file')
+    if isinstance(resolved, str):
+        return resolved
+    target, rel = resolved
+    if not os.path.isfile(target):
+        return f'error: remove-lines-from-file: file not found: {path}'
+    try:
+        with open(target, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        if start > len(lines):
+            return (f'error: remove-lines-from-file: line {start} is past the '
+                    f'end of the file ({len(lines)} lines)')
+        end = min(end, len(lines))
+        new_lines = lines[:start - 1] + lines[end:]
+        with open(target, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        return f'error: remove-lines-from-file could not modify {path}: {e}'
+    _touch_step(ctx, rel)
+    return f'removed lines {start}-{end} from {rel} ({len(lines) - (end - start + 1)} lines remain)'
+
+
+async def replace_lines_tool(args: list[str],
+                             ctx: ToolContext | None = None) -> str:
+    # `replace-lines-in-file <path> <start>..<end> <content>` — replace lines start
+    # through end (1-based, inclusive) with the given content.
+    if len(args) < 3:
+        return ('error: replace-lines-in-file needs a path, a line range, and content, '
+                'e.g. $ replace-lines-in-file src/foo.py 3..7 """new code"""')
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: replace-lines-in-file has no working tree.'
+    path = args[0]
+    rng = _parse_line_range(args[1])
+    if rng is None:
+        return (f'error: invalid line range {args[1]!r} (expected start..end, '
+                '1-based, inclusive)')
+    start, end = rng
+    content = _decode_content(' '.join(args[2:]))
+    resolved = _resolve_write_target(root, path, 'replace-lines-in-file')
+    if isinstance(resolved, str):
+        return resolved
+    target, rel = resolved
+    if not os.path.isfile(target):
+        return f'error: replace-lines-in-file: file not found: {path}'
+    try:
+        with open(target, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        if start > len(lines) + 1:
+            return (f'error: replace-lines-in-file: line {start} is past the '
+                    f'end of the file ({len(lines)} lines)')
+        end = min(end, len(lines))
+        replacement = content
+        if replacement and not replacement.endswith('\n'):
+            replacement += '\n'
+        new_lines = lines[:start - 1] + [replacement] + lines[end:]
+        with open(target, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        return f'error: replace-lines-in-file could not modify {path}: {e}'
+    _touch_step(ctx, rel)
+    return (f'replaced lines {start}-{end} in {rel} '
+            f'with {len(replacement.splitlines())} line(s)')
+
+
+async def append_file_tool(args: list[str],
+                           ctx: ToolContext | None = None) -> str:
+    # `append-file <path> <content>` — append content to the end of a file
+    # in the working tree (creating the file if it does not exist).
+    if len(args) < 2:
+        return ('error: append-file needs a path and content, '
+                'e.g. $ append-file src/foo.py """added code"""')
+    root = _workdir_root(ctx)
+    if root is None:
+        return 'error: append-file has no working tree.'
+    path = args[0]
+    content = _decode_content(' '.join(args[1:]))
+    resolved = _resolve_write_target(root, path, 'append-file')
+    if isinstance(resolved, str):
+        return resolved
+    target, rel = resolved
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if content and not content.endswith('\n'):
+            content += '\n'
+        with open(target, 'a', encoding='utf-8') as f:
+            f.write(content)
+    except Exception as e:
+        return f'error: append-file could not write {path}: {e}'
+    _touch_step(ctx, rel)
+    return f'appended {len(content)} chars to {rel}'
+
+
 def _check_run_whitelist(argv: list[str],
                          whitelist: list[RunRule]) -> RunRule | None:
     # The first whitelist rule whose argv prefix matches `argv`, or None when the command
@@ -2373,15 +2516,26 @@ def agnostic_tool_commands(ctx: ToolContext | None = None) -> dict[str, ToolComm
                                   'newlines, quotes, and backslashes pass through verbatim; use '
                                   'for new files or full rewrites',
                                   lambda args, _c=ctx: write_file_tool(args, _c)),
-        'edit-file': ToolCommand('edit-file', CATEGORY_WRITE,
-                                 '$ edit-file <path> """<unified diff>"""',
-                                 'apply a unified diff to an existing file (supports insertions, '
-                                 'deletions, and modifications); the diff uses standard unified '
-                                 'format with --- / +++ / @@ headers; read the file first to get '
-                                 'the correct line numbers and context; if the edit fails, '
-                                 're-read the file and retry with corrected line numbers; '
-                                 'prefer over write-file when modifying part of a larger file',
-                                 lambda args, _c=ctx: edit_file_tool(args, _c)),
+        'remove-lines-from-file': ToolCommand(
+            'remove-lines-from-file', CATEGORY_WRITE,
+            '$ remove-lines-from-file <path> <start>..<end>',
+            'delete a range of lines from a file (1-based, inclusive); '
+            'read the file first to get correct line numbers',
+            lambda args, _c=ctx: remove_lines_tool(args, _c)),
+        'replace-lines-in-file': ToolCommand(
+            'replace-lines-in-file', CATEGORY_WRITE,
+            '$ replace-lines-in-file <path> <start>..<end> """<content>"""',
+            'replace a range of lines (1-based, inclusive) with new content; '
+            'read the file first to get correct line numbers; the content '
+            'replaces the entire range, so include any surrounding code that '
+            'should remain',
+            lambda args, _c=ctx: replace_lines_tool(args, _c)),
+        'append-file': ToolCommand(
+            'append-file', CATEGORY_WRITE,
+            '$ append-file <path> """<content>"""',
+            'append content to the end of a file (creates the file if it does '
+            'not exist); useful for adding new functions, tests, or sections',
+            lambda args, _c=ctx: append_file_tool(args, _c)),
         'run': ToolCommand('run', CATEGORY_RUN,
                            '$ run <command...>',
                            'run a whitelisted command in the working tree (tests, builds, lint, '
@@ -2472,7 +2626,7 @@ def tool_instructions(ctx: ToolContext | None = None, *, interactive: bool = Fal
     lines = [
         'There is always a gap between your training cutoff and the current date — it may be days, months, or years. Always use the tools below to confirm anything that can change quickly, especially third-party dependencies: their APIs, versions, and behavior are exactly what these tools are for. You may trust your own knowledge for foundational, stable topics such as algorithms and language semantics. Exception: if the assignment names a specific algorithm the author may not know, confirm your understanding of it before relying on it, so that you and the author mean the same thing.',
         protocol,
-        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation. For modifying existing files, prefer edit-file (unified diff) over write-file (full rewrite) — read the file first to get correct line numbers and context for the diff.',
+        'Routing: prefer the package-registry tools for a dependency available in the current language; use web-search / view-web-page for anything not tied to a package (algorithms, stdlib details, changelogs, error messages, other languages); use calc to verify a computation. For modifying existing files: use replace-lines-in-file to change a range of lines, remove-lines-from-file to delete lines, append-file to add to the end, and write-file only for new files or full rewrites. Read the file first (find-in-file or git show) to get the correct line numbers before editing.',
         'Available commands:',
     ]
     for cmd in commands.values():
