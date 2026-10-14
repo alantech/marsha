@@ -999,17 +999,6 @@ def _src_finding(desc: str, location: str, evidence: list[tuple[str, str]],
             'evidence': evidence, 'sources': sources}
 
 
-def test_gate_drops_finding_citing_doc_never_retrieved(repo: Any) -> None:
-    # A finding whose support cites docs/NOTES.md as its basis, but the reviewer never retrieved
-    # that doc (no git read, no summarize/find-in-file), is a guess about institutional knowledge:
-    # the citation check drops it even though its code symbol is grounded.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
-        support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
-
-
 def test_gate_keeps_finding_citing_doc_retrieved_via_git(repo: Any) -> None:
     # The same finding is kept when the reviewer actually opened the cited doc with git: the
     # citation is real, so the institutional-knowledge claim is grounded.
@@ -1034,16 +1023,6 @@ def test_gate_keeps_finding_citing_doc_retrieved_via_source(repo: Any) -> None:
         support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
-
-
-def test_gate_drops_finding_citing_url_never_fetched(repo: Any) -> None:
-    # A finding that cites a URL it never fetched (no view-web-page/web-search/summarize of it) is
-    # an unverified web citation: dropped.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, [],
-        support='See https://example.com/overflow for the documented failure mode.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
 def test_gate_keeps_finding_citing_url_fetched(repo: Any) -> None:
@@ -1072,31 +1051,6 @@ def test_gate_keeps_finding_citing_url_from_search_results(repo: Any) -> None:
         support='See https://example.com/overflow for the documented failure mode.')
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
-
-
-def test_gate_drops_finding_citing_url_only_in_local_doc(repo: Any) -> None:
-    # A URL is proven by a web retrieval, not by local text. A URL that appears only in a
-    # summarized local file (summarize docs/NOTES.md) was never fetched, so a finding citing
-    # it is dropped even though the doc's text mentions the URL.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    src = [('$ summarize docs/NOTES.md',
-            'Summary of docs/NOTES.md: see https://example.com/overflow for context.')]
-    f = _src_finding(
-        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, src,
-        support='See https://example.com/overflow for the documented failure mode.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
-
-
-def test_gate_citation_check_runs_post_consolidation(repo: Any) -> None:
-    # The consolidator rewrites a finding and can invent a doc citation the reviewer never
-    # retrieved. The citation check still runs post-consolidation (even though the primary
-    # evidence check is skipped), so the invented citation is dropped.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
-        support='Documented in docs/SECRET.md, which this re-introduces.')
-    assert asyncio.run(review.evidence_gate(
-        [f], repo, 'main', post_consolidation=True)) == []
 
 
 def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:

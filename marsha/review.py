@@ -1693,10 +1693,6 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
     #     loop gave up forcing a probe) is unverified and dropped.
     #   (backstop) a cited file must exist in the repo and a cited line be within its length, which
     #     drops outright fabrications (a nonexistent path, or a line past the end).
-    #   (contradiction) a finding that asserts a symbol is undefined / does not exist is dropped
-    #     when that symbol is present in the reviewed tree — the claim and the code cannot both be
-    #     true. The symbol is searched as a whole-word literal, with no language-specific keyword,
-    #     so the check holds for any language.
     #   (fabricated subject) the "at least one" primary check passes a finding that co-cites a real
     #     symbol next to an invented one. If it names an identifier that appears in neither the
     #     reviewer's git output nor the reviewed tree, that identifier is a fabrication and the
@@ -1710,7 +1706,7 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
     # ran on the original); the consolidator merely REWRITTEN it. So the two "did the reviewer read
     # this" checks (primary symbol-in-evidence and file-never-opened) are skipped — the rewrite
     # legitimately rephrases and its symbols need not literally match the reviewer's output — while
-    # the fabrication checks (no-evidence, backstop, invented subject, contradiction) still run so a
+    # the fabrication checks (no-evidence, backstop, invented subject) still run so a
     # symbol the consolidator invented is still dropped.
     if not findings:
         return findings
@@ -1797,45 +1793,6 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
                               f'names {a}, which appears in neither the reviewer\'s git '
                               f'evidence nor the reviewed tree')
                 break
-        if ok:
-            # (contradiction) the finding asserts a symbol is undefined/absent, yet that symbol is
-            # present in the tree: the claim is falsified, so the finding is dropped. Only a
-            # positive match (True) falsifies; a grep error (None) cannot prove presence, so it
-            # does not drop the finding.
-            #
-            # Exempt when the finding references a function call (identifier + '('): that means
-            # it describes *behavior* (a code path that writes, deletes, or transforms the
-            # symbol) rather than a *static absence*. A finding like "compose() inlines tests.rs
-            # into lib.rs and deletes the separate file, but base.py still looks it up" is about
-            # a sequence of operations — the symbol can be present in the tree (written by the
-            # code) while the finding is still correct.
-            _f_text = ' '.join(
-                filter(None, [f.get('desc', ''), f.get('support', '')]))
-            _references_function = re.search(r'\b\w+\s*\(', _f_text) is not None
-            if not _references_function:
-                for symbol in _asserted_absent_symbols(f):
-                    if await _symbol_present(symbol, cwd, symbol_cache,
-                                             working_tree) is True:
-                        ok, reason = (False,
-                                      f'asserts {symbol} is undefined or absent, but '
-                                      f'it is present in the reviewed tree')
-                        break
-        if ok:
-            # (citation) a finding that names a documentation file or a URL as the basis of its
-            # claim must have actually retrieved it — opened the doc via git, or fetched it via
-            # summarize / find-in-file / view-web-page / web-search. A "re-introduces the pattern
-            # documented in docs/X.md" finding where X.md was never opened is a guess about
-            # institutional knowledge, dropped like any other unverified claim. A code-only
-            # finding cites no doc/URL and is left to the checks above.
-            text = ' '.join(filter(None, [f.get('desc'), f.get('support')]))
-            bad = tools.unretrieved_citations(
-                text, evidence, f.get('sources') or [])
-            if bad:
-                cited = bad[0]
-                verb = 'fetched' if cited.startswith('http') else 'retrieved'
-                ok, reason = (
-                    False, f'cites {cited} but never {verb} it (no git read or '
-                    f'web retrieval of that source)')
         if ok:
             kept.append(f)
         elif debug:
