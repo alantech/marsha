@@ -22,7 +22,7 @@ more (issue #204; Rust is the first follow-on, #183).
 """
 
 from marsha.meta import MarshaMeta
-from marsha.tools import agnostic_tool_commands, ToolContext, ToolCommand
+from marsha.tools import agnostic_tool_commands, RunRule, ToolContext, ToolCommand
 
 
 class LanguageBackend:
@@ -51,6 +51,14 @@ class LanguageBackend:
         (and where its environment exists) return True. The *mechanism* is
         backend-internal — this is the only installed-env hook the core calls."""
         return False
+
+    def run_whitelist(self) -> list[RunRule]:
+        """The fixed set of commands the implementor may run for this target
+        language, before repo introspection. Subclasses override to provide
+        their language's build/test/lint/install commands. The returned rules
+        are combined with repo-introspected commands (npm scripts, make
+        targets, ...) at diff time."""
+        return []
 
     def resolve_target_version(self, requested: str | None) -> str:
         """Validate a --target-version value for this target and return its normalized

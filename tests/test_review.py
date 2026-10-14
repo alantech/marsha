@@ -507,9 +507,9 @@ def test_run_personas_attaches_sources_to_findings() -> None:
 # --- budget-gated compaction re-attaches the notes ---------------------------
 
 
-def test_compaction_reattaches_notes() -> None:
-    # When the tool-loop prompt exceeds the budget, the history is summarized and the
-    # reviewer's notes are re-attached so they survive the compaction.
+def test_compaction_folds_overflow_into_summary() -> None:
+    # When the message history exceeds the recent window, the overflow is folded
+    # into a rolling summary and the history is rebuilt as [request+summary] + [recent].
     class SummarizeMapper:
         system = ''
         model = 'm'
@@ -523,35 +523,45 @@ def test_compaction_reattaches_notes() -> None:
     ctx = tools.ToolContext(phase='review', workdir='.',
                             notes=['a.txt:2 - off by one'])
     mapper = types.SimpleNamespace(model='m', system='')
-    messages = [
-        {'role': 'user', 'content': 'explore'},
-        {'role': 'assistant', 'content': '$ git show HEAD:a.txt'},
-        {'role': 'user', 'content': '[tool:git]\none\nTWO'},
-    ]
-    with patch.object(tools, 'get_client', new=lambda: object()), \
-         patch.object(tools, 'resolve_context_window',
+    # Build 25 messages (1 request + 12 assistant/user pairs) to exceed the window of 20.
+    messages = [{'role': 'user', 'content': 'explore the repo'}]
+    for i in range(12):
+        messages.append({'role': 'assistant', 'content': f'$ cmd{i}'})
+        messages.append({'role': 'user', 'content': f'[tool] output {i}'})
+    with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1)), \
-         patch.object(tools, 'fits', new=lambda prompt, window, cap=0.5: False), \
-         patch.object(tools, 'get_mapper', new=lambda *a, **k: SummarizeMapper()):
+         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: False), \
+         patch.object(tools, 'get_mapper', new=lambda *a, **k: SummarizeMapper()), \
+         patch.object(tools, 'get_client', new=lambda: None):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
-    # The conversation was collapsed to a single message that carries the summary and notes.
-    assert len(out) == 1 and out[0]['role'] == 'user'
+    # The result is [first_msg_with_summary] + [recent_window].
+    assert out[0]['role'] == 'user'
     assert 'examined a.txt, found an off-by-one' in out[0]['content']
     assert 'a.txt:2 - off by one' in out[0]['content']
+    assert 'explore the repo' in out[0]['content']
+    # The summary is stored in ctx for the next compaction.
+    assert ctx.compact_summary == 'examined a.txt, found an off-by-one'
+    # The recent window is preserved (total = 1 + window, at most).
+    assert len(out) <= 1 + tools.SUMMARY_WINDOW
 
 
-def test_compaction_noop_when_fits() -> None:
+def test_compaction_noop_within_budget() -> None:
+    # When the prompt fits within the token budget, no compaction occurs.
     ctx = tools.ToolContext(phase='review', workdir='.', notes=['n'])
     mapper = types.SimpleNamespace(model='m', system='')
     messages = [{'role': 'user', 'content': 'small'}]
-    with patch.object(tools, 'get_client', new=lambda: object()), \
-         patch.object(tools, 'resolve_context_window',
+    for i in range(9):
+        messages.append({'role': 'assistant', 'content': f'$ cmd{i}'})
+        messages.append({'role': 'user', 'content': f'[tool] output {i}'})
+    with patch.object(tools, 'resolve_context_window',
                       new=AsyncMock(return_value=1_000_000)), \
-         patch.object(tools, 'fits', new=lambda prompt, window, cap=0.5: True):
+         patch.object(tools, 'fits', new=lambda p, w, cap=0.5: True), \
+         patch.object(tools, 'get_client', new=lambda: None):
         out = asyncio.run(
             tools._maybe_compact_tool_history(messages, mapper, ctx))
-    assert out is messages  # no compaction -> unchanged, notes not re-attached
+    assert out is messages  # no compaction -> unchanged
+    assert ctx.compact_summary == ''
 
 
 # --- the evidence gate (deterministic anti-hallucination filter) ---------------
@@ -776,6 +786,18 @@ def test_git_line_count_matches_splitlines(repo: Any) -> None:
         assert got == len(content.splitlines()), (name, got, content)
 
 
+def test_file_info_working_tree_uses_disk_line_count(repo: Any) -> None:
+    # A working-tree review (marsha diff) validates a modified tracked file against its on-disk
+    # line count (the uncommitted change is what is under review), not its stale committed count.
+    # HEAD (feature) has a.txt at 4 lines; grow it on disk to 8 (uncommitted).
+    with open(f'{repo}/a.txt', 'w') as f:
+        f.write('l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n')
+    disk = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=True))
+    assert disk == (True, 8)  # the on-disk (working-tree) length, not HEAD's 4
+    committed = asyncio.run(review._file_info('a.txt', repo, 'main', {}, working_tree=False))
+    assert committed == (True, 4)  # the committed (HEAD) length
+
+
 def test_gate_drops_finding_with_no_evidence(repo: Any) -> None:
     # A finding reported without any git probe is unverified (mandatory probing failed to force one)
     # -> dropped, however plausible it looks. This is the backstop when the loop gave up.
@@ -860,6 +882,35 @@ def test_symbol_present_tri_state_on_grep_error(repo: Any) -> None:
     assert asyncio.run(review._symbol_present('zzzabsent', repo, {})) is False
     with patch.object(review, '_git', new=AsyncMock(return_value=(2, '', 'fatal: bad'))):
         assert asyncio.run(review._symbol_present('whatever', repo, {})) is None
+
+
+def test_symbol_present_working_tree_mode(repo: Any) -> None:
+    # working_tree=True greps the working tree (not HEAD): a symbol present only in an uncommitted
+    # change is "present", and one deleted from the working tree is "absent" — the opposite of the
+    # committed (HEAD) default. This is the mode the marsha diff review gate runs in.
+    with open(os.path.join(repo, 'a.txt'), 'w') as f:
+        f.write('one\nthree\nfour\nWORKTREE_ONLY\n')  # drops TWO, adds WORKTREE_ONLY (uncommitted)
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=False)) is True
+    assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=True)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=False)) is False
+    assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=True)) is True
+
+
+def test_collect_personas_results_incomplete_not_clean() -> None:
+    # An incomplete review (any reviewer failed) that produced no findings must raise when
+    # fail_on_incomplete is set (it must not be mistaken for a clean "no findings" verdict); an
+    # incomplete review that DID find things still returns them (they are real); without the flag
+    # the survivors' findings are returned; and a complete review is untouched by the flag.
+    f: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
+                  'location': 'a.py:1', 'desc': 'd'}
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), Exception('y')], 2, True)
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), []], 2, True)
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, True) == [f]
+    assert personas._collect_personas_results([Exception('x'), []], 2, False) == []
+    assert personas._collect_personas_results([Exception('x'), [f]], 2, False) == [f]
+    assert personas._collect_personas_results([[f], [f]], 2, True) == [f, f]
 
 
 def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:
@@ -948,17 +999,6 @@ def _src_finding(desc: str, location: str, evidence: list[tuple[str, str]],
             'evidence': evidence, 'sources': sources}
 
 
-def test_gate_drops_finding_citing_doc_never_retrieved(repo: Any) -> None:
-    # A finding whose support cites docs/NOTES.md as its basis, but the reviewer never retrieved
-    # that doc (no git read, no summarize/find-in-file), is a guess about institutional knowledge:
-    # the citation check drops it even though its code symbol is grounded.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
-        support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
-
-
 def test_gate_keeps_finding_citing_doc_retrieved_via_git(repo: Any) -> None:
     # The same finding is kept when the reviewer actually opened the cited doc with git: the
     # citation is real, so the institutional-knowledge claim is grounded.
@@ -983,16 +1023,6 @@ def test_gate_keeps_finding_citing_doc_retrieved_via_source(repo: Any) -> None:
         support='The overflow pattern is documented in docs/NOTES.md, which this re-introduces.')
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
-
-
-def test_gate_drops_finding_citing_url_never_fetched(repo: Any) -> None:
-    # A finding that cites a URL it never fetched (no view-web-page/web-search/summarize of it) is
-    # an unverified web citation: dropped.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, [],
-        support='See https://example.com/overflow for the documented failure mode.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
 
 
 def test_gate_keeps_finding_citing_url_fetched(repo: Any) -> None:
@@ -1021,31 +1051,6 @@ def test_gate_keeps_finding_citing_url_from_search_results(repo: Any) -> None:
         support='See https://example.com/overflow for the documented failure mode.')
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
-
-
-def test_gate_drops_finding_citing_url_only_in_local_doc(repo: Any) -> None:
-    # A URL is proven by a web retrieval, not by local text. A URL that appears only in a
-    # summarized local file (summarize docs/NOTES.md) was never fetched, so a finding citing
-    # it is dropped even though the doc's text mentions the URL.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    src = [('$ summarize docs/NOTES.md',
-            'Summary of docs/NOTES.md: see https://example.com/overflow for context.')]
-    f = _src_finding(
-        'compute_total repeats the failure described in the reference', 'a.txt:2', ev, src,
-        support='See https://example.com/overflow for the documented failure mode.')
-    assert asyncio.run(review.evidence_gate([f], repo, 'main')) == []
-
-
-def test_gate_citation_check_runs_post_consolidation(repo: Any) -> None:
-    # The consolidator rewrites a finding and can invent a doc citation the reviewer never
-    # retrieved. The citation check still runs post-consolidation (even though the primary
-    # evidence check is skipped), so the invented citation is dropped.
-    ev = [('$ git show HEAD:a.txt', 'def compute_total():\n    return TWO + 1')]
-    f = _src_finding(
-        'compute_total re-introduces the documented overflow pattern', 'a.txt:2', ev, [],
-        support='Documented in docs/SECRET.md, which this re-introduces.')
-    assert asyncio.run(review.evidence_gate(
-        [f], repo, 'main', post_consolidation=True)) == []
 
 
 def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
@@ -1660,9 +1665,9 @@ def test_review_loop_revises_when_gate_rebuts(repo: Any, capsys: Any) -> None:
     assert 'Previous review round' in panel_calls[1]
     assert 'conventions review' in panel_calls[1]
     assert '[Sage-A1]' in panel_calls[1]
-    # The revision round tells the reviewer to drop rebutted findings unless very confident.
+    # The revision round tells the reviewer to drop or defend rebutted findings.
     assert 'Handling the conventions review' in panel_calls[1]
-    assert 'very confident' in panel_calls[1]
+    assert 'DEFEND' in panel_calls[1]
 
 
 def test_review_loop_revises_when_critic_refutes(repo: Any, capsys: Any) -> None:

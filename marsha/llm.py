@@ -60,13 +60,15 @@ def parse_diagnosis(text: str) -> dict[str, str]:
     return {'fault': fault, 'reason': reason}
 
 
-async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int = 3, debug: bool = False) -> str:
+async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True,
+                         retries: int = 3, debug: bool = False) -> str:
     # Generate the oracle (the test suite) first, anchored to the spec. This is the
     # authoritative artifact the implementation will be judged against.
     b = backends.current()
     system = b.oracle_prompt(meta)
     # The run was invoked in a repository: give the context its workdir so the sandboxed read
-    # tools this phase advertises (list-tree, summarize, find-in-file) can actually read files.
+    # tools this phase advertises (list-tree, summarize, find-in-file) can
+    # actually read files.
     ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
     if tool_use:
         system += tools.tool_instructions(ctx)
@@ -100,7 +102,8 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True, retries: int =
             raise Exception('Failed to generate test suite', meta.filename)
 
 
-async def _run_editor(loop: str, meta: MarshaMeta, user_message: str, model: str | None, stats_stage: str | None, debug: bool = False, retries: int = 2, tool_ctx: tools.ToolContext | None = None) -> tuple[str | None, str]:
+async def _run_editor(loop: str, meta: MarshaMeta, user_message: str, model: str | None, stats_stage: str | None,
+                      debug: bool = False, retries: int = 2, tool_ctx: tools.ToolContext | None = None) -> tuple[str | None, str]:
     # One implementor (editor) iteration: load the loop's editor prompt, run it, and split its
     # response into (preamble, artifact). Returns (artifact, preamble), or (None, '') on failure.
     # `tool_ctx`, when set, enables the fake terminal for the editor (see marsha.tools).
@@ -154,10 +157,24 @@ You MUST preserve each kept finding's [Name-Label] exactly as it was given: do n
 Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
 - [Name-Label] SEVERITY <location> - <description>
 Output no prose, no numbering, no code fences, and no finding that was not in the input. If no findings should be kept, respond with exactly: NO FINDINGS
-'''
+ '''
+
+_DIFF_COMPACT_PROMPT = '''You are consolidating a list of code-review findings before the implementor addresses them.
+You are given findings, one per line, each referenced by a [Name-Label]. Different reviewers (the names) may have raised the same point.
+This is an internal implementation review: the implementor will act on every finding that survives. Be conservative — only drop findings that are clearly redundant.
+Reduce the list by doing ONLY the following:
+1. When two or more NIT findings make the same point (same file, same pattern, same suggestion), keep ONLY the single most detailed one and drop the rest. The kept one should be clear enough that the implementor can recognize the pattern applies to other instances as well.
+2. When two findings make contradictory claims about the same code, keep only the one grounded in the actual code and drop the other.
+Do NOT drop MAJOR or MINOR findings regardless of how theoretical or stylistic they appear. Do NOT drop a NIT that makes a unique point not made by any other finding. When in doubt, keep it.
+You MUST preserve each kept finding's [Name-Label] exactly as it was given: do not rename, renumber, or invent labels. The reduced list may therefore skip some letter/number combinations.
+Respond with ONLY the reduced list, one finding per line, in exactly the format you were given:
+- [Name-Label] SEVERITY <location> - <description>
+Output no prose, no numbering, no code fences, and no finding that was not in the input. If no findings should be kept, respond with exactly: NO FINDINGS
+ '''
 
 
-def _trim_findings_to_budget(findings: list[Finding], fits_check: Callable[[list[Finding]], bool]) -> list[Finding]:
+def _trim_findings_to_budget(findings: list[Finding], fits_check: Callable[[
+                             list[Finding]], bool]) -> list[Finding]:
     # Deterministic last-resort reduction: drop findings from lowest to highest severity until
     # fits_check passes (or nothing is left). Guarantees the editor never receives an over-budget
     # prompt unless even the highest-severity findings alone exceed it.
@@ -173,17 +190,17 @@ async def consolidate_findings(context_block: str, findings: list[Finding],
                                model: str | None, debug: bool = False,
                                retries: int = 3, allow_empty: bool = False,
                                reasoning_effort: str | None = None,
-                               seed: int | None = None) -> list[Finding]:
-    # An LLM pass that shrinks a findings list before it is posted. It drops findings that are
-    # not real defects (style, theoretical scale/robustness, micro-opts) along with resolved or
-    # redundant ones, and merges cross-reviewer duplicates (keeping the most detailed
-    # [Name-Label]). Survivors keep their labels so cross-references stay valid. Tries up to
-    # `retries` times, keeping the smallest well-formed result strictly smaller than the input;
-    # otherwise it returns the input unchanged (we never return a larger list). `allow_empty`
-    # permits reducing to zero (a clean change posts nothing); it stays False for budget
-    # compaction, where dropping every finding would lose the work. `context_block` is the
-    # surrounding context (a Marsha meta for the optimize loops; a note for `marsha review`).
-    gpt = get_mapper(_COMPACT_PROMPT, n_results=1,
+                               seed: int | None = None,
+                               internal: bool = False) -> list[Finding]:
+    # An LLM pass that shrinks a findings list before it is posted or acted upon. For
+    # external reviews (`internal=False`), it aggressively drops non-defects (style,
+    # theoretical concerns, micro-opts). For internal implementation reviews
+    # (`internal=True`), it only merges repetitive NITs — all MAJOR and MINOR findings
+    # survive so the implementor can address them. Tries up to `retries` times, keeping
+    # the smallest well-formed result strictly smaller than the input; otherwise it
+    # returns the input unchanged. `context_block` is the surrounding context.
+    prompt = _DIFF_COMPACT_PROMPT if internal else _COMPACT_PROMPT
+    gpt = get_mapper(prompt, n_results=1,
                      stats_stage='third_stage', model=model, label='compact',
                      reasoning_effort=reasoning_effort, seed=seed)
     user = f'''{context_block}
@@ -199,7 +216,8 @@ async def consolidate_findings(context_block: str, findings: list[Finding],
             compacted = parse_compacted_findings(text)
             # A valid shrink is within the floor and strictly smaller than the ORIGINAL input;
             # tracking against the input (not the current best) lets a later non-empty shrink be
-            # recorded even after an earlier attempt already collapsed best to empty.
+            # recorded even after an earlier attempt already collapsed best to
+            # empty.
             if floor <= len(compacted) < len(findings):
                 if len(compacted) < len(best):
                     best = compacted
@@ -218,17 +236,21 @@ async def consolidate_findings(context_block: str, findings: list[Finding],
     return best
 
 
-async def compact_findings(meta: MarshaMeta, findings: list[Finding], model: str | None, debug: bool = False, retries: int = 2, prior_context: str = '') -> list[Finding]:
-    # Shrink the findings list to fit the editor's context budget (see consolidate_findings).
+async def compact_findings(meta: MarshaMeta, findings: list[Finding], model: str | None,
+                           debug: bool = False, retries: int = 2, prior_context: str = '') -> list[Finding]:
+    # Shrink the findings list to fit the editor's context budget (see
+    # consolidate_findings).
     return await consolidate_findings(
         f'{format_marsha_for_llm(meta)}\n{prior_context}', findings, model, debug, retries)
 
 
-async def _budgeted_findings(meta: MarshaMeta, findings: list[Finding], build: Callable[[list[Finding]], str], model: str | None, args: Any, debug: bool = False) -> list[Finding]:
+async def _budgeted_findings(meta: MarshaMeta, findings: list[Finding], build: Callable[[
+                             list[Finding]], str], model: str | None, args: Any, debug: bool = False) -> list[Finding]:
     # Ensure the editor prompt build(findings) fits the context budget. If not, compact the
     # findings (LLM), then deterministically trim by severity, so the editor never receives an
     # over-budget prompt. If the budget cannot be determined (e.g. no client in a test harness),
-    # skip budgeting and send the findings as-is. Returns the (possibly reduced) findings.
+    # skip budgeting and send the findings as-is. Returns the (possibly
+    # reduced) findings.
     override = getattr(args, 'context_window', None)
     cap = getattr(args, 'context_cap', 0.5)
     try:
@@ -261,7 +283,8 @@ def _oracle_review_message(meta: MarshaMeta, oracle_md: str) -> str:
 {oracle_md}'''
 
 
-def _oracle_editor_message(meta: MarshaMeta, oracle_md: str, findings: list[Finding]) -> str:
+def _oracle_editor_message(
+        meta: MarshaMeta, oracle_md: str, findings: list[Finding]) -> str:
     return f'''{format_marsha_for_llm(meta)}
 
 # The current test suite (oracle)
@@ -273,9 +296,11 @@ def _oracle_editor_message(meta: MarshaMeta, oracle_md: str, findings: list[Find
 {format_findings(findings)}'''
 
 
-async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug: bool = False) -> str:
+async def optimize_test_suite(
+        meta: MarshaMeta, oracle_md: str, args: Any, debug: bool = False) -> str:
     # Per-phase inner loop for the oracle: run the reviewer personas, hand their findings to the
-    # editor (Wren), and iterate until there are no actionable findings or the suite stabilizes.
+    # editor (Wren), and iterate until there are no actionable findings or the
+    # suite stabilizes.
     level = args.optimize
     if level <= 0:
         return oracle_md
@@ -291,7 +316,8 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug
         log(f'oracle loop iteration {i + 1}/{level}: running reviewers')
         if tool_ctx is not None:
             # The editor applies the prior iteration's findings and changes the files, so a
-            # summarize/find-in-file cached before the edit would describe the old content.
+            # summarize/find-in-file cached before the edit would describe the
+            # old content.
             tool_ctx.read_cache = {}
         user_message = _oracle_review_message(meta, oracle_md)
         if i > 0:
@@ -330,9 +356,11 @@ async def optimize_test_suite(meta: MarshaMeta, oracle_md: str, args: Any, debug
     return oracle_md
 
 
-async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, tool_use: bool = True, retries: int = 3, debug: bool = False) -> list[str]:
+async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int,
+                             tool_use: bool = True, retries: int = 3, debug: bool = False) -> list[str]:
     # Generate implementations against the (already generated) oracle. The implementation
-    # must satisfy the spec AND pass the provided test suite; on any conflict the spec wins.
+    # must satisfy the spec AND pass the provided test suite; on any conflict
+    # the spec wins.
     b = backends.current()
     system = b.impl_prompt(meta)
     ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
@@ -369,10 +397,12 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int, t
                                   stats_stage='first_stage', label='impl-gen')
         reses = await gpt_gen_code.run(user_request)
         if isinstance(reses, str):
-            # run() returns a bare string for a single result; normalize to a list so -n 1 works.
+            # run() returns a bare string for a single result; normalize to a
+            # list so -n 1 works.
             reses = [reses]
     # The output should be a valid list of implementation Markdown documents (code + optional
-    # manifest). Parse each one and keep the valid docs; if none are valid, retry.
+    # manifest). Parse each one and keep the valid docs; if none are valid,
+    # retry.
     try:
         mds: list[str] = []
         for doc in reses:
@@ -409,7 +439,8 @@ def _impl_review_message(meta: MarshaMeta, oracle: str, code: str) -> str:
 {b.code_block(code)}'''
 
 
-def _impl_editor_message(meta: MarshaMeta, oracle: str, code: str, findings: list[Finding]) -> str:
+def _impl_editor_message(meta: MarshaMeta, oracle: str,
+                         code: str, findings: list[Finding]) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -426,10 +457,12 @@ def _impl_editor_message(meta: MarshaMeta, oracle: str, code: str, findings: lis
 {format_findings(findings)}'''
 
 
-async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str], debug: bool = False) -> None:
+async def optimize_implementation(
+        args: Any, meta: MarshaMeta, files: list[str], debug: bool = False) -> None:
     # Per-phase inner loop for the implementation, run after the candidate already passes the
     # oracle. Reviewer personas propose findings; the editor (Cody) applies them; the guardrail
-    # re-runs the oracle and reverts any change that regresses, so the loop can never ship broken.
+    # re-runs the oracle and reverts any change that regresses, so the loop
+    # can never ship broken.
     level = args.optimize
     if level <= 0:
         return
@@ -457,7 +490,8 @@ async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str],
         log(f'impl loop iteration {i + 1}/{level}: running reviewers')
         if tool_ctx is not None:
             # The editor applies the prior iteration's findings and changes the files, so a
-            # summarize/find-in-file cached before the edit would describe the old content.
+            # summarize/find-in-file cached before the edit would describe the
+            # old content.
             tool_ctx.read_cache = {}
         current_code = cast(str, read_file(code_file))
         user_message = _impl_review_message(meta, oracle, current_code)
@@ -509,7 +543,8 @@ async def optimize_implementation(args: Any, meta: MarshaMeta, files: list[str],
     return
 
 
-async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries: int = 3, debug: bool = False) -> None:
+async def fix_file(marsha_filename: str, filename: str,
+                   lint_text: str, retries: int = 3, debug: bool = False) -> None:
     b = backends.current()
     code = cast(str, read_file(filename))
     gpt_fix = get_mapper(b.lint_fix_prompt(filename),
@@ -539,7 +574,8 @@ async def fix_file(marsha_filename: str, filename: str, lint_text: str, retries:
             raise Exception('Failed to generate code', lint_text)
 
 
-async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False) -> None:
+async def lint_and_fix_files(
+        marsha_filename: str, files: list[str], max_depth: int = 4, debug: bool = False) -> None:
     if max_depth == 0:
         raise Exception('Failed to fix code', files)
     # The backend lints (style + semantics) with the target toolchain; we lint to catch coarse
@@ -562,7 +598,8 @@ async def lint_and_fix_files(marsha_filename: str, files: list[str], max_depth: 
     await lint_and_fix_files(marsha_filename, files, max_depth - 1, debug)
 
 
-async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str, retries: int = 2) -> dict[str, str]:
+async def diagnose_failure(meta: MarshaMeta, code: str, tests: str,
+                           results: str, retries: int = 2) -> dict[str, str]:
     # Read-only: decide whether the implementation or a test is at fault. Uses the standard
     # (cheap) model, since the safety property is enforced structurally, not by this call.
     b = backends.current()
@@ -586,13 +623,17 @@ async def diagnose_failure(meta: MarshaMeta, code: str, tests: str, results: str
     except Exception:
         if retries > 0:
             return await diagnose_failure(meta, code, tests, results, retries - 1)
-        # If diagnosis keeps failing, fall back to the common case (fix the implementation)
-        return {'fault': 'implementation', 'reason': 'diagnosis unavailable; defaulting to fixing the implementation'}
+        # If diagnosis keeps failing, fall back to the common case (fix the
+        # implementation)
+        return {'fault': 'implementation',
+                'reason': 'diagnosis unavailable; defaulting to fixing the implementation'}
 
 
-async def fix_implementation(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False) -> str:
+async def fix_implementation(meta: MarshaMeta, code: str, tests: str,
+                             results: str, reason: str, retries: int = 3, debug: bool = False) -> str:
     # Edit ONLY the implementation. The oracle is provided as fixed context and is never
-    # part of the editable output, so this path structurally cannot touch the test suite.
+    # part of the editable output, so this path structurally cannot touch the
+    # test suite.
     b = backends.current()
     gpt_fix = get_mapper(b.fix_impl_prompt(meta), model=resolve_strong_model(),
                          reasoning_effort=STRONG_REASONING_EFFORT,
@@ -629,10 +670,12 @@ The implementation is at fault: {reason}'''
             raise Exception('Failed to fix implementation', meta.filename)
 
 
-async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str, reason: str, retries: int = 3, debug: bool = False) -> str:
+async def correct_test(meta: MarshaMeta, code: str, tests: str, results: str,
+                       reason: str, retries: int = 3, debug: bool = False) -> str:
     # The "punt back": the only path that may edit the oracle, and only spec-anchored. It must
     # justify every change by the assignment and must never weaken a test that is actually
-    # correct (so a misrouted diagnosis degrades to a no-op rather than a bent test).
+    # correct (so a misrouted diagnosis degrades to a no-op rather than a bent
+    # test).
     b = backends.current()
     gpt_fix = get_mapper(b.correct_test_prompt(meta), model=resolve_strong_model(),
                          reasoning_effort=STRONG_REASONING_EFFORT,
@@ -675,7 +718,8 @@ def _code_from_test_md(md: str) -> str:
     return m.group(1) if m else md
 
 
-def _correction_review_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str) -> str:
+def _correction_review_message(
+        meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str) -> str:
     b = backends.current()
     return f'''{format_marsha_for_llm(meta)}
 
@@ -696,7 +740,8 @@ def _correction_review_message(meta: MarshaMeta, code: str, orig_test: str, corr
 A test is at fault: {reason}'''
 
 
-def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str, corrected_code: str, reason: str, findings: list[Finding]) -> str:
+def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str,
+                               corrected_code: str, reason: str, findings: list[Finding]) -> str:
     return _correction_review_message(
         meta, code, orig_test, corrected_code, reason) + f'''
 
@@ -705,7 +750,8 @@ def _correction_editor_message(meta: MarshaMeta, code: str, orig_test: str, corr
 {format_findings(findings)}'''
 
 
-async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str, reason: str, args: Any, debug: bool = False, subdir: str | None = None) -> str:
+async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, corrected_md: str,
+                                   reason: str, args: Any, debug: bool = False, subdir: str | None = None) -> str:
     # Third per-phase loop: reviewer personas check the test correction's reasoning and
     # spec-alignment before it is written, so the only path that can bend the oracle is itself
     # spec-anchored and double-checked. The editor (Rex) applies the findings.
@@ -728,7 +774,8 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
         log(f'correction loop iteration {i + 1}/{level}: running reviewers')
         if tool_ctx is not None:
             # The editor applies the prior iteration's findings and changes the files, so a
-            # summarize/find-in-file cached before the edit would describe the old content.
+            # summarize/find-in-file cached before the edit would describe the
+            # old content.
             tool_ctx.read_cache = {}
         corrected_code = _code_from_test_md(corrected_md)
         user_message = _correction_review_message(
@@ -772,7 +819,8 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
     return corrected_md
 
 
-async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False, args: Any = None) -> None:
+async def test_and_fix_files(
+        meta: MarshaMeta, files: list[str], retries: int = 4, debug: bool = False, args: Any = None) -> None:
     if retries == 0:
         raise Exception('Failed to fix code', meta.filename)
     b = backends.current()
@@ -817,11 +865,13 @@ async def test_and_fix_files(meta: MarshaMeta, files: list[str], retries: int = 
                 meta, code, test, test_results, verdict['reason'], debug=debug)
             write_files_from_markdown(fixed, subdir=subdir)
         # Re-run the tests recursively; the recursion ejects when they pass. The file paths are
-        # stable across passes (same directory), so pass the original file list down unchanged.
+        # stable across passes (same directory), so pass the original file list
+        # down unchanged.
         return await test_and_fix_files(meta, files, retries - 1, debug, args)
 
 
-async def generate_code(args: Any, meta: MarshaMeta, n_results: int, debug: bool) -> list[tuple[str, str]]:
+async def generate_code(args: Any, meta: MarshaMeta,
+                        n_results: int, debug: bool) -> list[tuple[str, str]]:
     t1 = time.time()
     b = backends.current()
     print(f'Generating {b.id} code...')
@@ -843,7 +893,8 @@ async def generate_code(args: Any, meta: MarshaMeta, n_results: int, debug: bool
         # against it. Each candidate is (impl, oracle); the oracle is the single canonical string
         # every impl is written against, and the backend composes them into the on-disk layout
         # at write time, so the impl path can never touch the oracle. With tool use on, both
-        # stages may look external APIs up through the fake terminal instead of guessing.
+        # stages may look external APIs up through the fake terminal instead of
+        # guessing.
         tool_use = not args.no_tools
         oracle = await gpt_test_suite(meta, tool_use, debug=debug)
         log(f'oracle test suite generated ({len(oracle)} chars)')
@@ -870,7 +921,8 @@ async def generate_code(args: Any, meta: MarshaMeta, n_results: int, debug: bool
     return cands
 
 
-async def review_and_fix(args: Any, meta: MarshaMeta, files: list[str], debug: bool = False) -> None:
+async def review_and_fix(args: Any, meta: MarshaMeta,
+                         files: list[str], debug: bool = False) -> None:
     t_ssi = time.time()
     print('Parsing generated code...')
     log(f'second stage: {meta.filename} (lint & fix)')

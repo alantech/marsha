@@ -136,3 +136,33 @@ class MarshaStats:
 
 
 stats = MarshaStats()
+
+# Global cost accumulator for commands that don't use the staged MarshaStats
+# (diff, review, refine). Updated by the mappers on every LLM call.
+_global_cost: float = 0.0
+_global_in_tokens: int = 0
+_global_out_tokens: int = 0
+
+
+def record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    in_price, out_price = price_for(model)
+    global _global_cost, _global_in_tokens, _global_out_tokens
+    _global_in_tokens += prompt_tokens
+    _global_out_tokens += completion_tokens
+    _global_cost += (prompt_tokens * in_price +
+                     completion_tokens * out_price) / 1024
+
+
+def global_cost() -> float:
+    return _global_cost
+
+
+def global_tokens() -> tuple[int, int]:
+    return _global_in_tokens, _global_out_tokens
+
+
+def format_cost() -> str:
+    in_tok, out_tok = global_tokens()
+    cost = global_cost()
+    return (f'Total cost: ${round(cost, 2)} '
+            f'({in_tok:,} input, {out_tok:,} output tokens)')

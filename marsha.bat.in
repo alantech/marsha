@@ -10,4 +10,6 @@ if not exist "%MARSHA_VENV%\Scripts\python.exe" (
     echo marsha: rebuild it with install.bat or set MARSHA_VENV to its location 1>&2
     exit /b 1
 )
-"%MARSHA_VENV%\Scripts\python.exe" -m marsha %*
+rem -P (PEP 670) keeps the current directory off sys.path so `import marsha` uses the installed
+rem package in this venv, not a marsha/ directory in the working directory.
+"%MARSHA_VENV%\Scripts\python.exe" -P -m marsha %*

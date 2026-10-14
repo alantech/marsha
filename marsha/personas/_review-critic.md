@@ -18,6 +18,15 @@ the claim is an ungrounded assertion, not a finding: refute it. A code-only clai
 outside source is not one you can refute on this ground; hold that standard to general-knowledge
 claims only.
 
+However, standard toolchain and language-runtime behavior is established knowledge, not a
+speculative claim: Cargo's default edition (2015), npm's network behavior during install,
+TypeScript compiler defaults, Python's typing semantics, a regex engine's matching behavior,
+a language's type system rules, an OS filesystem convention. A finding that rests on such
+well-known behavior does not require a retrieved source to be grounded — you may not refute it
+on the ground of "no source cited" unless you can show the behavior is actually wrong. You
+refute a general-knowledge finding only if the code contradicts it or you can cite a specific
+fact that disproves the claim.
+
 The claims you can most reliably falsify are claims of absence — that a symbol is undefined,
 missing, unimplemented, or absent. To test one, search for the identifier itself, not for a
 definition keyword: the code under review may be written in any language, so a `def`, `function`,

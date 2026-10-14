@@ -77,6 +77,38 @@ def test_run_subprocess_bounded_output() -> None:
     assert err == ''
 
 
+def test_run_subprocess_bounded_merged_stderr() -> None:
+    # exec and validation merge stderr into stdout (stderr=STDOUT); the bounded reader must drain
+    # stdout (the only pipe) rather than assert on the absent stderr, and report err as empty.
+    async def scenario() -> tuple[str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            'sh', '-c', 'printf out; printf err 1>&2',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        return await run_subprocess(proc, timeout=10, max_bytes=1000)
+
+    out, err = asyncio.run(scenario())
+    assert out == 'outerr'
+    assert err == ''
+
+
+def test_run_subprocess_bounded_merged_stderr_overflow_fails() -> None:
+    # The merged stream is still bounded: a child whose combined (stdout + merged stderr) output
+    # exceeds the limit fails with the overflow error and is reaped, as with separate pipes.
+    async def scenario() -> tuple[str, int | None]:
+        proc = await asyncio.create_subprocess_exec(
+            'head', '-c', '200', '/dev/zero',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            await run_subprocess(proc, timeout=10, max_bytes=100)
+            return ('ok', None)
+        except Exception:
+            return ('overflow', proc.returncode)
+
+    kind, returncode = asyncio.run(scenario())
+    assert kind == 'overflow'
+    assert returncode is not None
+
+
 def test_run_subprocess_bounded_drains_stderr_concurrently() -> None:
     # stderr is drained while stdout is read: a child that fills the stderr pipe (well over
     # the 64KB buffer) while still writing stdout must not deadlock the bounded reader.

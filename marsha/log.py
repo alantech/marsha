@@ -45,6 +45,13 @@ def _timestamp() -> str:
     return f'{hours:d}:{minutes:02d}:{seconds:02d}'
 
 
+def debug_print(message: str) -> None:
+    # A timestamped line on the stdout debug channel (-d). The +H:MM:SS prefix
+    # shares the process-start clock with the stderr trace lines so a run's
+    # timeline can be reconstructed from both streams.
+    print(f'[{_timestamp()}] {message}', flush=True)
+
+
 def _emit(message: str) -> None:
     # Write a timestamped line to stderr and flush immediately. stderr is unbuffered and
     # survives the block-buffering that hides stdout when it is piped to a file, so this is the

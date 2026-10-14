@@ -46,6 +46,19 @@ def _fixed_context_window() -> Generator[None, None, None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _clean_spec_gate() -> Generator[None, None, None]:
+    # The lock path re-checks the locked design against the spec gate (analyze_spec). The
+    # chat-loop tests script the gate to return a clean verdict by default, so they exercise the
+    # lock/endpoint/propose flow without a real LLM call; a test that wants a non-clean gate
+    # overrides this with its own patch (a nested patch takes precedence and restores this
+    # default on exit).
+    async def _clean(spec_text: Any, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': [], 'errors': []}
+    with patch.object(refine, 'analyze_spec', new=_clean):
+        yield
+
+
 def _args(**kw: Any) -> Any:
     base = dict(source=None, issue=None, linear=None, check=False,
                 max_turns=40, dry_run=False, target='python',
@@ -502,6 +515,40 @@ def test_parse_locked_output_lock_only_inside_payload_is_ignored() -> None:
 def test_parse_locked_output_issue_missing_body() -> None:
     assert refine.parse_locked_output(
         '[[DESIGN:LOCKED]]\n[[NEW:TITLE]]\nT', 'issue') is None
+
+
+def test_render_gh_issue_does_not_double_the_issue_header() -> None:
+    # A stored title that already carries the `Issue #N:` header (a lock turn copied it in)
+    # must not be prefixed again: every render of the issue (the refine chat seed, the spec
+    # text) would otherwise show a doubled header.
+    rendered = refine.render_gh_issue(
+        {'title': 'Issue #183: Support X', 'body': 'The body.', 'comments': []}, 183)
+    assert rendered.startswith('Issue #183: Support X')
+    assert 'Issue #183: Issue #183:' not in rendered
+    # A normal title (no header baked in) is prefixed as before.
+    rendered2 = refine.render_gh_issue(
+        {'title': 'Support X', 'body': 'The body.', 'comments': []}, 183)
+    assert rendered2.startswith('Issue #183: Support X')
+
+
+def test_apply_issue_strips_the_issue_header_from_the_title() -> None:
+    # A lock turn can copy the rendered `Issue #N:` header line into the rewritten
+    # [[NEW:TITLE]]: the header is stripped before the title is stored, or it would be baked
+    # into the issue (and carried as a bogus title line by the design gate and the implementor).
+    calls: list[Any] = []
+
+    async def fake_gh(*a: Any, **k: Any) -> Any:
+        calls.append(a)
+        return (0, '', '')
+
+    with patch.object(refine, '_gh', new=fake_gh):
+        asyncio.run(refine._apply_issue(183, 'Issue #183: Support X', 'body', None))
+    assert calls[0][:5] == ('issue', 'edit', '183', '--title', 'Support X')
+    # A title without the header is stored unchanged.
+    calls.clear()
+    with patch.object(refine, '_gh', new=fake_gh):
+        asyncio.run(refine._apply_issue(183, 'Support X', 'body', None))
+    assert calls[0][:5] == ('issue', 'edit', '183', '--title', 'Support X')
 
 
 def test_is_bail_token() -> None:
@@ -1421,6 +1468,83 @@ def test_run_refine_chat_accepts_a_subsection_mrsh_lock(capsys: Any) -> None:
     assert res.status == 'locked'
     assert res.payload == {'spec': _mrsh_spec_subsections('subsection spec')}
     assert 'Show the proposal now?' in capsys.readouterr().out
+
+
+# --- spec gate re-check on the locked design ----------------------------------
+
+
+def test_run_refine_chat_rechecks_the_gate_until_it_clears(capsys: Any) -> None:
+    # The chat model's "we are done" is not the spec gate's verdict: a lock that still has open
+    # ambiguities is fed back to the chat (bounded), and only a re-lock the gate clears is shown
+    # as a proposal and locked. Here the first lock fails the gate and the second clears it.
+    draft = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('first draft')
+    final = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('final spec')
+    calls = {'n': 0}
+
+    async def gate(spec_text: Any, **k: Any) -> Any:
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return {'compilable': True, 'ambiguities': ['the spec leaves X open'],
+                    'errors': []}
+        return {'compilable': True, 'ambiguities': [], 'errors': []}
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([draft, final])), \
+         patch.object(refine, 'analyze_spec', new=gate):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'locked'
+    assert res.payload == {'spec': _mrsh_spec('final spec')}
+    assert calls['n'] == 2  # the gate ran on both drafts
+    out = capsys.readouterr().out
+    assert 'first draft' not in out  # the rejected draft was never shown as a proposal
+    assert 'Show the proposal now?' in out
+
+
+def test_run_refine_chat_not_locked_when_the_gate_never_clears(capsys: Any) -> None:
+    # Once the re-check budget is spent and the gate still finds open ambiguities, the session
+    # ends without locking: the source is not rewritten and no "design-locked" claim is made.
+    limit = refine.REFINE_LOCK_RECHECK_LIMIT
+    locks = ['[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec(f'draft {i}')
+             for i in range(limit + 1)]
+
+    async def always_open(spec_text: Any, **k: Any) -> Any:
+        return {'compilable': True, 'ambiguities': ['still open'], 'errors': []}
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper(locks)), \
+         patch.object(refine, 'analyze_spec', new=always_open):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None,
+            max_turns=limit + 3, read_line=lambda: 'y'))
+    assert res.status == 'not-locked'
+    assert res.payload is None
+    assert 'not locked' in res.detail
+    assert 'Show the proposal now?' not in capsys.readouterr().out
+
+
+def test_run_refine_chat_gate_failure_is_a_handled_error(capsys: Any) -> None:
+    # A spec-gate call that fails (an exhausted provider, a bad response) is fail-closed: the
+    # design is not locked and the source is not modified — the chat never claims "locked" on a
+    # gate it could not run.
+    draft = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('draft')
+
+    async def boom(spec_text: Any, **k: Any) -> Any:
+        raise Exception('provider down')
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([draft])), \
+         patch.object(refine, 'analyze_spec', new=boom):
+        res = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=5,
+            read_line=lambda: 'y'))
+    assert res.status == 'error'
+    assert res.payload is None
+    assert 'provider down' in res.detail
 
 
 # --- spec endpoint verification -----------------------------------------------

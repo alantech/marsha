@@ -49,6 +49,9 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
                      f'started at {prettify_time_delta(t1 - t0)}, '
                      f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
             log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} (model={model})')
+            if out.usage is not None:
+                from marsha.stats import record_usage
+                record_usage(model, out.usage.prompt_tokens, out.usage.completion_tokens)
             return out
         except openai.BadRequestError as e:
             if getattr(e, 'code', None) == 'context_length_exceeded':

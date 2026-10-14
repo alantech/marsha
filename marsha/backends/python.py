@@ -36,8 +36,8 @@ from marsha.backends.base import LanguageBackend
 from marsha.meta import MarshaMeta, void_note
 from marsha.tools import (
     ToolCommand, ToolContext, CATEGORY_REGISTRY, CATEGORY_INSTALLED_ENV,
-    http_get, parse_ddg_html, html_to_text, assert_public_url, truncate, run_in_python,
-    SEARCH_RESULT_COUNT, SNIPPET_CHAR_LIMIT, RESULT_CHAR_LIMIT,
+    RunRule, http_get, parse_ddg_html, html_to_text, assert_public_url, truncate,
+    run_in_python, SEARCH_RESULT_COUNT, SNIPPET_CHAR_LIMIT, RESULT_CHAR_LIMIT,
 )
 from marsha.utils import read_file, write_file, run_subprocess
 
@@ -422,6 +422,25 @@ class PythonBackend(LanguageBackend):
         # The installed-env tools need the candidate venv (a function of the
         # candidate's working dir) to exist on disk.
         return bool(ctx.workdir) and _venv_usable(venv_python_for(ctx.workdir))
+
+    def run_whitelist(self) -> list[RunRule]:
+        # Python's fixed command set: test runners, linters, formatters, and
+        # the package installer. `python -c` and arbitrary `python <script>`
+        # are deliberately absent: the implementor writes files with
+        # write-file and runs them via the project's test runner, not via
+        # inline code.
+        return [
+            RunRule(('pytest',), 'pytest [args]', network=False),
+            RunRule(('python', '-m', 'pytest'), 'python -m pytest [args]', network=False),
+            RunRule(('python', '-m', 'pip', 'install'),
+                    'python -m pip install <package>', network=True),
+            RunRule(('pip', 'install'), 'pip install <package>', network=True),
+            RunRule(('mypy',), 'mypy [args]', network=False),
+            RunRule(('ruff', 'check'), 'ruff check [args]', network=False),
+            RunRule(('ruff', 'format'), 'ruff format [args]', network=False),
+            RunRule(('autopep8',), 'autopep8 [args]', network=False),
+            RunRule(('flake8',), 'flake8 [args]', network=False),
+        ]
 
     # --- naming / contract ---------------------------------------------------
 
