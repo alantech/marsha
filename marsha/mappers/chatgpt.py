@@ -10,7 +10,8 @@ from marsha.config import is_local_backend, resolve_model, resolve_strong_model
 from marsha.log import log, progress
 from marsha.llm_client import get_client
 from marsha.mappers.base import BaseMapper, ContextOverflowError
-from marsha.stats import stats
+from marsha.stats import (ensure_price_limit, ensure_usage_available,
+                          record_usage, stats)
 from marsha.utils import prettify_time_delta
 
 # Get time at startup to make human legible "start times" in the logs
@@ -41,18 +42,9 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
         query['max_completion_tokens'] = query.pop('max_tokens')
     log(f'-> {label}: request sent (model={model}, n={n_results})')
     while True:
+        ensure_price_limit(query['model'])
         try:
             out = cast(ChatCompletion, await client.chat.completions.create(**query))
-            t2 = time.time()
-            total_tokens = out.usage.total_tokens if out.usage is not None else 9001
-            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
-                     f'started at {prettify_time_delta(t1 - t0)}, '
-                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
-            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} (model={model})')
-            if out.usage is not None:
-                from marsha.stats import record_usage
-                record_usage(model, out.usage.prompt_tokens, out.usage.completion_tokens)
-            return out
         except openai.BadRequestError as e:
             if getattr(e, 'code', None) == 'context_length_exceeded':
                 # A context overflow is a prompt-size problem, not a transient one. On a real
@@ -62,7 +54,8 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
                 if not is_local_backend() and query['model'] != resolve_strong_model():
                     query['model'] = resolve_strong_model()
                 else:
-                    raise ContextOverflowError(f'prompt exceeds context window: {e}')
+                    raise ContextOverflowError(
+                        f'prompt exceeds context window: {e}')
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
@@ -72,6 +65,20 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
             if max_tries == 0:
                 raise e
             time.sleep(3 / max_tries)
+        else:
+            t2 = time.time()
+            total_tokens = out.usage.total_tokens if out.usage is not None else 9001
+            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
+                     f'started at {prettify_time_delta(t1 - t0)}, '
+                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
+            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} '
+                f'(model={query["model"]})')
+            if out.usage is not None:
+                record_usage(query['model'], out.usage.prompt_tokens,
+                             out.usage.completion_tokens)
+            else:
+                ensure_usage_available()
+            return out
         if max_tries == 0:
             raise Exception('Could not execute chat completion')
 

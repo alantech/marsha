@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 from typing import Any
 
 from marsha.utils import run_subprocess, write_file_no_follow
@@ -107,6 +108,21 @@ def test_run_subprocess_bounded_merged_stderr_overflow_fails() -> None:
     kind, returncode = asyncio.run(scenario())
     assert kind == 'overflow'
     assert returncode is not None
+
+
+def test_run_subprocess_tail_mode_keeps_verbose_process_bounded() -> None:
+    async def scenario() -> tuple[str, str, int | None]:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, '-c',
+            'import sys; sys.stdout.write("a" * 100000); sys.stderr.write("b" * 100000)',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await run_subprocess(proc, timeout=10, tail_bytes=32)
+        return out, err, proc.returncode
+
+    out, err, returncode = asyncio.run(scenario())
+    assert out == 'a' * 32
+    assert err == 'b' * 32
+    assert returncode == 0
 
 
 def test_run_subprocess_bounded_drains_stderr_concurrently() -> None:

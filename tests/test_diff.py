@@ -10,6 +10,7 @@ commit gate, and the exit codes.
 import asyncio
 import contextlib
 import os
+import shlex
 import subprocess
 import types
 from typing import Any, Generator, Iterator
@@ -26,7 +27,7 @@ from marsha.refine import ChatResult, SpecSource
 
 def _args(**kw: Any) -> Any:
     base = dict(source=None, issue=None, linear=None, review_cycles=5,
-                max_tool_failure=5, safe=False, target='python',
+                max_tool_failure=10, safe=False, target='python',
                 target_version=None, debug=False, trace=False,
                 trace_full=False, model=None, provider=None, api_base=None)
     base.update(kw)
@@ -74,46 +75,22 @@ def _spec_path(p: str) -> str:
     return os.path.join(p, 'spec.mrsh')
 
 
-def _mock_plan() -> Any:
-    """A minimal one-step plan for tests that drive the step loop."""
-    from marsha import plan as plan_mod
-    return plan_mod.Plan(
-        title='Test Plan',
-        scope_files=['a.py (test file)'],
-        scope_context='Test context',
-        constraints=['Use type hints'],
-        steps=[plan_mod.PlanStep(
-            id=1, goal='Implement X', files=['a.py'],
-            test_first='none', approach='Do X', validate='')])
-
-
-def _mock_threads(findings: Any) -> Any:
-    """Return a resolved-thread list for the given findings (all implemented)."""
-    from marsha.threads import ReviewThread, ThreadResponse
-    return [ReviewThread(
-        finding=f,
-        responses=[
-            ThreadResponse(role='reviewer', action='', text=f.get('desc', '')),
-            ThreadResponse(role='implementor', action='implemented', text='fixed'),
-        ],
-        resolved=True,
-    ) for f in findings]
-
-
 @pytest.fixture(autouse=True)
-def _mock_planning_phase() -> Any:
-    """Patch the planning phase, plan checker, and thread resolution so
-    tests that drive run_diff do not hit the LLM."""
-    from marsha import plan as _plan_mod
-    from marsha import threads as _threads_mod
-    with patch.object(diff, '_run_planning_phase',
-                      new=AsyncMock(
-                          return_value=(_mock_plan(), 'explorer map', 'rules'))), \
-         patch.object(_plan_mod, 'run_plan_checker',
-                      new=AsyncMock(return_value=(True, []))), \
-         patch.object(_threads_mod, 'resolve_threads',
-                      new=AsyncMock(side_effect=lambda *a, **k: (
-                          _mock_threads(a[0] if a else []), True))):
+def _mock_repo_context_and_validation() -> Any:
+    """Keep driver tests offline while exercising the outer review-cycle state machine."""
+    from marsha.diff_validation import ValidationCheck, ValidationMetaResult
+
+    async def validation(cwd: str, command: str, debug: bool,
+                         safe: bool, allowed: bool) -> list[ValidationCheck]:
+        if safe and not allowed:
+            return [ValidationCheck(command, 'skipped', 'declined')]
+        return [ValidationCheck(command, 'passed', 'ok')]
+
+    with patch.object(diff, '_run_repo_context',
+                      new=AsyncMock(return_value=('explorer map', 'rules'))), \
+         patch.object(diff, '_run_validation_cycle', new=validation), \
+         patch.object(diff, 'run_validation_meta_review',
+                      new=AsyncMock(return_value=ValidationMetaResult([], [], 'clean'))):
         yield
 
 
@@ -185,6 +162,15 @@ def test_commit_title_prefix_and_ticket() -> None:
         'feat: Implement My Feature (ABC-123)'
 
 
+def test_refined_mrsh_title_falls_back_to_source_filename() -> None:
+    source = SpecSource(kind='mrsh', path='/repo/support-rust.mrsh')
+    assert diff._refined_title(source, {'spec': 'refined spec'}, 'refined spec') \
+        == 'support-rust'
+    issue = SpecSource(kind='issue', num=7, name='ISSUE-7')
+    assert diff._refined_title(
+        issue, {'title': 'Refined title', 'body': 'body'}, 'rendered issue') == 'Refined title'
+
+
 def test_validation_command_makefile_test_target(tmp_path: Any) -> None:
     with open(os.path.join(str(tmp_path), 'Makefile'), 'w') as f:
         f.write('build:\n\ntest:\n\tpytest -q\n')
@@ -195,22 +181,123 @@ def test_validation_command_defaults_to_pytest(tmp_path: Any) -> None:
     assert diff._validation_command(str(tmp_path)) == 'pytest -q'
 
 
+def test_validation_command_uses_node_test_script(tmp_path: Any) -> None:
+    with open(os.path.join(str(tmp_path), 'package.json'), 'w') as f:
+        f.write('{"scripts": {"test": "vitest run"}}')
+    assert diff._validation_command(str(tmp_path)) == 'npm test'
+
+
+def test_validation_command_uses_cargo_without_python_or_node(tmp_path: Any) -> None:
+    with open(os.path.join(str(tmp_path), 'Cargo.toml'), 'w') as f:
+        f.write('[package]\nname = "sample"\n')
+    assert diff._validation_command(str(tmp_path)) == 'cargo test'
+
+
+def test_validation_command_uses_go_module(tmp_path: Any) -> None:
+    with open(os.path.join(str(tmp_path), 'go.mod'), 'w') as f:
+        f.write('module example.test/app\n')
+    assert diff._validation_command(str(tmp_path)) == 'go test ./...'
+
+
+def test_validation_command_finds_project_venv_pytest(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo with spaces'
+    pytest_bin = (repo / '.venv' / 'Scripts' / 'pytest.exe'
+                  if os.name == 'nt' else repo / '.venv' / 'bin' / 'pytest')
+    pytest_bin.parent.mkdir(parents=True)
+    pytest_bin.write_text('#!/bin/sh\n')
+    command = diff._validation_command(str(repo))
+    assert command == shlex.quote(str(pytest_bin))
+    assert shlex.split(command) == [str(pytest_bin)]
+
+
+def test_run_whitelist_includes_primary_validator_but_not_in_safe_mode(
+        tmp_path: Any) -> None:
+    backend = types.SimpleNamespace(run_whitelist=lambda: [])
+    repo = str(tmp_path)
+    primary = shlex.quote(os.path.join(repo, '.venv', 'bin', 'pytest'))
+    venv_python = (os.path.join(repo, '.venv', 'Scripts', 'python.exe')
+                   if os.name == 'nt' else os.path.join(repo, '.venv', 'bin', 'python'))
+    os.makedirs(os.path.dirname(venv_python), exist_ok=True)
+    with open(venv_python, 'w') as f:
+        f.write('')
+    with patch('marsha.diff.backends.current', return_value=backend):
+        normal = diff._build_run_whitelist(repo, primary, safe=False)
+        safe = diff._build_run_whitelist(repo, primary, safe=True)
+    assert any(rule.prefix == tuple(shlex.split(primary)) for rule in normal)
+    assert any(rule.prefix == (venv_python, '-m', 'pip', 'install')
+               and rule.network for rule in normal)
+    assert safe == []
+
+
+def test_unavailable_survey_checks_are_advisory(tmp_path: Any) -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    async def missing_command(*args: Any, **kwargs: Any) -> Any:
+        raise FileNotFoundError('tool is not installed')
+
+    rules = [tools.RunRule(('mypy', 'src'), 'mypy src', network=True)]
+    with patch.object(diff, '_introspect_run_commands', return_value=rules), \
+            patch.object(asyncio, 'create_subprocess_exec', new=missing_command):
+        checks = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', debug=False))
+
+    assert len(checks) == 1
+    assert checks[0].status == 'unavailable' and not checks[0].blocking
+    assert 'ADVISORY' in checks[0].render()
+    passing_primary = ValidationCheck('pytest -q', 'passed', 'ok')
+    assert diff._validation_findings([passing_primary, *checks]) == []
+    assert diff._validation_passed([passing_primary, *checks], False, True)
+    assert 'advisory checks (mypy src unavailable)' in diff._validation_summary(
+        [passing_primary, *checks], False, True)
+
+    with patch.object(diff, '_introspect_run_commands', return_value=rules), \
+            patch.object(asyncio, 'create_subprocess_exec', new=missing_command):
+        after_failed_base = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', debug=False,
+            baseline_checks=[ValidationCheck('mypy src', 'failed', 'base failure')]))
+    assert after_failed_base[0].status == 'unavailable'
+    assert after_failed_base[0].blocking
+
+    failed_primary = ValidationCheck('pytest -q', 'failed', 'assertion failed')
+    assert diff._validation_findings([failed_primary])
+    assert not diff._validation_passed([failed_primary, *checks], False, True)
+
+
+def test_survey_failures_already_on_base_are_advisory(tmp_path: Any) -> None:
+    repo = str(tmp_path)
+    _git_repo(repo, {'Makefile': 'lint:\n\t@printf base-failure; exit 1\n'})
+    baseline = asyncio.run(diff._validation_baseline(
+        repo, 'HEAD', 'pytest -q', debug=False))
+    assert baseline is not None and len(baseline) == 1
+    assert baseline[0].status == 'failed'
+
+    current = asyncio.run(diff._validation_survey(
+        repo, 'pytest -q', debug=False, baseline_checks=baseline))
+    assert len(current) == 1
+    assert current[0].status == 'failed' and not current[0].blocking
+    assert 'clean base branch' in current[0].output
+    assert diff._validation_findings(current) == []
+    assert _git_out(repo, 'worktree', 'list', '--porcelain').count('worktree ') == 1
+
+
 def test_introspect_run_commands_empty(tmp_path: Any) -> None:
     # No package.json, Makefile, or workflows: no introspected commands.
     assert diff._introspect_run_commands(str(tmp_path)) == []
 
 
 def test_introspect_run_commands_makefile_targets(tmp_path: Any) -> None:
-    # Makefile targets become `make <target>` rules (non-network).
+    # Only familiar validation targets are discovered; arbitrary recipes are not command access.
     p = os.path.join(str(tmp_path), 'Makefile')
     with open(p, 'w') as f:
-        f.write('build:\n\techo build\n\ntest:\n\tpytest -q\n\nlint:\n\truff check .\n')
+        f.write('deploy:\n\trm -rf /tmp/x\n\nbuild:\n\techo build\n'
+                '\ntest:\n\tpytest -q\n\nlint:\n\truff check .\n')
     rules = diff._introspect_run_commands(str(tmp_path))
     displays = [r.display for r in rules]
-    assert 'make build' in displays
     assert 'make test' in displays
     assert 'make lint' in displays
-    assert all(not r.network for r in rules)
+    assert 'make build' not in displays
+    assert 'make deploy' not in displays
+    assert all(r.network for r in rules)
 
 
 def test_introspect_run_commands_npm_scripts(tmp_path: Any) -> None:
@@ -237,6 +324,40 @@ def test_introspect_run_commands_ci_workflows(tmp_path: Any) -> None:
     assert 'pytest -q' in displays
     assert 'mypy marsha' in displays
     assert all(r.network for r in rules)
+
+
+def test_validation_survey_uses_only_configured_argv_without_shell(tmp_path: Any) -> None:
+    rules = [
+        tools.RunRule(('mypy', 'marsha'), 'mypy marsha', network=True),
+        tools.RunRule(('python', '-c', 'import os; os.remove("x")'),
+                      'malicious', network=True),
+        tools.RunRule(('make', 'deploy'), 'make deploy', network=True),
+    ]
+    proc = types.SimpleNamespace(returncode=0)
+    spawn = AsyncMock(return_value=proc)
+    with patch.object(diff, '_introspect_run_commands', return_value=rules), \
+         patch.object(asyncio, 'create_subprocess_exec', new=spawn), \
+         patch.object(diff, 'run_subprocess', new=AsyncMock(return_value=('ok', ''))):
+        checks = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', False))
+    assert [check.command for check in checks] == ['mypy marsha']
+    assert spawn.await_count == 1
+    call = spawn.await_args
+    assert call is not None
+    assert call.args == ('mypy', 'marsha')
+    assert call.kwargs['cwd'] == str(tmp_path)
+    assert call.kwargs['env'] is not None
+    assert not any(marker in key.upper() for key in call.kwargs['env']
+                   for marker in ('API_KEY', 'TOKEN', 'SECRET', 'PASSWORD',
+                                  'CREDENTIAL', 'PRIVATE_KEY', 'ACCESS_KEY'))
+
+    spawn.reset_mock()
+    with patch.object(diff, '_introspect_run_commands', return_value=rules), \
+         patch.object(asyncio, 'create_subprocess_exec', new=spawn):
+        skipped = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', False, safe=True))
+    assert skipped == []
+    spawn.assert_not_awaited()
 
 
 def test_introspect_run_commands_skips_shell_metacharacters(tmp_path: Any) -> None:
@@ -295,6 +416,27 @@ def test_impl_request_without_comments_has_no_comments_block() -> None:
     assert '[tool:comments]' not in req
 
 
+def test_implementor_receives_repository_map_and_constraints_each_pass() -> None:
+    ctx = tools.ToolContext(
+        phase='implement', repository_map='src/core.py (main pipeline)',
+        constraints='Use the configured pytest command.',
+        run_whitelist=[tools.RunRule(('pytest',), 'pytest')])
+    mapper = types.SimpleNamespace(n_results=1, model='test-model', system='')
+
+    def make_mapper(system: str, **kwargs: Any) -> Any:
+        mapper.system = system
+        return mapper
+
+    with patch.object(diff, 'get_mapper', side_effect=make_mapper), \
+         patch.object(tools, 'run_with_tools', new=AsyncMock(return_value='done')):
+        result = asyncio.run(diff._run_implementor(
+            ctx, 'Implement the locked spec.', 'test-model', 5, False))
+    assert result == 'done'
+    assert 'src/core.py (main pipeline)' in mapper.system
+    assert 'Use the configured pytest command.' in mapper.system
+    assert 'locked spec wins' in mapper.system
+
+
 # --- mocked LLM/validation stages ----------------------------------------------
 
 async def _locked_analyze(*a: Any, **k: Any) -> Any:
@@ -305,23 +447,27 @@ async def _unlocked_analyze(*a: Any, **k: Any) -> Any:
     return {'compilable': True, 'ambiguities': ['what about X?'], 'errors': []}
 
 
-async def _impl_creates_file(*a: Any, **k: Any) -> str:
+def _complete_test_todos(ctx: tools.ToolContext) -> None:
+    if not ctx.todo_items:
+        tools.add_todo_item(ctx, 'Implement and test the locked specification.')
+    for item in ctx.todo_items:
+        item.completed = True
+
+
+async def _impl_creates_file(ctx: tools.ToolContext, *a: Any, **k: Any) -> str:
     with open('impl.txt', 'w') as f:
         f.write('implemented\n')
+    _complete_test_todos(ctx)
     return 'done'
 
 
-async def _ok_validation(*a: Any, **k: Any) -> tuple[bool, str]:
-    return (True, 'ok')
+async def _clean_review(*a: Any, **k: Any) -> list[Any]:
+    return []
 
 
-async def _clean_review(*a: Any, **k: Any) -> tuple[list[Any], str]:
-    return [], ''
-
-
-async def _finding_review(*a: Any, **k: Any) -> tuple[list[Any], str]:
-    return ([{'name': 'r', 'label': 'L', 'severity': 'major',
-             'location': 'a.py:1', 'desc': 'd'}], '')
+async def _finding_review(*a: Any, **k: Any) -> list[Any]:
+    return [{'name': 'r', 'label': 'L', 'severity': 'major',
+             'location': 'a.py:1', 'desc': 'd', 'support': 'grounded'}]
 
 
 async def _assert_not_called(*a: Any, **k: Any) -> str:
@@ -362,21 +508,31 @@ def test_run_diff_safe_refuses_remote_spec_source() -> None:
     assert asyncio.run(diff.run_diff(_args(linear='ABC-123', safe=True))) == 2
 
 
-def test_address_and_validation_fix_requests_are_safe_aware() -> None:
+def test_cycle_fix_request_carries_findings_and_validation_evidence() -> None:
     # In safe mode the implementor has no network access (implement-safe filters the run
     # whitelist to local-only commands), so the fix requests must not tell it to rerun
     # validation with the run tool (the harness does that); the non-safe requests keep
     # the run-tool instruction (shown as `(run)` in the message).
-    finding: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
-                        'location': 'a.py:1', 'desc': 'fix this'}
+    finding: Finding = {
+        'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'a.py:1', 'desc': 'fix this',
+        'support': 'The new branch returns before the write.',
+    }
     safe_req = diff._address_findings_request([finding], 'main', safe=True)
     assert '(run)' not in safe_req and 'harness reruns' in safe_req
     normal_req = diff._address_findings_request([finding], 'main')
     assert '(run)' in normal_req and 'harness reruns' not in normal_req
-    safe_fix = diff._validation_fix_request('pytest', 'boom', safe=True)
-    assert '(run)' not in safe_fix and 'harness reruns' in safe_fix
-    normal_fix = diff._validation_fix_request('pytest', 'boom')
-    assert '(run)' in normal_fix and 'harness reruns' not in normal_fix
+    from marsha.diff_validation import ValidationCheck
+    request = diff._cycle_fix_request(
+        [finding], [ValidationCheck('pytest -q', 'failed', 'assertion failed')],
+        'main', False, 2)
+    assert '[A1] MAJOR' in request
+    assert 'CI checkpoint 2' in request
+    assert 'pytest -q — FAILED' in request
+    assert 'assertion failed' in request
+    assert 'The new branch returns before the write.' in request
+    assert '[tool:ci-review-findings]' in request
+    assert '[tool:validation-results]' in request
 
 
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
@@ -408,25 +564,12 @@ def test_run_diff_dirty_tree_refused(tmp_path: Any, capsys: Any) -> None:
 
 
 def test_run_diff_review_not_clean_no_commit(tmp_path: Any, capsys: Any) -> None:
-    # Findings that survive the thread resolution stop the run with no commit.
+    # Findings still open at the review-cycle cap stop the run with no commit.
     p = str(tmp_path)
     _git_repo(p, {'spec.mrsh': _mrsh_spec()})
-    from marsha import threads as _threads_mod
-    from marsha.threads import ReviewThread, ThreadResponse
-
-    def _unresolved_threads(findings: Any, *a: Any, **k: Any) -> Any:
-        return ([ReviewThread(
-            finding=f,
-            responses=[ThreadResponse(role='reviewer', action='', text=f.get('desc', ''))],
-            resolved=False,
-        ) for f in findings], False)
-
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_creates_file), \
-         patch.object(diff, '_ensure_validated', new=_ok_validation), \
-         patch.object(diff, '_review_gate', new=_finding_review), \
-         patch.object(_threads_mod, 'resolve_threads',
-                      new=AsyncMock(side_effect=_unresolved_threads)):
+         patch.object(diff, '_review_gate', new=_finding_review):
         with _chdir(p):
             rc = asyncio.run(
                 diff.run_diff(_args(source=_spec_path(p), review_cycles=1)))
@@ -434,6 +577,199 @@ def test_run_diff_review_not_clean_no_commit(tmp_path: Any, capsys: Any) -> None
     assert 'NOT clean' in capsys.readouterr().out
     # Only the initial commit exists: the implementation was never committed.
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_review_loop_repeats_panel_and_sends_prior_findings_to_meta() -> None:
+    from marsha.diff_validation import ValidationCheck, ValidationMetaResult
+
+    finding: Finding = {
+        'name': 'Correctness', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'src/core.py:10', 'desc': 'the update is not persisted',
+        'support': 'The new branch returns before the write.',
+    }
+    panel = AsyncMock(side_effect=[[finding], []])
+    meta = AsyncMock(return_value=ValidationMetaResult(
+        [], [], 'Previous finding is resolved.'))
+
+    initial_history = [
+        {'role': 'user', 'content': 'Original locked specification.'},
+        {'role': 'assistant', 'content': '$ read-file src/core.py 1..20'},
+        {'role': 'user', 'content': '[tool:read-file] prior implementation context'},
+        {'role': 'assistant', 'content': 'Implemented the first pass.\n$ finished'},
+    ]
+    implementor_history = [dict(message) for message in initial_history]
+    repair_requests: list[str] = []
+
+    async def implementor_pass(ctx: tools.ToolContext, request: str, *args: Any,
+                               **kwargs: Any) -> str:
+        assert any(item.source == 'review' and not item.completed
+                   for item in ctx.todo_items)
+        assert kwargs['history'] is implementor_history
+        repair_requests.append(request)
+        # Mirror run_with_tools: append review feedback and the repair response to the retained
+        # conversation, rather than replacing the earlier implementation/tool turns.
+        implementor_history.extend([
+            {'role': 'user', 'content': request},
+            {'role': 'assistant', 'content': 'Repaired the finding and reran tests.\n$ finished'},
+        ])
+        _complete_test_todos(ctx)
+        return 'implemented'
+
+    implementor = AsyncMock(side_effect=implementor_pass)
+    checks = [ValidationCheck('pytest -q', 'passed', 'ok')]
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return checks
+
+    ctx = tools.ToolContext(phase='implement')
+    _complete_test_todos(ctx)
+    with patch.object(diff, '_review_gate', new=panel), \
+         patch.object(diff, 'run_validation_meta_review', new=meta), \
+         patch.object(diff, '_run_implementor', new=implementor), \
+         patch.object(diff, '_run_validation_cycle', new=validated):
+        clean, remaining, final_checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec',
+            'test-model', 5, False, False, 'pytest -q', True, 'constraints', 3,
+            implementor_history=implementor_history))
+
+    assert clean and remaining == [] and final_checks == checks
+    assert panel.await_count == 2
+    assert meta.await_count == 1
+    assert meta.await_args_list[0].args[0] == [finding]
+    assert implementor.await_count == 1
+    assert implementor.await_args is not None
+    assert implementor.await_args.kwargs['history'] is implementor_history
+    assert implementor_history[:len(initial_history)] == initial_history
+    assert 'CI checkpoint 1' in repair_requests[0]
+    assert 'the update is not persisted' in repair_requests[0]
+    assert implementor_history[len(initial_history)] == {
+        'role': 'user', 'content': repair_requests[0]}
+    review_todos = [item for item in ctx.todo_items if item.source == 'review']
+    assert len(review_todos) == 1 and review_todos[0].completed
+
+
+def test_review_loop_does_not_run_first_review_until_todos_are_complete() -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    ctx = tools.ToolContext(phase='implement')
+    calls: list[str] = []
+    panel = AsyncMock(return_value=[])
+
+    async def implementor(ctx: tools.ToolContext, request: str, *args: Any,
+                          **kwargs: Any) -> str:
+        calls.append(request)
+        if not ctx.todo_items:
+            tools.add_todo_item(ctx, 'Implement and test each locked requirement.')
+        else:
+            for item in ctx.todo_items:
+                item.completed = True
+        return 'checklist updated'
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return [ValidationCheck('pytest -q', 'passed', 'ok')]
+
+    with patch.object(diff, '_review_gate', new=panel), \
+            patch.object(diff, '_run_validation_cycle', new=validated), \
+            patch.object(diff, '_run_implementor', new=implementor):
+        clean, remaining, checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec', 'test-model', 5, False, False,
+            'pytest -q', True, '', 1))
+
+    assert clean and remaining == []
+    assert len(calls) == 2
+    assert panel.await_count == 1
+    assert tools.todo_list_ready(ctx)
+    assert checks[0].passed
+
+
+def test_review_loop_repairs_after_failed_validation_meta_review() -> None:
+    from marsha.diff_validation import ValidationCheck, ValidationMetaResult
+
+    finding: Finding = {
+        'name': 'Correctness', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'src/core.py:10', 'desc': 'the update is not persisted',
+        'support': 'The new branch returns before the write.',
+    }
+    panel = AsyncMock(side_effect=[[finding], [], []])
+    meta = AsyncMock(side_effect=[
+        ValueError('meta-review returned no JSON object'),
+        ValidationMetaResult([], [], 'Prior finding resolved.'),
+    ])
+
+    async def implementor_pass(ctx: tools.ToolContext, *args: Any,
+                               **kwargs: Any) -> str:
+        _complete_test_todos(ctx)
+        return 'fixed'
+
+    implementor = AsyncMock(side_effect=implementor_pass)
+    implementor_history: list[dict[str, str]] = [
+        {'role': 'user', 'content': 'Original locked specification.'}]
+    checks = [ValidationCheck('pytest -q', 'passed', 'ok')]
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return checks
+
+    ctx = tools.ToolContext(phase='implement')
+    _complete_test_todos(ctx)
+    with patch.object(diff, '_review_gate', new=panel), \
+         patch.object(diff, 'run_validation_meta_review', new=meta), \
+         patch.object(diff, '_run_implementor', new=implementor), \
+         patch.object(diff, '_run_validation_cycle', new=validated):
+        clean, remaining, final_checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec',
+            'test-model', 5, False, False, 'pytest -q', True, 'constraints', 3,
+            implementor_history=implementor_history))
+
+    assert clean and remaining == [] and final_checks == checks
+    assert panel.await_count == 3
+    assert meta.await_count == 2
+    assert implementor.await_count == 2
+    assert all(call.kwargs['history'] is implementor_history
+               for call in implementor.await_args_list)
+    assert implementor.await_args is not None
+    repair_request = implementor.await_args.args[1]
+    assert 'the update is not persisted' in repair_request
+    assert 'prior findings were conservatively kept open' in repair_request
+
+
+def test_review_loop_repairs_validation_failures_before_review() -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    failed_checks = [ValidationCheck(
+        'make test', 'failed', 'SyntaxError during test collection')]
+    passed_checks = [ValidationCheck('make test', 'passed', 'tests passed')]
+    panel = AsyncMock(return_value=[])
+    check_sets = iter([failed_checks, failed_checks, passed_checks])
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return next(check_sets)
+
+    async def implementor_pass(ctx: tools.ToolContext, *args: Any,
+                               **kwargs: Any) -> str:
+        _complete_test_todos(ctx)
+        return 'fixed'
+
+    implementor = AsyncMock(side_effect=implementor_pass)
+
+    ctx = tools.ToolContext(phase='implement')
+    _complete_test_todos(ctx)
+    with patch.object(diff, '_review_gate', new=panel), \
+         patch.object(diff, '_run_validation_cycle', new=validated), \
+         patch.object(diff, '_run_implementor', new=implementor):
+        clean, remaining, final_checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec', 'test-model', 5, False, False,
+            'make test', True, 'constraints', 2))
+
+    assert clean and remaining == [] and final_checks == passed_checks
+    assert panel.await_count == 1
+    assert implementor.await_count == 2
+    assert tools.todo_list_ready(ctx)
+    assert all(item.completed for item in ctx.todo_items if item.source == 'validation')
+    assert implementor.await_args is not None
+    for call in implementor.await_args_list:
+        repair_request = call.args[1]
+        assert 'make test — FAILED' in repair_request
+        assert 'SyntaxError during test collection' in repair_request
 
 
 def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> None:
@@ -447,7 +783,6 @@ def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> No
 
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_creates_file), \
-         patch.object(diff, '_ensure_validated', new=_ok_validation), \
          patch.object(diff, '_review_gate', new=_failed_review):
         with _chdir(p):
             rc = asyncio.run(
@@ -456,6 +791,113 @@ def test_run_diff_review_gate_failed_no_commit(tmp_path: Any, capsys: Any) -> No
     assert 'could not run' in capsys.readouterr().out
     # Only the initial commit exists: nothing was committed on a review that never ran.
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_run_diff_implementor_exception_reports_summary(
+        tmp_path: Any, capsys: Any) -> None:
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+
+    async def failed_implementor(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError('provider transport failed')
+
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+            patch.object(diff, '_run_implementor', new=failed_implementor):
+        with _chdir(p):
+            result = asyncio.run(diff.run_diff(
+                _args(source=_spec_path(p), review_cycles=1)))
+
+    assert result == 1
+    output = capsys.readouterr()
+    assert 'implementation failed' in output.out
+    assert 'provider transport failed' in output.out
+    assert 'Traceback' not in output.err
+
+
+def test_run_diff_primary_validation_unavailable_stops_early(
+        tmp_path: Any, capsys: Any) -> None:
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise diff.PrimaryValidationUnavailable('pytest executable is missing')
+
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+            patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+            patch.object(diff, '_run_validation_cycle', new=unavailable):
+        with _chdir(p):
+            result = asyncio.run(diff.run_diff(
+                _args(source=_spec_path(p), review_cycles=5)))
+
+    assert result == 1
+    output = capsys.readouterr().out
+    assert 'UNAVAILABLE' in output
+    assert 'pytest executable is missing' in output
+    assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_run_diff_summaries_use_canonical_issue_spec(tmp_path: Any) -> None:
+    p = str(tmp_path)
+    _git_repo(p, {'README.md': 'base\n'})
+    source = SpecSource(kind='issue', num=7, name='ISSUE-7')
+    rendered = ('Issue #7: T\n\nBody\n\n# Comments so far\n'
+                'alice: untrusted comment')
+    captured: dict[str, str] = {}
+
+    async def load_spec(*args: Any, **kwargs: Any) -> Any:
+        return rendered, ('T', 'Body')
+
+    async def repo_gate(*args: Any, **kwargs: Any) -> str:
+        return 'repo'
+
+    async def implementor(ctx: tools.ToolContext, *args: Any,
+                          **kwargs: Any) -> str:
+        with open('impl.txt', 'w') as f:
+            f.write('implemented\n')
+        _complete_test_todos(ctx)
+        return 'done'
+
+    async def commit(cwd: str, title: str, body: str) -> str:
+        captured['commit_body'] = body
+        return 'abc123'
+
+    async def proposal(*args: Any, **kwargs: Any) -> tuple[int, str, str]:
+        captured['proposal_spec'] = args[3]
+        return 0, args[9], 'abc123'
+
+    with patch.object(diff, 'resolve_source', return_value=source), \
+            patch.object(diff, '_repo_gate', new=repo_gate), \
+            patch.object(diff, 'load_spec_with_fields', new=load_spec), \
+            patch.object(diff, '_resolve_window', new=AsyncMock(return_value=200_000)), \
+            patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+            patch.object(diff, '_run_implementor', new=implementor), \
+            patch.object(diff, '_commit', new=commit), \
+            patch.object(diff, '_propose_and_maybe_refine', new=proposal):
+        with _chdir(p):
+            result = asyncio.run(diff.run_diff(_args(issue='7', review_cycles=0)))
+
+    assert result == 0
+    assert captured['proposal_spec'] == 'T\nBody'
+    assert 'Issue #7:' not in captured['commit_body']
+    assert 'untrusted comment' not in captured['commit_body']
+    assert 'Body' in captured['commit_body']
+
+
+def test_review_loop_wraps_unexpected_repair_exception() -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    async def failed_validation(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return [ValidationCheck('pytest -q', 'failed', 'broken test')]
+
+    async def failed_implementor(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError('repair model failed')
+
+    with patch.object(diff, '_run_validation_cycle', new=failed_validation), \
+            patch.object(diff, '_run_implementor', new=failed_implementor):
+        with pytest.raises(diff.ImplementorFailed, match='repair model failed'):
+            asyncio.run(diff._run_review_loop(
+                tools.ToolContext(phase='implement'), '.', 'main', 'main', 'spec',
+                'test-model', 5, False, False, 'pytest -q', True, '', 0))
 
 
 def test_run_diff_no_changes_is_a_clear_failure(tmp_path: Any, capsys: Any) -> None:
@@ -470,7 +912,6 @@ def test_run_diff_no_changes_is_a_clear_failure(tmp_path: Any, capsys: Any) -> N
 
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_noop), \
-         patch.object(diff, '_ensure_validated', new=_ok_validation), \
          patch.object(diff, '_review_gate', new=_clean_review), \
          patch.object(diff, '_commit', new=_assert_not_called):
         with _chdir(p):
@@ -500,14 +941,26 @@ def test_impl_request_canonical_spec_and_comments() -> None:
     assert 'alice: context note' in comments_block  # ...they ride along as untrusted context
 
 
+def test_implementor_completion_instruction_uses_finished_marker() -> None:
+    assert 'end a separate response with exactly `$ finished`' in diff.IMPL_SYSTEM_PROMPT
+    assert 'Do not send `$ finished` with any pending item' in diff.IMPL_SYSTEM_PROMPT
+    assert 'Use `$ todo list`' not in diff.IMPL_SYSTEM_PROMPT
+    assert 'as its only command' in diff.IMPL_SYSTEM_PROMPT
+    assert 'stop issuing commands' not in diff.IMPL_SYSTEM_PROMPT
+
+
 def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> None:
     # A successful --safe run (review skipped) leaves the edits uncommitted and offers no PR.
     # Safe mode prompts for approval before running the validation command; approve it here.
     p = str(tmp_path)
     _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+
+    async def safe_implementor(ctx: Any, *args: Any, **kwargs: Any) -> str:
+        assert ctx.run_whitelist == []
+        return await _impl_creates_file(ctx, *args, **kwargs)
+
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
-         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
-         patch.object(diff, '_ensure_validated', new=_ok_validation):
+         patch.object(diff, '_run_implementor', new=safe_implementor):
         with _chdir(p):
             rc = asyncio.run(
                 diff.run_diff(_args(source=_spec_path(p), safe=True, review_cycles=0),
@@ -515,6 +968,7 @@ def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> N
     assert rc == 0
     out = capsys.readouterr().out
     assert 'Allow it?' in out  # the safe-mode validation approval prompt was shown
+    assert 'executes code in the working tree' in out
     assert 'UNCOMMITTED' in out
     assert '## Validation' not in out  # no PR proposal in safe mode
     # The file exists in the working tree but no commit was made beyond the initial one.
@@ -524,24 +978,27 @@ def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> N
 
 def test_run_diff_safe_declined_validation_skipped(tmp_path: Any, capsys: Any) -> None:
     # Declining the safe-mode validation prompt skips the validation (not a failure): the run
-    # completes, leaving edits uncommitted, and _ensure_validated is never called.
+    # completes, leaving edits uncommitted, and all checks are marked skipped.
     p = str(tmp_path)
     _git_repo(p, {'spec.mrsh': _mrsh_spec()})
     calls = {'n': 0}
 
-    async def _counting_validation(*a: Any, **k: Any) -> Any:
+    async def _counting_validation(cwd: str, command: str, debug: bool,
+                                   safe: bool, allowed: bool) -> Any:
         calls['n'] += 1
-        return (True, 'ok')
+        assert safe and not allowed
+        from marsha.diff_validation import ValidationCheck
+        return [ValidationCheck(command, 'skipped', 'declined')]
 
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_creates_file), \
-         patch.object(diff, '_ensure_validated', new=_counting_validation):
+         patch.object(diff, '_run_validation_cycle', new=_counting_validation):
         with _chdir(p):
             rc = asyncio.run(
                 diff.run_diff(_args(source=_spec_path(p), safe=True, review_cycles=0),
                               read_line=lambda: 'n'))
     assert rc == 0
-    assert calls['n'] == 0  # the validation was never run
+    assert calls['n'] == 1  # harness records the declined validation as skipped
     assert 'skipped' in capsys.readouterr().out
 
 
@@ -557,21 +1014,108 @@ def test_review_gate_includes_untracked_files(tmp_path: Any) -> None:
                         'location': 'new.py:1', 'desc': 'd'}
 
     async def fake_review_pass(*a: Any, **k: Any) -> list[Any]:
+        assert a[7].working_tree is True
+        assert a[7].base_ref == 'main'
         return [dict(finding)]
 
     async def fake_evidence_gate(findings: Any, *a: Any, **k: Any) -> Any:
         return findings
 
-    async def fake_consolidate(ctx: Any, findings: Any, *a: Any, **k: Any) -> Any:
+    with patch.object(diff, '_review_pass', new=fake_review_pass), \
+         patch.object(diff, 'evidence_gate', new=fake_evidence_gate):
+        with _chdir(p):
+            result = asyncio.run(
+                diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False,
+                                  constraints='', validation_report='', prior_findings=[]))
+    assert result  # the gate ran (not skipped on an empty diff) and returned the finding
+
+
+def test_review_gate_propagates_no_network_to_review_tools(tmp_path: Any) -> None:
+    p = str(tmp_path)
+    _git_repo(p, {'a.py': 'x = 1\n'})
+    with open(os.path.join(p, 'new.py'), 'w') as f:
+        f.write('y = 2\n')
+    seen: list[bool] = []
+
+    async def fake_review_pass(*args: Any, **kwargs: Any) -> list[Any]:
+        seen.append(args[7].no_network)
+        return []
+
+    async def fake_evidence_gate(findings: Any, *args: Any, **kwargs: Any) -> Any:
         return findings
 
     with patch.object(diff, '_review_pass', new=fake_review_pass), \
-         patch.object(diff, 'evidence_gate', new=fake_evidence_gate), \
-         patch.object(diff, 'consolidate_findings', new=fake_consolidate):
-        with _chdir(p):
-            result = asyncio.run(
-                diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
-    assert result  # the gate ran (not skipped on an empty diff) and returned the finding
+         patch.object(diff, 'evidence_gate', new=fake_evidence_gate):
+        result = asyncio.run(diff._review_gate(
+            p, 'main', 'main', 'spec', 'test-model', False,
+            constraints='', validation_report='', prior_findings=[],
+            no_network=True))
+    assert result == []
+    assert seen == [True]
+
+
+def test_validation_subprocesses_scrub_llm_credentials(
+        tmp_path: Any, monkeypatch: Any) -> None:
+    for key in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'):
+        monkeypatch.setenv(key, 'test-secret')
+    process = types.SimpleNamespace(returncode=0)
+    spawn = AsyncMock(return_value=process)
+    run = AsyncMock(return_value=(b'ok', b''))
+    with patch.object(asyncio, 'create_subprocess_exec', new=spawn), \
+            patch.object(diff, 'run_subprocess', new=run):
+        passed, _output = asyncio.run(diff._run_validation(str(tmp_path), 'pytest -q'))
+        assert passed
+        first_call = spawn.await_args
+        assert first_call is not None
+        first_env = first_call.kwargs['env']
+    assert not any(key in first_env for key in (
+        'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'))
+    primary_run = run.await_args
+    assert primary_run is not None
+    assert primary_run.args[1] == diff.VALIDATION_TIMEOUT
+    assert primary_run.kwargs['tail_bytes'] == diff.VALIDATION_OUTPUT_TAIL_BYTES
+
+    spawn.reset_mock()
+    run.reset_mock()
+    with patch.object(diff, '_introspect_run_commands', return_value=[
+            tools.RunRule(('npm', 'run', 'test'), 'npm run test', network=True)]), \
+            patch.object(asyncio, 'create_subprocess_exec', new=spawn), \
+            patch.object(diff, 'run_subprocess', new=run):
+        checks = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', debug=False))
+    assert len(checks) == 1 and checks[0].passed
+    second_call = spawn.await_args
+    assert second_call is not None
+    second_env = second_call.kwargs['env']
+    assert not any(key in second_env for key in (
+        'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'))
+    survey_run = run.await_args
+    assert survey_run is not None
+    assert survey_run.args[1] == diff.VALIDATION_TIMEOUT
+    assert survey_run.kwargs['tail_bytes'] == diff.VALIDATION_OUTPUT_TAIL_BYTES
+
+
+def test_validation_timeouts_are_blocking_failures(tmp_path: Any) -> None:
+    process = types.SimpleNamespace(returncode=-9)
+    spawn = AsyncMock(return_value=process)
+    run = AsyncMock(side_effect=Exception('run_subprocess timeout...'))
+    with patch.object(asyncio, 'create_subprocess_exec', new=spawn), \
+            patch.object(diff, 'run_subprocess', new=run):
+        passed, output = asyncio.run(
+            diff._run_validation(str(tmp_path), 'pytest -q'))
+    assert not passed
+    assert output.startswith('validation timed out after')
+    assert not output.startswith('validation could not be run:')
+
+    rule = tools.RunRule(('mypy', 'src'), 'mypy src', network=True)
+    with patch.object(diff, '_introspect_run_commands', return_value=[rule]), \
+            patch.object(asyncio, 'create_subprocess_exec', new=spawn), \
+            patch.object(diff, 'run_subprocess', new=run):
+        checks = asyncio.run(diff._validation_survey(
+            str(tmp_path), 'pytest -q', debug=False))
+    assert len(checks) == 1
+    assert checks[0].status == 'failed' and checks[0].blocking
+    assert 'timed out' in checks[0].output
 
 
 def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
@@ -597,11 +1141,9 @@ def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
     async def fake_implementor(*a: Any, **k: Any) -> str:
         return 'done'
 
-    async def fake_validated(*a: Any, **k: Any) -> Any:
-        return (True, 'ok')
-
-    async def fake_review_gate(*a: Any, **k: Any) -> tuple[list[Any], str]:
-        return [], ''
+    async def fake_review_loop(*a: Any, **k: Any) -> Any:
+        from marsha.diff_validation import ValidationCheck
+        return (True, [], [ValidationCheck('pytest -q', 'passed', 'ok')])
 
     async def fake_commit(cwd: Any, title: Any, body: Any) -> str:
         return f'sha-{len(applied)}'
@@ -617,25 +1159,25 @@ def test_propose_refine_refreshes_staleness_baseline(tmp_path: Any) -> None:
          patch.object(diff, '_apply', new=fake_apply), \
          patch.object(diff, 'run_refine_chat', new=fake_refine_chat), \
          patch.object(diff, '_run_implementor', new=fake_implementor), \
-         patch.object(diff, '_ensure_validated', new=fake_validated), \
-         patch.object(diff, '_review_gate', new=fake_review_gate), \
+         patch.object(diff, '_run_review_loop', new=fake_review_loop), \
          patch.object(diff, '_commit', new=fake_commit), \
          patch.object(diff, '_head_commit', new=fake_head_commit), \
          patch.object(diff, '_recent_commit_subjects', new=fake_recent_subjects), \
          patch.object(diff, '_conventions_text', return_value=''):
         rc, _title, _sha = asyncio.run(diff._propose_and_maybe_refine(
-            lambda: next(answers), p, source, 'spec text',
-            ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
-            tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
-            'clean', 'test-model', 5, False))
+             lambda: next(answers), p, source, 'spec text',
+             ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
+             tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
+             'clean', 'test-model', 5, 5, False))
     assert rc == 0
     assert len(applied) == 2  # BOTH refinements applied (the second was not bailed as stale)
 
 
-def test_propose_refine_review_gate_failed_leaves_commit_intact(tmp_path: Any, capsys: Any) -> None:
-    # A reviewer failure after reject-and-refine (the follow-up review gate cannot run) must not
-    # escape as an uncaught exception: the existing commit is left intact and no follow-up commit
-    # is made on the strength of a review that could not complete.
+@pytest.mark.parametrize('failure_stage', ['review_gate', 'repo_context'])
+def test_propose_refine_failure_leaves_commit_intact(
+        tmp_path: Any, capsys: Any, failure_stage: str) -> None:
+    # A repo-context or review failure after reject-and-refine must not escape as an uncaught
+    # exception: the existing commit is left intact and no follow-up commit is made.
     p = str(tmp_path)
     source = SpecSource(kind='issue', num=1, name='ISSUE-1')
     committed = {'follow': 0}
@@ -653,11 +1195,15 @@ def test_propose_refine_review_gate_failed_leaves_commit_intact(tmp_path: Any, c
     async def fake_implementor(*a: Any, **k: Any) -> str:
         return 'done'
 
-    async def fake_validated(*a: Any, **k: Any) -> Any:
-        return (True, 'ok')
+    async def fake_review_loop(*a: Any, **k: Any) -> Any:
+        if failure_stage == 'review_gate':
+            raise diff.ReviewGateFailed('all reviewers failed')
+        return (True, [], [])
 
-    async def fake_review_gate(*a: Any, **k: Any) -> list[Any]:
-        raise diff.ReviewGateFailed('all reviewers failed')
+    async def fake_repo_context(*a: Any, **k: Any) -> Any:
+        if failure_stage == 'repo_context':
+            raise RuntimeError('temporary model transport error')
+        return ('map', 'constraints')
 
     async def fake_commit(*a: Any, **k: Any) -> str:
         committed['follow'] += 1
@@ -673,22 +1219,26 @@ def test_propose_refine_review_gate_failed_leaves_commit_intact(tmp_path: Any, c
     with patch.object(diff, '_source_fields', new=fake_source_fields), \
          patch.object(diff, '_apply', new=fake_apply), \
          patch.object(diff, 'run_refine_chat', new=fake_refine_chat), \
+         patch.object(diff, '_run_repo_context', new=fake_repo_context), \
          patch.object(diff, '_run_implementor', new=fake_implementor), \
-         patch.object(diff, '_ensure_validated', new=fake_validated), \
-         patch.object(diff, '_review_gate', new=fake_review_gate), \
+         patch.object(diff, '_run_review_loop', new=fake_review_loop), \
          patch.object(diff, '_commit', new=fake_commit), \
          patch.object(diff, '_head_commit', new=fake_head_commit), \
          patch.object(diff, '_recent_commit_subjects', new=fake_recent_subjects), \
          patch.object(diff, '_conventions_text', return_value=''):
         rc, _title, sha = asyncio.run(diff._propose_and_maybe_refine(
-            lambda: next(answers), p, source, 'spec text',
-            ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
-            tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
-            'clean', 'test-model', 5, False))
+             lambda: next(answers), p, source, 'spec text',
+             ('Initial Title', 'Initial Body'), 'repo', 'main', 'origin/main',
+             tools.ToolContext(phase='implement'), 'Implement X', 'pytest -q',
+             'clean', 'test-model', 5, 5, False))
     assert rc == 0
     assert sha == 'abc123'  # the original commit is preserved
     assert committed['follow'] == 0  # no follow-up commit on the strength of a failed review
-    assert 'could not run' in capsys.readouterr().err
+    error = capsys.readouterr().err
+    if failure_stage == 'review_gate':
+        assert 'could not run' in error
+    else:
+        assert 'Re-implementation failed' in error
 
 
 def test_review_gate_fails_if_staging_fails(tmp_path: Any) -> None:
@@ -701,7 +1251,9 @@ def test_review_gate_fails_if_staging_fails(tmp_path: Any) -> None:
 
     with patch.object(diff, '_git', new=fake_git):
         with pytest.raises(diff.ReviewGateFailed):
-            asyncio.run(diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False))
+            asyncio.run(diff._review_gate(
+                p, 'main', 'main', 'spec', 'test-model', False,
+                constraints='', validation_report='', prior_findings=[]))
 
 
 def test_changed_files_includes_untracked_new_files(tmp_path: Any) -> None:
@@ -723,7 +1275,6 @@ def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None
     answers = iter(['y'])
     with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
          patch.object(diff, '_run_implementor', new=_impl_creates_file), \
-         patch.object(diff, '_ensure_validated', new=_ok_validation), \
          patch.object(diff, '_review_gate', new=_clean_review):
         with _chdir(p):
             rc = asyncio.run(
@@ -738,3 +1289,60 @@ def test_run_diff_normal_commits_and_accepts(tmp_path: Any, capsys: Any) -> None
     last = _git_out(p, 'log', '--oneline', '-1')
     assert 'Implement' in last
     assert len(_git_out(p, 'log', '--oneline').splitlines()) == 2
+
+
+def test_zero_review_cycles_still_runs_validation(tmp_path: Any, capsys: Any) -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    answers = iter(['y'])
+    validation = AsyncMock(return_value=[ValidationCheck('make test', 'passed', 'ok')])
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+         patch.object(diff, '_run_validation_cycle', new=validation), \
+         patch.object(diff, '_review_gate', new=_assert_not_called):
+        with _chdir(p):
+            rc = asyncio.run(diff.run_diff(
+                _args(source=_spec_path(p), review_cycles=0),
+                read_line=lambda: next(answers)))
+    assert rc == 0
+    validation.assert_awaited_once()
+    assert 'make test' in capsys.readouterr().out
+
+
+def test_zero_review_cycles_does_not_commit_failed_validation(tmp_path: Any) -> None:
+    from marsha.diff_validation import ValidationCheck
+
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    validation = AsyncMock(return_value=[
+        ValidationCheck('make test', 'failed', 'assertion failed')])
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+         patch.object(diff, '_run_validation_cycle', new=validation), \
+         patch.object(diff, '_review_gate', new=_assert_not_called), \
+         patch.object(diff, '_commit', new=_assert_not_called):
+        with _chdir(p):
+            rc = asyncio.run(diff.run_diff(
+                _args(source=_spec_path(p), review_cycles=0)))
+    assert rc == 1
+    assert validation.await_count == diff.MAX_VALIDATION_FIX_PASSES + 1
+    assert len(_git_out(p, 'log', '--oneline').splitlines()) == 1
+
+
+def test_zero_review_cycles_still_validates_before_commit(tmp_path: Any, capsys: Any) -> None:
+    p = str(tmp_path)
+    _git_repo(p, {'spec.mrsh': _mrsh_spec()})
+    answers = iter(['y'])
+    with patch.object(diff, 'analyze_spec', new=_locked_analyze), \
+         patch.object(diff, '_run_implementor', new=_impl_creates_file), \
+         patch.object(diff, '_review_gate', new=_assert_not_called):
+        with _chdir(p):
+            rc = asyncio.run(diff.run_diff(
+                _args(source=_spec_path(p), review_cycles=0),
+                read_line=lambda: next(answers)))
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert 'pytest -q' in output
+    assert _git_out(p, 'branch', '--show-current') == 'marsha/spec'

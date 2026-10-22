@@ -642,6 +642,13 @@ def _payload_text(kind: str, payload: dict[str, str]) -> str:
     return payload['title'] + '\n' + payload['body']
 
 
+def _spec_gate_issues(gate: dict[str, Any]) -> list[str]:
+    issues = list(gate['errors']) + list(gate['ambiguities'])
+    if not gate['compilable'] and not issues:
+        issues.append('the spec gate reports the design is not compilable')
+    return issues
+
+
 def _endpoint_url(error: str) -> str:
     # The URL part of a `url — reason` line from _spec_endpoint_errors.
     return error.split(' — ', 1)[0]
@@ -1092,7 +1099,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                         'error', None,
                         f'The spec-check gate failed to run on the locked design ({e}); '
                         'the source was not modified. Re-run refine.')
-                gate_items = list(gate['errors']) + list(gate['ambiguities'])
+                gate_items = _spec_gate_issues(gate)
                 if gate_items:
                     if gate_rechecks >= REFINE_LOCK_RECHECK_LIMIT:
                         return ChatResult(
@@ -1101,6 +1108,12 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                             f'ambiguity(ies) after the refine conversation; the design is '
                             f'not locked and the source was not modified. Re-run refine to '
                             f'keep resolving them, or resolve them manually and re-run.')
+                    if turn == max_turns - 1:
+                        return ChatResult(
+                            'not-locked', None,
+                            f'The spec-check gate still sees {len(gate_items)} open item(s) '
+                            'and no turns remain; the design is not locked and the source was '
+                            'not modified. Remaining items: ' + '; '.join(gate_items))
                     gate_rechecks += 1
                     print(f'Note: the spec-check gate still sees {len(gate_items)} open '
                           f'ambiguity(ies); the assistant is resolving them (re-check '
@@ -1193,8 +1206,7 @@ async def run_refine_chat(*, kind: str, spec_text: str, ambiguities: list[str],
                             gate = await analyze_spec(
                                 _payload_text(kind, payload), tool_ctx=gate_ctx,
                                 debug=debug)
-                            followup_gate = list(gate['errors']) \
-                                + list(gate['ambiguities'])
+                            followup_gate = _spec_gate_issues(gate)
                         except Exception as e:
                             return ChatResult(
                                 'error', None,

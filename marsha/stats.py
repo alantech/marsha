@@ -137,11 +137,62 @@ class MarshaStats:
 
 stats = MarshaStats()
 
-# Global cost accumulator for commands that don't use the staged MarshaStats
-# (diff, review, refine). Updated by the mappers on every LLM call.
+# Global cost accumulator for --max-price and the cost summaries used by the headless commands.
+# Updated by the mappers on every LLM call (including compile's staged stats).
 _global_cost: float = 0.0
 _global_in_tokens: int = 0
 _global_out_tokens: int = 0
+_max_price: float | None = None
+
+
+class PriceLimitExceeded(BaseException):
+    """Stop the whole command when its estimated model spend reaches the configured cap.
+
+    This intentionally derives from BaseException so broad `except Exception` recovery paths
+    cannot swallow a spend-limit stop and continue making model calls or commit partial work.
+    """
+
+
+def begin_invocation(max_price: float | None) -> None:
+    """Reset per-command usage and install its optional estimated-spend limit."""
+    global _global_cost, _global_in_tokens, _global_out_tokens, _max_price
+    _global_cost = 0.0
+    _global_in_tokens = 0
+    _global_out_tokens = 0
+    _max_price = max_price
+
+
+def max_price_enabled() -> bool:
+    return _max_price is not None
+
+
+def ensure_price_limit(model: str) -> None:
+    """Refuse a request when the cap is spent or its model cannot be priced."""
+    if _max_price is None:
+        return
+    if _global_cost >= _max_price:
+        raise PriceLimitExceeded(
+            f'estimated model spend ${_global_cost:.6f} has reached --max-price '
+            f'${_max_price:.6f}; stopping before another model request')
+    if not price_known(model):
+        raise PriceLimitExceeded(
+            f'cannot enforce --max-price because no token pricing is configured '
+            f'for model {model!r}')
+
+
+def ensure_usage_available() -> None:
+    """Fail closed if a capped request completed without provider token usage."""
+    if _max_price is not None:
+        raise PriceLimitExceeded(
+            'cannot enforce --max-price because the provider returned no token usage')
+
+
+def check_price_limit() -> None:
+    """Stop after the completed model request that reaches or crosses the cap."""
+    if _max_price is not None and _global_cost >= _max_price:
+        raise PriceLimitExceeded(
+            f'estimated model spend ${_global_cost:.6f} reached or exceeded '
+            f'--max-price ${_max_price:.6f}; stopping before another model request')
 
 
 def record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:

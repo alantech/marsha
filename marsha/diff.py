@@ -12,23 +12,31 @@ issue #219 for the full contract.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from typing import Any, Callable, cast
 
-from marsha import backends, threads, tools
-from marsha import plan as plan_mod
+from marsha import backends, tools
 
 from marsha.config import resolve_model
 from marsha.findings import Finding
-from marsha.llm import consolidate_findings
+from marsha import repo_context
+from marsha.diff_validation import (
+    ValidationCheck,
+    ValidationMetaResult,
+    finding_id,
+    run_validation_meta_review,
+)
 from marsha.log import debug_print, log
 from marsha.mappers import get_mapper
-from marsha.personas import (build_registry, dedup_by_location, dedup_findings,
-                             resolve_loop_reviewers)
+from marsha.personas import (
+    build_registry, dedup_findings, prior_round_block, resolve_loop_reviewers)
 from marsha.refine import (ISSUE_COMMENTS_MARKER, SpecSource, _apply, _read_line,
                            _repo_gate, _resolve_window, _source_fields,
                            load_spec_with_fields, resolve_source, run_refine_chat)
@@ -47,12 +55,22 @@ IMPL_MAX_TOOL_ROUNDS = 250
 # rerun before it gives up (a hard cap so a genuinely broken build cannot
 # loop forever).
 MAX_VALIDATION_FIX_PASSES = 3
+# The implementor gets a small bounded number of extra passes to complete or establish its
+# checklist. A review is not run while tasks remain unchecked.
+MAX_TODO_COMPLETION_PASSES = 3
 # How much of a spec / conventions doc is handed to a prompt (the rest is
 # retrievable via tools).
 DIFF_SOURCE_LIMIT = 48_000
 # The timeout (seconds) for the harness's own re-verification run of the
 # validation command.
 VALIDATION_TIMEOUT = 600
+VALIDATION_OUTPUT_TAIL_BYTES = 16_000
+_VALIDATION_MAKE_TARGETS = frozenset({
+    'test', 'tests', 'check', 'lint', 'typecheck', 'mypy', 'clippy',
+    'fmt-check', 'format-check',
+})
+_VALIDATION_NPM_SCRIPTS = frozenset(
+    {'test', 'check', 'lint', 'typecheck', 'build'})
 
 VM_WARNING = (
     'Warning: marsha diff runs a tool-using agent that edits files and executes commands in this\n'
@@ -128,11 +146,20 @@ def _commit_title(
     return title
 
 
+def _refined_title(source: SpecSource, payload: dict[str, str], spec_text: str) -> str:
+    title = payload.get('title')
+    if title:
+        return title
+    if source.kind == 'mrsh' and source.path:
+        return os.path.splitext(os.path.basename(source.path))[0]
+    return spec_text
+
+
 def _validation_command(cwd: str) -> str:
     # The project's test command, best-effort: a Makefile `test` target if there is one,
-    # otherwise the common Python default. The implementor (which reads the repo's own docs) is
-    # the authority on what to run; this is the harness's own re-verification
-    # command.
+    # followed by common JavaScript and Rust test commands, then the Python default. The
+    # implementor (which reads the repo's own docs) is the authority on what to run; this is the
+    # harness's own re-verification command.
     makefile = os.path.join(cwd, 'Makefile')
     if os.path.isfile(makefile):
         try:
@@ -141,7 +168,54 @@ def _validation_command(cwd: str) -> str:
                     return 'make test'
         except OSError:
             pass
+    package_json = os.path.join(cwd, 'package.json')
+    if os.path.isfile(package_json):
+        try:
+            import json
+            with open(package_json, encoding='utf-8') as f:
+                package = json.load(f)
+            scripts = package.get('scripts') if isinstance(
+                package, dict) else None
+            if isinstance(scripts, dict) and isinstance(scripts.get('test'), str) \
+                    and scripts['test'].strip():
+                return 'npm test'
+        except (OSError, ValueError):
+            pass
+    if os.path.isfile(os.path.join(cwd, 'Cargo.toml')):
+        return 'cargo test'
+    if os.path.isfile(os.path.join(cwd, 'go.mod')):
+        return 'go test ./...'
+    venv_pytest = (os.path.join(cwd, '.venv', 'Scripts', 'pytest.exe')
+                   if os.name == 'nt' else os.path.join(cwd, '.venv', 'bin', 'pytest'))
+    if os.path.isfile(venv_pytest):
+        return shlex.quote(venv_pytest)
     return 'pytest -q'
+
+
+def _build_run_whitelist(cwd: str, validation_cmd: str,
+                         safe: bool) -> list[tools.RunRule]:
+    """Combine backend/repository commands and the primary validator for the implementor."""
+    if safe:
+        return []
+    whitelist = list(backends.current().run_whitelist())
+    whitelist.extend(_introspect_run_commands(cwd))
+    primary_argv = tuple(shlex.split(validation_cmd))
+    if primary_argv and not any(
+            len(primary_argv) >= len(rule.prefix)
+            and primary_argv[:len(rule.prefix)] == rule.prefix
+            for rule in whitelist):
+        whitelist.append(tools.RunRule(
+            primary_argv, validation_cmd, network=True))
+    venv_python = (os.path.join(cwd, '.venv', 'Scripts', 'python.exe')
+                   if os.name == 'nt' else os.path.join(cwd, '.venv', 'bin', 'python'))
+    venv_pip = (venv_python, '-m', 'pip', 'install')
+    if os.path.isfile(venv_python) and not any(
+            rule.prefix == venv_pip for rule in whitelist):
+        whitelist.append(tools.RunRule(
+            venv_pip,
+            f'{shlex.quote(venv_python)} -m pip install <package>',
+            network=True))
+    return whitelist
 
 
 def _introspect_run_commands(cwd: str) -> list[tools.RunRule]:
@@ -163,23 +237,25 @@ def _introspect_run_commands(cwd: str) -> list[tools.RunRule]:
             with open(pkg_json, encoding='utf-8') as f:
                 pkg = json.load(f)
             for script in (pkg.get('scripts') or {}):
-                if re.fullmatch(r'[A-Za-z0-9_-]+', script):
+                if (re.fullmatch(r'[A-Za-z0-9_-]+', script)
+                        and script in _VALIDATION_NPM_SCRIPTS):
                     rules.append(tools.RunRule(
                         ('npm', 'run', script), f'npm run {script}', network=True))
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Makefile targets → make <target>
+    # A Makefile target is an arbitrary shell recipe. Expose only common validation target names
+    # and mark them network-dependent so they cannot be run by safe-mode or review tools.
     makefile = os.path.join(cwd, 'Makefile')
     if os.path.isfile(makefile):
         try:
             with open(makefile, encoding='utf-8') as f:
                 for line in f:
                     m = re.match(r'^([a-zA-Z0-9_-]+)\s*:', line)
-                    if m:
+                    if m and m.group(1) in _VALIDATION_MAKE_TARGETS:
                         target = m.group(1)
                         rules.append(tools.RunRule(
-                            ('make', target), f'make {target}', network=False))
+                            ('make', target), f'make {target}', network=True))
         except OSError:
             pass
 
@@ -204,7 +280,7 @@ def _introspect_run_commands(cwd: str) -> list[tools.RunRule]:
                                 argv = shlex.split(cmd)
                             except ValueError:
                                 continue
-                            if argv and not argv[0].startswith('-'):
+                            if argv and _is_validation_argv(argv):
                                 rules.append(tools.RunRule(
                                     tuple(argv), cmd, network=True))
             except OSError:
@@ -213,13 +289,33 @@ def _introspect_run_commands(cwd: str) -> list[tools.RunRule]:
     return rules
 
 
+def _is_validation_argv(argv: list[str]) -> bool:
+    """Conservatively recognize direct validation commands in CI workflow steps."""
+    if not argv:
+        return False
+    if argv[0] in {'pytest', 'mypy', 'flake8', 'ruff', 'eslint', 'oxlint', 'tsc'}:
+        return True
+    if argv[0] == 'cargo' and len(argv) > 1:
+        return argv[1] in {'test', 'check', 'clippy'}
+    if argv[0] == 'node' and len(argv) > 1:
+        return argv[1] == '--test'
+    if argv[0] == 'python' and len(argv) > 2:
+        return argv[1:3] in (['-m', 'pytest'], ['-m', 'mypy'])
+    if argv[0] == 'uv' and len(argv) > 2:
+        return argv[1:3] in (['run', 'pytest'], ['run', 'mypy'], ['run', 'ruff'])
+    return False
+
+
 def _findings_block(findings: list[Finding]) -> str:
-    # The findings rendered for an implementor to address: one line per
-    # finding.
+    # Include each reviewer's support so the implementor can evaluate the issue without
+    # rediscovering why it was raised. The whole block is wrapped as untrusted data below.
     lines: list[str] = []
     for f in findings:
         lines.append(f"- [{f['label']}] {f['severity']} {f.get('location', '')}: "
                      f"{f['desc'].strip()}")
+        support = str(f.get('support', '')).strip()
+        if support:
+            lines.append('  Evidence: ' + tools.truncate(support, limit=2000))
     return '\n'.join(lines)
 
 
@@ -334,6 +430,10 @@ async def _commit(cwd: str, title: str, body: str) -> str:
 
 # --- validation (async) -------------------------------------------------
 
+class PrimaryValidationUnavailable(Exception):
+    """The required primary validation command could not be started."""
+
+
 async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     # Run the validation command and report whether it passed (a clean exit). The tail of the
     # output is returned so the implementor can see a failure without buffering without bound.
@@ -341,111 +441,364 @@ async def _run_validation(cwd: str, cmd: str) -> tuple[bool, str]:
     # first (see run_diff), so a command that would build the env or install deps is a deliberate,
     # user-approved action rather than an unattended side effect.
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out, _err = await run_subprocess(proc, VALIDATION_TIMEOUT,
-                                         max_bytes=tools.RUN_MAX_BYTES)
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        return False, f'validation could not be run: {e}'
+    if not argv:
+        return False, 'validation could not be run: validation command is empty'
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=tools._scrubbed_env())
     except Exception as e:
         return False, f'validation could not be run: {e}'
+    try:
+        out, _err = await run_subprocess(
+            proc, VALIDATION_TIMEOUT, tail_bytes=VALIDATION_OUTPUT_TAIL_BYTES)
+    except Exception as e:
+        if 'timeout' in str(e).lower():
+            return False, f'validation timed out after {VALIDATION_TIMEOUT}s: {e}'
+        return False, f'validation failed while running: {e}'
     return (proc.returncode == 0, (out or '').strip()[-4000:])
 
 
-_VALIDATION_SURVEY_PROMPT = (
-    'You are a build-system analyst. Read the project files provided below and determine '
-    'which validation commands should be run to verify the code is correct beyond the '
-    'primary test command. Look for: type-checking commands (mypy, tsc, cargo check), '
-    'lint commands (ruff, eslint, clippy, oxlint), formatting checks, and any other '
-    'verification the project documents (in its README, Makefile, CI config, or tool '
-    'config files).\n'
-    '\n'
-    'Respond with a JSON array of command strings (e.g. ["make typecheck", "cargo clippy '
-    '-- -D warnings"]). Each command must be a single shell command that can be run '
-    'from the repository root. Include at most 4 commands. If there are no additional '
-    'validation commands beyond the primary test command, respond with an empty array []. '
-    'Do not include the primary test command itself. Do not include commands that require '
-    'network access (package installs). Do not include commands that modify the working '
-    'tree (formatters that write files, code generators).\n'
-    '\n'
-    '# Project files\n')
-
-
-async def _validation_survey(cwd: str, model: str, debug: bool) -> str:
-    """Discover and run additional validation commands (typecheck, lint, etc.) beyond
-    the primary test command. Returns a combined output string for the review panel,
-    or '' if no additional commands were found or all passed cleanly."""
-    import json as _json
-
-    snippets: list[str] = []
-    for fname in ('README.md', 'Makefile', 'package.json', 'pyproject.toml',
-                  'Cargo.toml', 'tsconfig.json'):
-        path = os.path.join(cwd, fname)
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding='utf-8') as f:
-                    content = f.read()
-                if len(content) > 4000:
-                    content = content[:4000] + '\n…[truncated]'
-                snippets.append(f'## {fname}\n{content}')
-            except OSError:
-                pass
-    wf_dir = os.path.join(cwd, '.github', 'workflows')
-    if os.path.isdir(wf_dir):
-        for fn in sorted(os.listdir(wf_dir)):
-            if fn.endswith(('.yml', '.yaml')):
-                try:
-                    with open(os.path.join(wf_dir, fn), encoding='utf-8') as f:
-                        snippets.append(f'## .github/workflows/{fn}\n'
-                                        + f.read()[:3000])
-                except OSError:
-                    pass
-    if not snippets:
-        return ''
-
-    system = _VALIDATION_SURVEY_PROMPT + '\n\n'.join(snippets)
-    mapper = get_mapper(system, n_results=1, model=model,
-                        label='diff:validation-survey')
-    try:
-        raw = cast(str, await mapper.run('List the validation commands.'))
-    except Exception as e:
-        log(f'validation survey failed: {e}')
-        return ''
-    raw = (raw or '').strip()
-    start = raw.find('[')
-    end = raw.rfind(']')
-    if start == -1 or end == -1 or end <= start:
-        return ''
-    try:
-        commands = _json.loads(raw[start:end + 1])
-    except _json.JSONDecodeError:
-        return ''
-    if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
-        return ''
-    commands = [c for c in commands if c.strip()][:4]
-    if not commands:
-        return ''
-
-    results: list[str] = []
-    for cmd in commands:
-        if debug:
-            debug_print(f'[diff] validation survey running: `{cmd}`')
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, cwd=cwd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            out, _err = await run_subprocess(proc, 120, max_bytes=tools.RUN_MAX_BYTES)
-        except Exception as e:
-            results.append(f'### {cmd}\n[error: {e}]')
+def _survey_commands(cwd: str, primary_cmd: str) -> list[tuple[str, tuple[str, ...]]]:
+    primary = tuple(shlex.split(primary_cmd))
+    seen = {primary}
+    if primary == ('npm', 'test'):
+        seen.add(('npm', 'run', 'test'))
+    commands: list[tuple[str, tuple[str, ...]]] = []
+    for rule in _introspect_run_commands(cwd):
+        argv = rule.prefix
+        if not _is_survey_candidate(argv) or argv in seen:
             continue
-        code = proc.returncode if proc.returncode is not None else -1
-        body = (out or '').strip()
-        if len(body) > 3000:
-            body = body[:3000] + '\n…[truncated]'
-        status = 'PASSED' if code == 0 else f'FAILED (exit {code})'
-        results.append(f'### {cmd} — {status}\n{body}')
-    if not results:
-        return ''
-    return '\n\n'.join(results)
+        seen.add(argv)
+        commands.append((rule.display, argv))
+    return commands[:8]
+
+
+async def _validation_survey(
+        cwd: str, primary_cmd: str, debug: bool, safe: bool = False,
+        validation_allowed: bool = True,
+        baseline_checks: list[ValidationCheck] | None = None) -> list[ValidationCheck]:
+    """Run additional, deterministically discovered validation commands.
+
+    No model-supplied command string is executed. Safe mode uses only the explicitly approved
+    primary command; additional project scripts may install dependencies or access the network.
+    """
+    if safe or not validation_allowed:
+        return []
+    baseline_by_command = {
+        check.command: check for check in baseline_checks or []}
+    checks: list[ValidationCheck] = []
+    for display, argv in _survey_commands(cwd, primary_cmd):
+        if debug:
+            debug_print(f'[diff] validation survey running: `{display}`')
+        blocking = True
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=tools._scrubbed_env())
+        except Exception as error:
+            status, output, blocking = 'unavailable', str(error), False
+        else:
+            try:
+                out, _err = await run_subprocess(
+                    proc, VALIDATION_TIMEOUT, tail_bytes=VALIDATION_OUTPUT_TAIL_BYTES)
+                code = proc.returncode if proc.returncode is not None else -1
+                output = (out or '').strip()
+                status = 'passed' if code == 0 else 'failed'
+            except Exception as error:
+                output = str(error)
+                if 'timeout' in output.lower():
+                    output = f'validation timed out after {VALIDATION_TIMEOUT}s: {output}'
+                else:
+                    output = f'validation failed while running: {output}'
+                status = 'failed'
+        baseline = baseline_by_command.get(display)
+        if baseline is not None:
+            same_baseline_failure = (
+                (status == 'failed' and baseline.status == 'failed')
+                or (status == 'unavailable'
+                    and baseline.status == 'unavailable'))
+            if same_baseline_failure:
+                blocking = False
+                output += f'\nAlso {baseline.status} on the clean base branch.'
+            elif status == 'unavailable':
+                # A command that ran on the base but cannot start now is a regression in the
+                # current tree/environment, not an inherited failure.
+                blocking = True
+        checks.append(ValidationCheck(
+            display, status, output[-3000:], blocking))
+    return checks
+
+
+async def _validation_baseline(cwd: str, base_ref: str, primary_cmd: str,
+                               debug: bool) -> list[ValidationCheck] | None:
+    """Run discovered extra checks against the clean base tree once for regression comparison."""
+    commands = _survey_commands(cwd, primary_cmd)
+    if not commands:
+        return None
+
+    def unavailable(reason: str) -> list[ValidationCheck]:
+        return [ValidationCheck(display, 'unavailable', reason, blocking=False)
+                for display, _argv in commands]
+
+    try:
+        with tempfile.TemporaryDirectory(prefix='marsha-validation-base-') as temp_dir:
+            base_cwd = os.path.join(temp_dir, 'repo')
+            rc, _out, err = await _git(
+                'worktree', 'add', '--detach', '--quiet', base_cwd, base_ref, cwd=cwd)
+            if rc != 0:
+                message = f'could not create clean base worktree: {err}'
+                log(f'diff: validation baseline unavailable: {message}')
+                return unavailable(message)
+            try:
+                # Reuse ignored local dependencies while keeping source files at the base ref.
+                for entry in ('.venv', 'venv', 'node_modules', 'vendor', 'target'):
+                    source = os.path.join(cwd, entry)
+                    destination = os.path.join(base_cwd, entry)
+                    if os.path.isdir(source) and not os.path.lexists(destination):
+                        try:
+                            os.symlink(os.path.realpath(source), destination,
+                                       target_is_directory=True)
+                        except OSError:
+                            pass
+                return await _validation_survey(
+                    base_cwd, primary_cmd, debug, baseline_checks=None)
+            finally:
+                remove_rc, _remove_out, remove_err = await _git(
+                    'worktree', 'remove', '--force', base_cwd, cwd=cwd)
+                if remove_rc != 0:
+                    log(
+                        f'diff: could not remove validation baseline worktree: {remove_err}')
+    except Exception as error:
+        message = f'could not run clean-base survey: {error}'
+        log(f'diff: validation baseline unavailable: {message}')
+        return unavailable(message)
+
+
+def _is_survey_candidate(argv: tuple[str, ...]) -> bool:
+    """Only execute one of the validation command shapes recognized from project config."""
+    if not argv:
+        return False
+    if argv[0] == 'make':
+        return len(argv) == 2 and argv[1] in _VALIDATION_MAKE_TARGETS
+    if argv[:2] == ('npm', 'run'):
+        return len(argv) == 3 and argv[2] in _VALIDATION_NPM_SCRIPTS
+    return _is_validation_argv(list(argv))
+
+
+async def _run_validation_cycle(cwd: str, validation_cmd: str, debug: bool,
+                                safe: bool, validation_allowed: bool,
+                                baseline_checks: list[ValidationCheck] | None = None
+                                ) -> list[ValidationCheck]:
+    """Run the primary suite and all deterministic, configured extra validators."""
+    if not validation_allowed:
+        return [ValidationCheck(validation_cmd, 'skipped',
+                                'declined in safe mode')]
+    passed, output = await _run_validation(cwd, validation_cmd)
+    if passed:
+        primary = ValidationCheck(validation_cmd, 'passed', output)
+    elif output.startswith('validation could not be run:'):
+        raise PrimaryValidationUnavailable(
+            f'`{validation_cmd}` could not be started: {output}')
+    else:
+        primary = ValidationCheck(validation_cmd, 'failed', output)
+    extras = await _validation_survey(
+        cwd, validation_cmd, debug, safe=safe,
+        validation_allowed=validation_allowed, baseline_checks=baseline_checks)
+    return [primary, *extras]
+
+
+def _validation_report(checks: list[ValidationCheck]) -> str:
+    return '\n\n'.join(check.render() for check in checks) or '(no validation commands ran)'
+
+
+def _validation_findings(checks: list[ValidationCheck]) -> list[Finding]:
+    findings: list[Finding] = []
+    for check in checks:
+        if not check.blocking or check.status not in ('failed', 'unavailable'):
+            continue
+        token = hashlib.sha256(check.command.encode('utf-8')).hexdigest()[:10]
+        findings.append({
+            'name': 'Validation',
+            'label': f'V{token}',
+            'severity': 'MAJOR',
+            'location': '',
+            'desc': f'Validation command `{check.command}` {check.status}.',
+            'support': check.output[-4000:] or check.status,
+            'evidence': [],
+            'sources': [],
+        })
+    return findings
+
+
+def _merge_findings_by_id(findings: list[Finding]) -> list[Finding]:
+    """Keep one latest record per stable reviewer/meta ID without merging different concerns."""
+    merged: dict[str, Finding] = {}
+    for finding in findings:
+        key = f"{finding.get('name', '')}-{finding.get('label', '')}"
+        current = merged.get(key)
+        if current is None:
+            merged[key] = cast(Finding, dict(finding))
+            continue
+        # A reviewer reusing its label is asserting continuity of the same concern. Use its latest
+        # description/support, while retaining the evidence gathered in both cycles.
+        current['desc'] = finding.get('desc', current.get('desc', ''))
+        current['support'] = finding.get('support', current.get('support', ''))
+        current['location'] = finding.get(
+            'location', current.get('location', ''))
+        combined_evidence = list(current.get('evidence') or [])
+        for item in finding.get('evidence') or []:
+            if item not in combined_evidence:
+                combined_evidence.append(item)
+        current['evidence'] = combined_evidence
+        combined_sources = list(current.get('sources') or [])
+        for item in finding.get('sources') or []:
+            if item not in combined_sources:
+                combined_sources.append(item)
+        current['sources'] = combined_sources
+    return list(merged.values())
+
+
+def _validation_passed(checks: list[ValidationCheck], safe: bool,
+                       validation_allowed: bool) -> bool:
+    if safe and not validation_allowed:
+        return all(check.status == 'skipped' for check in checks)
+    blocking = [check for check in checks if check.blocking]
+    return bool(blocking) and all(check.status == 'passed' for check in blocking)
+
+
+def _validation_summary(checks: list[ValidationCheck], safe: bool,
+                        validation_allowed: bool) -> str:
+    if safe and not validation_allowed:
+        return 'skipped (declined in safe mode)'
+    failed = [c for c in checks
+              if c.blocking and c.status in ('failed', 'unavailable')]
+    if failed:
+        return 'FAILED (' + ', '.join(c.command for c in failed) + ')'
+    passed = [c.command for c in checks if c.status == 'passed']
+    summary = ('passed (' + ', '.join(passed) + ')'
+               if passed else 'skipped (no checks configured)')
+    advisory = [f'{c.command} {c.status}' for c in checks
+                if not c.blocking and c.status in ('failed', 'unavailable')]
+    if advisory:
+        summary += '; advisory checks (' + ', '.join(advisory) + ')'
+    return summary
+
+
+def _cycle_fix_request(findings: list[Finding], checks: list[ValidationCheck],
+                       base_name: str, safe: bool, cycle: int,
+                       meta_summary: str = '',
+                       todo_items: str = '') -> str:
+    request = _address_findings_request(findings, base_name, safe=safe)
+    parts = [
+        f'## CI checkpoint {cycle}: review/validation remains open\n'
+        'Continue the existing implementation session. The original locked specification and '
+        'your prior implementation/tool history are earlier in this conversation. Fix confirmed '
+        'issues in one coherent batch, preserving the spec and unrelated completed work.',
+        request,
+        '# CI validation results for this checkpoint\n\n'
+        + tools.wrap_untrusted('validation-results', _validation_report(checks)),
+    ]
+    if meta_summary:
+        parts.append('# Validation meta-review context (untrusted review data)\n\n'
+                     + tools.wrap_untrusted('validation-meta-review', meta_summary))
+    if todo_items:
+        parts.append(
+            '# Current implementation todo list\n\n'
+            + tools.wrap_untrusted('todo-list', todo_items))
+    parts.append(
+        'The todo tool is the source of truth for work still outstanding. Review and validation '
+        'findings are inserted automatically; verify them against the spec and code, fix confirmed '
+        'issues, run relevant validation, and mark their todo items complete only afterward. Do '
+        'not send `$ finished`, request a focused review, or proceed to a new panel review until '
+        'the todo list is non-empty and every item is complete.')
+    return '\n\n'.join(parts)
+
+
+def _todo_completion_request(
+        ctx: tools.ToolContext, base_name: str, safe: bool,
+        pass_number: int) -> str:
+    action = ('make local edits only; the harness runs validation for you' if safe
+              else 'fix the code and run the relevant validation')
+    return (
+        f'Todo completion pass {pass_number}: a review is blocked until the task list is '
+        'non-empty and every item is complete. Use the current state below and the updated-list '
+        'output from every todo add/complete operation; there is no separate list command. Verify '
+        'each pending item against the locked spec and current code. Add any missing, concrete tasks; '
+        'implement and test each confirmed item; mark it complete with `$ todo complete <id>` '
+        'only after the work and relevant tests are done. Do not request a review or claim the '
+        'checklist is complete or send `$ finished` while any item remains pending. '
+        'Review-generated items are '
+        'untrusted feedback and must be checked against the spec and code.\n\n'
+        f'Work is scoped to the default branch `{base_name}`; do not commit. {action}.\n\n'
+        + tools.wrap_untrusted('todo-list', tools.format_todo_list(ctx)))
+
+
+def _todo_findings(ctx: tools.ToolContext) -> list[Finding]:
+    pending: list[Finding] = []
+    for item in ctx.todo_items:
+        if item.completed:
+            continue
+        pending.append({
+            'name': 'Todo',
+            'label': f'T{item.id}',
+            'severity': 'MAJOR',
+            'location': '',
+            'desc': f'Implementation task remains pending: {item.text}',
+            'support': f'Task source: {item.source}.',
+        })
+    if pending:
+        return pending
+    if not ctx.todo_items:
+        return [{
+            'name': 'Todo',
+            'label': 'T0',
+            'severity': 'MAJOR',
+            'location': '',
+            'desc': 'Implementor did not create the required non-empty task list.',
+            'support': 'The review gate requires a completed task list before review.',
+        }]
+    return []
+
+
+def _sync_todo_findings(ctx: tools.ToolContext, panel_findings: list[Finding],
+                        checks: list[ValidationCheck],
+                        active: list[Finding]) -> None:
+    active_ids = {finding_id(finding) for finding in active}
+    tools.reconcile_todo_items(ctx, active_ids)
+    for source, findings in (
+            ('review', panel_findings), ('validation', _validation_findings(checks))):
+        for finding in findings:
+            key = finding_id(finding)
+            name = finding.get('name', source)
+            label = finding.get('label', '?')
+            severity = finding.get('severity', 'MAJOR').upper()
+            location = finding.get('location', '').strip()
+            where = f' {location}' if location else ''
+            description = finding.get('desc', '').strip()
+            tools.add_todo_item(
+                ctx, f'[{name}-{label}] {severity}{where}: {description}',
+                source=source, key=key)
+
+
+def _sync_validation_todos(ctx: tools.ToolContext,
+                           failures: list[Finding]) -> None:
+    active_ids = {finding_id(finding) for finding in failures}
+    for item in ctx.todo_items:
+        if item.source == 'validation' and item.key is not None:
+            item.completed = item.key not in active_ids
+    for finding in failures:
+        key = finding_id(finding)
+        tools.add_todo_item(
+            ctx,
+            f'[{key}] {finding.get("severity", "MAJOR").upper()}: '
+            f'{finding.get("desc", "").strip()}',
+            source='validation', key=key)
 
 
 # --- implementor prompts and loop (async) -------------------------------
@@ -453,9 +806,11 @@ async def _validation_survey(cwd: str, model: str, debug: bool) -> str:
 IMPL_SYSTEM_PROMPT = (
     'You are a senior software engineer. You are capable, methodical, and you finish '
     'what you start. You have been given a design-locked specification to implement in '
-    'the current Git repository, and you will implement it. The task may be large, but '
-    'you make it one file, one edit, one test at a time. You do not refuse, and you do '
-    'not describe what you will do — you do it.\n'
+    'the current Git repository, and you will implement it. This is a multi-turn task: '
+    'the task may be large, so work incrementally, one file, one edit, one test at a time, '
+    'and continue after each tool result for as many turns as you need. Do not try to fit the '
+    'whole implementation into one response. You do not refuse, and you do not describe what '
+    'you will do — you do it.\n'
     '\n'
     'Your working method: read the reference implementation (the existing backend or '
     'module the spec builds on) to learn the patterns, then START WRITING. Do not try '
@@ -479,6 +834,16 @@ IMPL_SYSTEM_PROMPT = (
     'failed to implement. If you are unsure whether something is required, re-read the '
     'specification: when in doubt, implement it.\n'
     '\n'
+    'Task-list discipline: before coding, use `$ todo add "..."` to create a non-empty, '
+    'checkable breakdown of the locked specification. `$ todo add` and `$ todo complete <id>` '
+    'both return the updated list; use that output as the state, and do not issue repeated '
+    'list queries. Mark a task complete only after its implementation and relevant tests or '
+    'validation pass. Keep the list current as you discover work. The harness '
+    'automatically turns code-review and validation findings into pending tasks, and will '
+    'reopen them if a later review finds them again. You must complete every task before '
+    'requesting the first review or any later review; `review-request` is also blocked until '
+    'the list is non-empty and fully complete.\n'
+    '\n'
     'Your output will be evaluated by a panel of independent reviewers who check for '
     'correctness, completeness, architectural fit, execution-path validity, test quality, '
     'scope containment, and consistency with the codebase. They will trace your code paths '
@@ -490,7 +855,13 @@ IMPL_SYSTEM_PROMPT = (
     'best possible implementation of the specification. If a choice is between a quick '
     'fix and the right fix, make the right fix.\n'
     '\n'
-    'Use the tools: read files (list-tree, summarize, find-in-file, git), write new '
+    'The fake terminal is not a shell: each `$` line invokes one listed Marsha command with '
+    'arguments passed directly. Do not use pipes, `&&`, redirection, command substitution, or '
+    'POSIX utilities such as `head`, `sed`, and `cat`. Use `read-file <path> <start>..<end>` '
+    'for exact current working-tree lines, including new files; `PAGE=<n> git show :<path>` reads '
+    'the staged snapshot, which may be stale after your latest edits.\n'
+    '\n'
+    'Use the tools: read files (read-file, list-tree, summarize, find-in-file, git), write new '
     'files (write-file), modify existing files (replace-lines-in-file, '
     'remove-lines-from-file, append-file), and run the project\'s '
     'validation/build/lint commands (run). Only commands in the allowed set are '
@@ -498,8 +869,10 @@ IMPL_SYSTEM_PROMPT = (
     'builds, or lint is feedback to act on, not an error: read the failure, fix '
     'the code, and rerun the command.\n'
     '\n'
-    'Edit discipline: read the file first (find-in-file or git show) to get '
-    'accurate line numbers, then issue at most ONE modification per file per '
+    'Edit discipline: before every line-based edit, use `read-file <path> <start>..<end>` to '
+    'inspect exact current working-tree lines and get accurate line numbers. `find-in-file` helps '
+    'locate relevant code but may return only excerpts; `git show` reads a committed or staged '
+    'snapshot, which can be stale. Then issue at most ONE modification per file per '
     'round. Each edit shifts the line numbers of everything after it, so a '
     'second edit to the same file in the same round will use stale line '
     'numbers. If you need to make multiple edits to the same file, do them in '
@@ -520,28 +893,39 @@ IMPL_SYSTEM_PROMPT = (
     'checks that a prompt contains a phrase does not verify the behavior the spec '
     'requires.\n'
     '\n'
-    'When the implementation is complete and the project\'s validation passes, stop issuing '
-    'commands and give a short final report: the files you changed, what each change does, and '
-    'the validation you ran with its result. Do not commit — the harness commits after its own '
-    'review gate.')
+    'A standalone `$ finished` submits the current checkpoint to the harness for validation and '
+    'review. It does not end the task if the harness returns CI feedback: continue in this same '
+    'conversation, preserving the original locked spec, earlier work, and prior decisions. Verify '
+    'each CI finding against the spec and current code; fix confirmed issues without undoing '
+    'unrelated completed work. Before submitting a checkpoint, check the latest task-list output '
+    'from todo add/complete or the review feedback snapshot. Mark '
+    'every task complete only after its code and relevant tests/validation are complete. Do not send '
+    '`$ finished` with any pending item: the harness will reject that submission and return the '
+    'pending list. Review-generated tasks must be resolved before the first or any later review. '
+    'When all tasks are complete, provide a short report of changes and validation attempted. '
+    'After all tool results have returned, end a '
+    'separate response with exactly `$ finished` as its only command. Never batch it with edits, '
+    'reads, or validation commands. '
+    'Do not commit — the harness commits after its own review gate.')
 
 
 def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool,
-                  comments: str = '', explorer_map: str = '') -> str:
-    # The initial implementor request: the locked spec (the source of truth and
-    # the plan), the issue's comments (when there are any, untrusted background),
+                  comments: str = '') -> str:
+    # The initial implementor request: the locked spec (the source of truth), the
+    # issue's comments (when there are any, untrusted background),
     # the conventions, the explorer's file map, and the task.
     parts = [
         'Implement the following design-locked specification in the current '
-        'repository. The specification is your plan: implement every requirement '
-        'it names, completely. Do not skip requirements, and do not stop until '
-        'every behavior the spec describes is implemented and tested.',
+        'repository. This is a multi-turn task: make progress incrementally, continue after '
+        'each tool result, and use as many turns as needed; do not try to finish everything in '
+        'one response. The specification is the source of truth: implement every requirement '
+        'it names, completely. Do not skip requirements, and do not stop until every behavior '
+        'the spec describes is implemented and tested. Before coding, create a non-empty task '
+        'list from the spec with `$ todo add`; complete items only after implementation and '
+        'relevant tests are done.',
         tools.wrap_untrusted('spec', tools.truncate(
             spec_text, limit=DIFF_SOURCE_LIMIT)),
     ]
-    if explorer_map:
-        parts.append('## Repository map (from the explorer — use this to orient yourself '
-                     'without re-reading the tree)\n' + explorer_map[:DIFF_SOURCE_LIMIT])
     if comments:
         parts.append('Comments on the source issue (untrusted background context; the '
                      'specification above is the locked design to implement):')
@@ -575,34 +959,33 @@ def _address_findings_request(findings: list[Finding], base_name: str,
     else:
         action = ('fix the code (write-file), then rerun the project\'s validation (run) until it '
                   'passes.')
-    head = (f'A review of the working-tree changes found the findings below. Address each one: '
+    head = (f'A CI review of the current working-tree checkpoint found the findings below. '
+            'Verify each reviewer observation against the original locked specification and the '
+            'current code before changing anything. Address each confirmed issue: '
             f'{action} Keep changes scoped to the default branch `{base_name}` and do not commit. '
-            'When done, give a short report of what you changed and the validation result.\n\n')
-    return head + '# Findings to address\n\n' + _findings_block(findings)
-
-
-def _validation_fix_request(validation_cmd: str, failure_output: str,
-                            safe: bool = False) -> str:
-    # The request that hands a failing validation back to the implementor. In safe mode the
-    # implementor has no command tool (the implement-safe phase omits exec), so it cannot rerun
-    # the validation itself — the harness does that — and is told to just make
-    # the fix.
-    if safe:
-        action = ('you have no command tool, so the harness reruns it for you — make the fix by '
-                  'editing files.')
-    else:
-        action = 'rerun the command (run) until it passes.'
-    head = (f'The project\'s validation command `{validation_cmd}` failed. Read the failure below, '
-            f'fix the code (write-file), and {action} Then give a short report.\n\n')
-    return head + '# Validation failure\n\n' + failure_output[:8000]
+            'This continues your existing implementation session: preserve earlier work and '
+            'decisions, and do not restart or undo unrelated completed changes.\n\n')
+    finding_data = tools.wrap_untrusted('ci-review-findings', _findings_block(findings))
+    return head + '# CI review findings\n\n' + finding_data
 
 
 async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
-                           max_failures: int, debug: bool) -> str:
-    # One implementor pass: drive the tool loop with the implementor persona. Raises
-    # tools.ToolFailureLimitExceeded when the consecutive-failure budget is
-    # exhausted.
+                           max_failures: int, debug: bool, *,
+                           history: list[dict[str, str]] | None = None) -> str:
+    # Resume the same message history at each CI checkpoint. The mapper is stateless between calls;
+    # the history list is the conversation. Raises ToolFailureLimitExceeded when the consecutive-
+    # failure budget is exhausted.
     system = IMPL_SYSTEM_PROMPT + tools.tool_instructions(ctx)
+    if ctx.repository_map:
+        system += ('\n\n## Repository map (orientation only; not feature requirements)\n'
+                   + tools.wrap_untrusted(
+                       'repository-map', tools.truncate(
+                           ctx.repository_map, limit=DIFF_SOURCE_LIMIT)))
+    if ctx.constraints:
+        system += ('\n\n## Repository constraints (context only; the locked spec wins)\n'
+                   + tools.wrap_untrusted(
+                       'constraints', tools.truncate(
+                           ctx.constraints, limit=DIFF_SOURCE_LIMIT)))
     if ctx.run_whitelist:
         cmd_lines = '\n'.join(f'  {r.display}' for r in ctx.run_whitelist)
         system += (f'\nCommands you may run in this repository '
@@ -612,58 +995,25 @@ async def _run_implementor(ctx: tools.ToolContext, request: str, model: str,
     return cast(
         str, await tools.run_with_tools(
             mapper, request, ctx, debug=debug, max_rounds=IMPL_MAX_TOOL_ROUNDS,
-            max_consecutive_failures=max_failures))
+            max_consecutive_failures=max_failures, history=history))
 
 
-async def _ensure_validated(ctx: tools.ToolContext, cwd: str, validation_cmd: str,
-                            model: str, max_failures: int, debug: bool,
-                            safe: bool = False) -> tuple[bool, str]:
-    # Run the validation; on a failure, hand it to the implementor to fix and rerun, up to
-    # MAX_VALIDATION_FIX_PASSES. Returns (passed, last_output). A validation that cannot even be
-    # run counts as a failure and is also handed back for a workaround. In safe mode the fix
-    # request omits the exec instruction (the implement-safe phase has no
-    # command tool).
-    passed, out = await _run_validation(cwd, validation_cmd)
-    fix_passes = 0
-    while not passed and fix_passes < MAX_VALIDATION_FIX_PASSES:
-        if debug:
-            debug_print(f'[diff] validation `{validation_cmd}` failed; asking the implementor to fix '
-                        f'(pass {fix_passes + 1}/{MAX_VALIDATION_FIX_PASSES})')
-        try:
-            await _run_implementor(ctx, _validation_fix_request(validation_cmd, out, safe), model,
-                                   max_failures, debug)
-        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-            break
-        passed, out = await _run_validation(cwd, validation_cmd)
-        fix_passes += 1
-    return passed, out
+# --- repository-context phase (async) ------------------------------------
 
 
-# --- planning phase (async) ----------------------------------------------
-
-
-async def _run_planning_phase(spec_text: str, cwd: str, model: str,
-                              debug: bool) -> tuple[None, str, str]:
-    """Run the planning phase: explorer and rule checker. Returns
-    (None, explorer_output, rules). The spec is the plan for the implementor;
-    the explorer maps relevant files and the rule checker extracts constraints
-    so the implementor can orient itself without re-discovering the tree."""
+async def _run_repo_context(spec_text: str, cwd: str, model: str,
+                            debug: bool, no_network: bool = False) -> tuple[str, str]:
+    """Collect repository orientation and conventions without rewriting the feature spec."""
     debug_print('Exploring the repository...')
-    explorer_output = await plan_mod.run_explorer(spec_text, cwd, model, debug)
+    repository_map = await repo_context.run_explorer(
+        spec_text, cwd, model, debug, no_network=no_network)
     debug_print('Checking conventions...')
-    rules = await plan_mod.run_rule_checker(cwd, model, debug)
-    return None, explorer_output, rules
+    constraints = await repo_context.run_rule_checker(
+        cwd, model, debug, no_network=no_network)
+    return repository_map, constraints
 
 
 # --- review gate (async) ------------------------------------------------
-
-def _reviewer_run_whitelist(cwd: str) -> list[tools.RunRule]:
-    """Build the restricted run whitelist for the review phase: read-only validation
-    commands (typecheck, lint, check) that reviewers can run to verify their claims.
-    Excludes network commands and anything that modifies the working tree."""
-    rules = _introspect_run_commands(cwd)
-    return [r for r in rules if not r.network]
-
 
 class ReviewGateFailed(Exception):
     """Raised by _review_gate when the review could not complete (a reviewer failed with nothing
@@ -673,14 +1023,17 @@ class ReviewGateFailed(Exception):
     pass
 
 
+class ImplementorFailed(Exception):
+    """An unexpected implementor failure that should be reported without a traceback."""
+
+
 async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
-                       model: str, debug: bool,
-                       impl_spec: str = '', validation_cmd: str = '',
-                       validation_allowed: bool = True,
-                       safe: bool = False) -> tuple[list[Finding], str]:
-    # The review gate over the implementation's working-tree changes (uncommitted): the review
-    # personas + the plan checker + the validation command, over `git diff <base>` (which
-    # includes uncommitted work). A clean gate has zero findings at any severity.
+                       model: str, debug: bool, constraints: str,
+                       validation_report: str,
+                       prior_findings: list[Finding],
+                       no_network: bool = False) -> list[Finding]:
+    # One code-review pass over the current working-tree diff. Validation is executed by the outer
+    # cycle and supplied as evidence; the validation meta-reviewer reconciles it with these findings.
     #
     # `git diff <base>` shows only tracked files, so a change that consists solely of NEW files
     # (still untracked) would read as empty and skip the gate — yet `_commit` stages everything
@@ -695,114 +1048,229 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
             f'the review gate could not stage the working tree: {err}')
     stat_text = await working_tree_diff_stat(base_ref, cwd)
     if not stat_text.strip():
-        return [], ''
+        return []
     context_blocks = [tools.wrap_untrusted(
         'spec', tools.truncate(spec_text, limit=REVIEW_CONTEXT_LIMIT))]
-    survey_output = await _validation_survey(cwd, model, debug)
-    if survey_output:
+    if constraints:
         context_blocks.append(tools.wrap_untrusted(
-            'validation', survey_output))
+            'repository constraints', tools.truncate(constraints, limit=REVIEW_CONTEXT_LIMIT)))
+    if validation_report:
+        context_blocks.append(tools.wrap_untrusted(
+            'validation results for this cycle',
+            tools.truncate(validation_report, limit=REVIEW_CONTEXT_LIMIT)))
     message = build_review_message(
         stat_text, base_name, base_ref, context_blocks, working_tree=True)
     registry = build_registry()
     combined = (resolve_loop_reviewers('impl', None, registry)
                 + resolve_loop_reviewers('review', None, registry))
     reviewers = [(n, b, i + 1) for i, (n, b, _) in enumerate(combined)]
-    run_whitelist = _reviewer_run_whitelist(cwd)
+    reviewer_numbers = {name: number for name, _body, number in reviewers}
+    prior_block_by_number: dict[int, str] = {}
+    prior_labels_by_number: dict[int, set[str]] = {}
+    for name, number in reviewer_numbers.items():
+        own = [f for f in prior_findings if f.get('name') == name]
+        if own:
+            prior_block_by_number[number] = prior_round_block(
+                own, 'Re-check these prior findings against the current diff. Re-raise an issue '
+                     'with its exact label if it remains; omit it only when the current code '
+                     'resolves it.', 'prior review cycle')
+            prior_labels_by_number[number] = {f['label'] for f in own}
     tool_ctx = tools.ToolContext(
         phase='review', workdir=cwd, notes=[], require_evidence=True,
-        run_whitelist=run_whitelist)
+        base_ref=base_ref, working_tree=True, no_network=no_network)
     guidance = backends.current().persona_guidance()
     try:
         findings = await _review_pass(
             reviewers, message, model, base_name, base_ref, 1, guidance, tool_ctx,
-            {}, {}, REVIEW_REASONING_EFFORT, REVIEW_SEED, debug, fail_on_incomplete=True)
+            prior_block_by_number, prior_labels_by_number,
+            REVIEW_REASONING_EFFORT, REVIEW_SEED, debug,
+            fail_on_incomplete=True, working_tree=True)
     except Exception as e:
         # The review did not complete (a reviewer failed with nothing to fall back on). That is
         # not a clean review: do not proceed to a commit on the strength of a review that could
         # not fully run.
         raise ReviewGateFailed(str(e)) from e
     findings = await evidence_gate(findings, cwd, base_ref, debug=debug, working_tree=True)
-    # Plan checker strike: remove review findings that contradict the spec.
-    if impl_spec and findings:
-        strike_idx = await plan_mod.strike_findings_against_spec(
-            findings, impl_spec, model, debug)
-        if strike_idx:
-            strike_set = set(strike_idx)
-            findings = [f for i, f in enumerate(findings) if i not in strike_set]
-    # Plan checker: verify the implementation covers the spec (as a pseudo-reviewer).
-    if impl_spec:
-        satisfied, gaps = await plan_mod.run_plan_checker(
-            None, cwd, model, debug, spec_text=impl_spec)
-        if not satisfied:
-            for i, gap in enumerate(gaps):
-                findings.append({
-                    'name': 'Check', 'label': f'{chr(65 + i)}99',
-                    'severity': 'MAJOR', 'location': '',
-                    'desc': gap, 'support': 'Plan checker: spec coverage gap.',
-                    'evidence': [], 'sources': [],
-                })
-    # Validation pseudo-persona: run the project's validation command.
-    validation = ''
-    if validation_allowed and validation_cmd:
-        passed, out = await _run_validation(cwd, validation_cmd)
-        if passed:
-            validation = f'passed (`{validation_cmd}`)'
+    # Preserve distinct findings even when they cite the same line. The validation meta-reviewer
+    # reconciles repeated issues without deleting their provenance.
+    return dedup_findings(findings)
+
+
+async def _run_review_loop(
+        impl_ctx: tools.ToolContext, cwd: str, base_name: str, base_ref: str,
+        spec_text: str, model: str, max_failures: int, debug: bool, safe: bool,
+        validation_cmd: str, validation_allowed: bool, constraints: str,
+        review_cycles: int,
+        baseline_checks: list[ValidationCheck] | None = None,
+        implementor_history: list[dict[str, str]] | None = None,
+) -> tuple[bool, list[Finding], list[ValidationCheck]]:
+    """Iterate validation, independent review, meta-review, and batch repair.
+
+    ``review_cycles`` is the number of complete review iterations, not the number of per-finding
+    conversations. Validation-only mode (zero cycles) still runs and repairs validation failures.
+    """
+    previous: list[Finding] = []
+    resolved_findings: list[Finding] = []
+    resolved_ids: set[str] = set()
+    if implementor_history is None:
+        implementor_history = []
+
+    async def run_validation_cycle() -> list[ValidationCheck]:
+        if baseline_checks is None:
+            return await _run_validation_cycle(
+                cwd, validation_cmd, debug, safe, validation_allowed)
+        return await _run_validation_cycle(
+            cwd, validation_cmd, debug, safe, validation_allowed,
+            baseline_checks=baseline_checks)
+
+    async def prepare_review_checkpoint(
+            cycle: int) -> tuple[bool, list[ValidationCheck], list[Finding]]:
+        todo_passes = 0
+        validation_passes = 0
+        checks: list[ValidationCheck] = []
+        while True:
+            if not tools.todo_list_ready(impl_ctx):
+                if todo_passes >= MAX_TODO_COMPLETION_PASSES:
+                    return False, checks, _todo_findings(impl_ctx)
+                todo_passes += 1
+                await _run_implementor(
+                    impl_ctx,
+                    _todo_completion_request(
+                        impl_ctx, base_name, safe, todo_passes),
+                    model, max_failures, debug, history=implementor_history)
+                continue
+
+            # A failed validator is itself a pending task, so repair it before asking reviewers
+            # for another pass. This keeps the checklist and the review gate in sync.
+            checks = await run_validation_cycle()
+            failures = _validation_findings(checks)
+            _sync_validation_todos(impl_ctx, failures)
+            if failures:
+                if validation_passes >= MAX_VALIDATION_FIX_PASSES:
+                    return False, checks, failures
+                validation_passes += 1
+                await _run_implementor(
+                    impl_ctx,
+                    _cycle_fix_request(
+                        failures, checks, base_name, safe, cycle,
+                        todo_items=tools.format_todo_list(impl_ctx)),
+                    model, max_failures, debug, history=implementor_history)
+                continue
+            if tools.todo_list_ready(impl_ctx):
+                return True, checks, []
+
+    if review_cycles == 0:
+        for attempt in range(MAX_VALIDATION_FIX_PASSES + 1):
+            checks = await run_validation_cycle()
+            failures = _validation_findings(checks)
+            _sync_validation_todos(impl_ctx, failures)
+            if not failures:
+                if tools.todo_list_ready(impl_ctx):
+                    return True, [], checks
+                if attempt == MAX_VALIDATION_FIX_PASSES:
+                    return False, _todo_findings(impl_ctx), checks
+                try:
+                    await _run_implementor(
+                        impl_ctx,
+                        _todo_completion_request(
+                            impl_ctx, base_name, safe, attempt + 1),
+                        model, max_failures, debug,
+                        history=implementor_history)
+                except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+                    return False, _todo_findings(impl_ctx), checks
+                except Exception as error:
+                    raise ImplementorFailed(
+                        f'todo completion failed: {error}') from error
+                continue
+            if attempt == MAX_VALIDATION_FIX_PASSES:
+                return False, failures, checks
+            try:
+                await _run_implementor(
+                    impl_ctx,
+                    _cycle_fix_request(
+                        failures, checks, base_name, safe, attempt + 1,
+                        todo_items=tools.format_todo_list(impl_ctx)),
+                    model, max_failures, debug, history=implementor_history)
+            except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+                return False, failures, checks
+            except Exception as error:
+                raise ImplementorFailed(
+                    f'validation repair failed: {error}') from error
+
+    for cycle in range(1, review_cycles + 1):
+        try:
+            ready, checks, todo_or_validation_findings = \
+                await prepare_review_checkpoint(cycle)
+        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+            return False, _todo_findings(impl_ctx), []
+        except PrimaryValidationUnavailable:
+            raise
+        except Exception as error:
+            raise ImplementorFailed(
+                f'pre-review checklist/validation failed: {error}') from error
+        if not ready:
+            return False, todo_or_validation_findings, checks
+        panel_findings = await _review_gate(
+            cwd, base_name, base_ref, spec_text, model, debug,
+            constraints=constraints, validation_report=_validation_report(
+                checks),
+            prior_findings=previous, no_network=safe)
+        current = dedup_findings(panel_findings + _validation_findings(checks))
+        if not previous:
+            meta = ValidationMetaResult(
+                open_prior=[], coverage_gaps=[],
+                summary='No prior findings to reconcile.',
+            )
         else:
-            validation = f'FAILED (`{validation_cmd}`)'
-            tail = out[-3000:] if len(out) > 3000 else out
-            findings.append({
-                'name': 'Validation', 'label': 'A98',
-                'severity': 'MAJOR',
-                'location': '',
-                'desc': f'The project validation command `{validation_cmd}` failed.',
-                'support': f'Validation output (tail):\n{tail}',
-                'evidence': [], 'sources': [],
-            })
-    # Survey failures (mypy, tsc, clippy, etc.) become findings too.
-    if validation_allowed and survey_output and 'FAILED' in survey_output:
-        findings.append({
-            'name': 'Validation', 'label': 'A97',
-            'severity': 'MAJOR',
-            'location': '',
-            'desc': 'One or more project validation commands (typecheck, lint, '
-                    'etc.) failed.',
-            'support': f'Survey output:\n{survey_output[-4000:]}',
-            'evidence': [], 'sources': [],
-        })
-    # Separate synthetic findings (plan checker, validation) from review-panel
-    # findings: the evidence gate requires code citations, which synthetic
-    # findings do not have. Consolidate and gate only the review findings,
-    # then re-attach the synthetic ones.
-    synthetic = [f for f in findings if f.get('name') in ('Check', 'Validation')]
-    review_findings = [f for f in findings if f.get('name') not in ('Check', 'Validation')]
-    if review_findings:
-        review_findings = dedup_by_location(review_findings)
-        support = {(f['name'], f['label']): f.get('support', '')
-                   for f in review_findings}
-        evidence = {(f['name'], f['label']): list(
-            f.get('evidence') or []) for f in review_findings}
-        sources = {(f['name'], f['label']): list(
-            f.get('sources') or []) for f in review_findings}
-        context = (f'Consolidate findings from a code review of the working-tree changes '
-                   f'against the default branch {base_name}.')
-        consolidated = await consolidate_findings(
-            context, review_findings, model, debug=debug, allow_empty=True,
-            reasoning_effort=REVIEW_REASONING_EFFORT, seed=REVIEW_SEED,
-            internal=True)
-        review_findings = dedup_findings(consolidated)
-        for f in review_findings:
-            key = (f['name'], f['label'])
-            f['support'] = support.get(key, '')
-            f['evidence'] = evidence.get(key, [])
-            f['sources'] = sources.get(key, [])
-        review_findings = await evidence_gate(
-            review_findings, cwd, base_ref, debug=debug, post_consolidation=True,
-            working_tree=True)
-        review_findings = dedup_findings(review_findings)
-        review_findings = dedup_by_location(review_findings)
-    findings = review_findings + synthetic
-    return findings, validation
+            try:
+                meta = await run_validation_meta_review(
+                    previous, current, checks, model)
+            except Exception as error:
+                # A malformed or unavailable ledger response must not strand actionable review or
+                # validation findings. Preserve every prior finding, keep current findings open
+                # below, and hand the concrete repair request to the implementor in this cycle.
+                log('diff: validation meta-review unavailable; preserving prior findings: '
+                    f'{error}')
+                meta = ValidationMetaResult(
+                    open_prior=previous,
+                    coverage_gaps=[],
+                    summary=(
+                        'Meta-review unavailable; prior findings were conservatively kept open.'),
+                )
+        current_ids = {finding_id(f) for f in current}
+        open_prior_ids = {finding_id(f) for f in meta.open_prior}
+        for finding in previous:
+            key = finding_id(finding)
+            if key not in open_prior_ids and key not in current_ids and key not in resolved_ids:
+                resolved_findings.append(finding)
+                resolved_ids.add(key)
+        active = _merge_findings_by_id(
+            meta.open_prior + current + meta.coverage_gaps)
+        _sync_todo_findings(
+            impl_ctx, panel_findings + meta.coverage_gaps, checks, active)
+        if not active and _validation_passed(checks, safe, validation_allowed):
+            if tools.todo_list_ready(impl_ctx):
+                return True, [], checks
+            active = _todo_findings(impl_ctx)
+        if cycle == review_cycles:
+            return False, active, checks
+        if debug:
+            debug_print(f'[diff] cycle {cycle}/{review_cycles}: '
+                        f'{len(active)} open finding(s); implementing one repair batch')
+        try:
+            await _run_implementor(
+                impl_ctx,
+                _cycle_fix_request(active, checks, base_name, safe, cycle,
+                                   meta.summary,
+                                   tools.format_todo_list(impl_ctx)),
+                model, max_failures, debug, history=implementor_history)
+        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+            return False, active, checks
+        except Exception as error:
+            raise ImplementorFailed(
+                f'review repair failed: {error}') from error
+        previous = active
+    return False, previous, []
 
 
 # --- reporting ----------------------------------------------------------
@@ -834,7 +1302,9 @@ async def _propose_and_maybe_refine(
         original_fields: tuple[str, str] | None, current_repo: str, base_name: str,
         base_ref: str, impl_ctx: tools.ToolContext, commit_title: str,
         validation_cmd: str, review_result: str, model: str, max_failures: int,
-        debug: bool) -> tuple[int, str, str]:
+        review_cycles: int, debug: bool,
+        baseline_checks: list[ValidationCheck] | None = None
+) -> tuple[int, str, str]:
     # Show the proposed PR title/body; on acceptance finish; on rejection optionally refine the
     # source (and, if it locks, resume implementation + validation + a clean review on the same
     # branch and commit a follow-up) before finishing. Marsha never pushes or creates a PR.
@@ -905,9 +1375,7 @@ async def _propose_and_maybe_refine(
             print(f'error: failed to update the source: {e}. Leaving the existing commit '
                   'intact.', file=sys.stderr)
             return (0, commit_title, sha)
-        # Resume implementation + validation on the same branch (the source is design-locked, so
-        # the follow-up is a normal run). A follow-up commit is made only if validation passes and
-        # the review gate is clean.
+        # Resume implementation + the same validation/review loop on the same branch.
         spec_text = (result.payload.get('spec', '') if source.kind == 'mrsh'
                      else (result.payload.get('title', '') + '\n\n'
                            + result.payload.get('body', '')))
@@ -915,23 +1383,32 @@ async def _propose_and_maybe_refine(
             print(
                 'Re-implementing the refined specification...',
                 file=sys.stderr)
+            impl_ctx.spec_text = spec_text
+            # A refined design is a new implementation scope; old completed tasks must not
+            # make its first review appear checklist-ready.
+            impl_ctx.todo_items.clear()
+            impl_ctx.todo_checkpoint_complete = False
+            impl_ctx.repository_map, refreshed_constraints = await _run_repo_context(
+                spec_text, cwd, model, debug,
+                no_network=impl_ctx.no_network)
+            explicit = _conventions_text(cwd)
+            impl_ctx.constraints = '\n\n'.join(
+                part for part in (explicit, refreshed_constraints) if part)
+            implementor_history: list[dict[str, str]] = []
             await _run_implementor(
                 impl_ctx, _impl_request(
-                    spec_text, _conventions_text(cwd), base_name, False),
-                model, max_failures, debug)
-            passed, _out = await _ensure_validated(
-                impl_ctx, cwd, validation_cmd, model, max_failures, debug)
-            if not passed:
-                print('Validation failed after refinement; leaving the existing commit intact.',
-                      file=sys.stderr)
-                return (0, commit_title, sha)
-            remaining, _v = await _review_gate(
-                cwd, base_name, base_ref, spec_text, model, debug,
-                impl_spec=spec_text, validation_cmd=validation_cmd,
-                validation_allowed=True, safe=False)
-            if remaining:
-                print(f'Review gate not clean after refinement ({len(remaining)} finding(s)); '
-                      'leaving the existing commit intact.', file=sys.stderr)
+                    spec_text, explicit, base_name, False),
+                model, max_failures, debug, history=implementor_history)
+            clean, remaining, checks = await _run_review_loop(
+                impl_ctx, cwd, base_name, base_ref, spec_text, model,
+                max_failures, debug, False, validation_cmd, True,
+                impl_ctx.constraints, review_cycles,
+                baseline_checks=baseline_checks,
+                implementor_history=implementor_history)
+            if not clean:
+                print(f'Review/validation loop not clean ({len(remaining)} unresolved finding(s)); '
+                      'leaving the existing commit intact. '
+                      + _validation_summary(checks, False, True), file=sys.stderr)
                 return (0, commit_title, sha)
         except ReviewGateFailed as e:
             # The review gate could not run (a reviewer failed with nothing to fall back on); do
@@ -944,10 +1421,15 @@ async def _propose_and_maybe_refine(
             print('The follow-up implementation did not complete; leaving the existing commit '
                   'intact.', file=sys.stderr)
             return (0, commit_title, sha)
-        review_result = 'clean (no actionable findings)'
+        except Exception as e:
+            print(f'Re-implementation failed after refinement ({e}); leaving the existing commit '
+                  'intact.', file=sys.stderr)
+            return (0, commit_title, sha)
+        review_result = ('skipped (--review-cycles 0)' if review_cycles == 0
+                         else 'clean (no open findings; validation passed)')
         follow_title = _commit_title(
             await _recent_commit_subjects(cwd), _short_title(
-                result.payload.get('title') or spec_text),
+                _refined_title(source, result.payload, spec_text)),
             source.name if source.kind == 'linear' else None)
         try:
             follow_sha = await _commit(
@@ -975,9 +1457,7 @@ async def run_diff(
                  or getattr(args, 'trace_full', False))
     safe = bool(getattr(args, 'safe', False))
     # `--review-cycles` must be a non-negative integer and `--max-tool-failure` a positive one (the
-    # CLI contract). An out-of-range value is a usage error (exit 2), never silently clamped:
-    # clamping a negative --review-cycles to 0 would disable the review gate —
-    # a safety bypass.
+    # CLI contract). An out-of-range value is a usage error (exit 2), never silently clamped.
     try:
         review_cycles = int(args.review_cycles)
         max_tool_failure = int(args.max_tool_failure)
@@ -987,7 +1467,7 @@ async def run_diff(
             file=sys.stderr)
         return 2
     if review_cycles < 0:
-        print('error: --review-cycles must be a non-negative integer (0 disables the review gate).',
+        print('error: --review-cycles must be a non-negative integer (0 disables code review).',
               file=sys.stderr)
         return 2
     if max_tool_failure < 1:
@@ -1042,7 +1522,7 @@ async def run_diff(
             design_categories = design_categories - {tools.CATEGORY_WEB}
         design_tool_ctx = tools.ToolContext(
             phase='refine', workdir=cwd, require_evidence=False, context_window=window,
-            categories=design_categories)
+            categories=design_categories, no_network=safe)
     # The design gate analyzes the same canonical spec `refine`'s lock re-check does — the
     # title and body for an issue/ticket, or the .mrsh content — rather than the fully rendered
     # issue (its "Issue #N:" header and comments). With the shared spec-check seed, that makes
@@ -1090,41 +1570,50 @@ async def run_diff(
         print(f'error: {e}', file=sys.stderr)
         return 1
 
-    # --- Implementation. ---
-    phase = 'implement-safe' if safe else 'implement'
-    # Build the run whitelist: the language backend's fixed set plus repo-introspected
-    # commands (npm scripts, make targets, CI workflow commands). In safe mode the
-    # whitelist is filtered to the non-network subset.
-    run_whitelist = list(backends.current().run_whitelist())
-    run_whitelist.extend(_introspect_run_commands(cwd))
-    if safe:
-        run_whitelist = [r for r in run_whitelist if not r.network]
-    impl_ctx = tools.ToolContext(
-        phase=phase, workdir=cwd, backend=backends.current(),
-        run_whitelist=run_whitelist, spec_text=impl_spec, base_ref=base_ref)
-    conventions = _conventions_text(cwd)
+    # Discover the primary validator before implementation and baseline additional survey commands
+    # against the clean base branch. Only newly failing extra checks can then block a commit.
+    validation_cmd = _validation_command(cwd)
+    baseline_checks = None
     if not safe:
         print(VM_WARNING)
+        baseline_checks = await _validation_baseline(
+            cwd, base_ref, validation_cmd, debug)
+
+    # --- Repository context and implementation. ---
+    phase = 'implement-safe' if safe else 'implement'
+    # Safe mode has no run tool; otherwise advertise the primary validator plus repo commands.
+    run_whitelist = _build_run_whitelist(cwd, validation_cmd, safe)
+    try:
+        repository_map, constraints = await _run_repo_context(
+            impl_spec, cwd, model, debug, no_network=safe)
+    except Exception as error:
+        log(f'repository context collection failed: {error}')
+        repository_map, constraints = '', ''
+    explicit_conventions = _conventions_text(cwd)
+    if explicit_conventions:
+        constraints = (explicit_conventions + '\n\n' + constraints).strip()
+    impl_ctx = tools.ToolContext(
+        phase=phase, workdir=cwd, backend=backends.current(),
+        run_whitelist=run_whitelist, spec_text=impl_spec, base_ref=base_ref,
+        repository_map=repository_map, constraints=constraints, model=model,
+        no_network=safe)
+    implementor_history: list[dict[str, str]] = []
     impl_report = ''
     try:
         if safe:
-            # Safe mode: single-pass implement (no planning phase).
+            # Safe mode keeps the same repository context but disables network and command runs
+            # for the implementor.
             debug_print('Implementing the spec in the working tree...')
             impl_report = await _run_implementor(
-                impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
-                                        impl_comments),
-                model, max_tool_failure, debug)
+                impl_ctx, _impl_request(
+                    impl_spec, explicit_conventions, base_name, safe, impl_comments),
+                model, max_tool_failure, debug, history=implementor_history)
         else:
-            # Normal mode: planning phase (explorer, rule checker) then
-            # a single implementor pass with the spec + explorer map.
-            _p, explorer_map, _rules = await _run_planning_phase(
-                impl_spec, cwd, model, debug)
             debug_print('Implementing the spec in the working tree...')
             impl_report = await _run_implementor(
-                impl_ctx, _impl_request(impl_spec, conventions, base_name, safe,
-                                        impl_comments,
-                                        explorer_map=explorer_map),
-                model, max_tool_failure, debug)
+                impl_ctx, _impl_request(
+                    impl_spec, explicit_conventions, base_name, safe, impl_comments),
+                model, max_tool_failure, debug, history=implementor_history)
     except tools.ToolFailureLimitExceeded as e:
         await _report(cwd, base_ref, short, ticket_id, design='locked',
                       validation='not run (implementation stopped)',
@@ -1134,6 +1623,11 @@ async def run_diff(
         await _report(cwd, base_ref, short, ticket_id, design='locked',
                       validation='not run (interrupted)', review='not run',
                       commit='none (interrupted)')
+        return 1
+    except Exception as e:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation='not run (implementation failed)',
+                      review='not run', commit=f'none (implementation failed: {e})')
         return 1
     log(f'implementer final report:\n{impl_report.strip() or "(no report)"}')
     # A locked spec that produced zero working-tree changes was not implemented: the implementer
@@ -1150,12 +1644,13 @@ async def run_diff(
                     'Its final report:\n' + (impl_report.strip() or '(no report)'))
         return 1
 
-    # --- Validation command (used by the review gate and post-thread re-validation). ---
-    validation_cmd = _validation_command(cwd)
+    # --- Validation command (run on every review cycle). ---
     validation_allowed = True
     if safe:
-        print(f'Safe mode: about to run the validation command `{validation_cmd}`. It may build '
-              'the environment or install dependencies. Allow it? [y/N] ')
+        print(f'Safe mode: about to run the validation command `{validation_cmd}`. It executes '
+              'code in the working tree, including tests and build files the implementor just '
+              'wrote or changed, so it may access the network, install dependencies, or modify '
+              'the repository. Allow it? [y/N] ')
         answer = read_line().strip().lower()
         while answer not in ('y', 'yes', 'n', 'no'):
             print('Please answer y or n. [y/N] ')
@@ -1164,115 +1659,48 @@ async def run_diff(
         if not validation_allowed:
             debug_print('Skipping validation (declined in safe mode).')
 
-    # --- Review gate (includes plan checker + validation as pseudo-reviewers). ---
-    validation = ''
-    if review_cycles >= 1:
-        if not safe:
-            # Normal mode: full review panel + plan checker + validation + threads.
-            try:
-                findings, validation = await _review_gate(
-                    cwd, base_name, base_ref, spec_text, model, debug,
-                    impl_spec=impl_spec, validation_cmd=validation_cmd,
-                    validation_allowed=validation_allowed, safe=safe)
-            except ReviewGateFailed as e:
-                await _report(cwd, base_ref, short, ticket_id, design='locked',
-                              validation=validation,
-                              review=f'FAILED (the review gate could not run: {e})',
-                              commit='none (review gate failed to run)')
-                return 1
-            if findings:
-                debug_print(f'Review found {len(findings)} finding(s); resolving '
-                            f'threads...')
-                _threads, all_resolved = await threads.resolve_threads(
-                    findings, impl_ctx, impl_spec, model,
-                    max_tool_failure, debug, max_cycles=review_cycles)
-                if not all_resolved:
-                    unresolved = sum(1 for t in _threads if not t.resolved)
-                    await _report(cwd, base_ref, short, ticket_id, design='locked',
-                                  validation=validation,
-                                  review=f'NOT clean ({unresolved} thread(s) unresolved)',
-                                  commit='none (threads unresolved)')
-                    return 1
-                if validation_allowed:
-                    passed, _out = await _ensure_validated(
-                        impl_ctx, cwd, validation_cmd, model,
-                        max_tool_failure, debug, safe)
-                    if not passed:
-                        await _report(cwd, base_ref, short, ticket_id,
-                                      design='locked',
-                                      validation='FAILED (post-thread validation)',
-                                      review='NOT clean (validation failed after '
-                                             'thread resolution)',
-                                      commit='none (validation failed)')
-                        return 1
-                    # Re-run the validation survey (mypy, flake8, etc.) after
-                    # thread resolution: the implementor may have introduced
-                    # type errors or lint violations while fixing findings.
-                    survey_out = await _validation_survey(cwd, model, debug)
-                    if survey_out and 'FAILED' in survey_out:
-                        if debug:
-                            debug_print('[diff] post-thread survey failed; '
-                                        'asking the implementor to fix')
-                        try:
-                            await _run_implementor(
-                                impl_ctx, _validation_fix_request(
-                                    'validation survey (mypy, flake8, etc.)',
-                                    survey_out, safe),
-                                model, max_tool_failure, debug)
-                        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                            pass
-                        passed2, out2 = await _run_validation(cwd, validation_cmd)
-                        if not passed2:
-                            await _report(cwd, base_ref, short, ticket_id,
-                                          design='locked',
-                                          validation='FAILED (post-thread '
-                                                     'survey fix)',
-                                          review='NOT clean (validation failed '
-                                                 'after survey fix)',
-                                          commit='none (validation failed)')
-                            return 1
-                        validation = (
-                            f'passed (`{validation_cmd}`, post-thread survey fix)')
-            review_result = 'clean (all threads resolved)'
-        else:
-            # Safe mode: review gate with implementor fix loop (no threads).
-            try:
-                remaining, validation = await _review_gate(
-                    cwd, base_name, base_ref, spec_text, model, debug,
-                    impl_spec=impl_spec, validation_cmd=validation_cmd,
-                    validation_allowed=validation_allowed, safe=safe)
-                cycles = 0
-                while remaining and cycles < review_cycles:
-                    debug_print(f'Review found {len(remaining)} finding(s); addressing '
-                                f'(cycle {cycles + 1}/{review_cycles})...')
-                    try:
-                        await _run_implementor(
-                            impl_ctx, _address_findings_request(
-                                remaining, base_name, safe),
-                            model, max_tool_failure, debug)
-                    except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                        break
-                    remaining, validation = await _review_gate(
-                        cwd, base_name, base_ref, spec_text, model, debug,
-                        impl_spec=impl_spec, validation_cmd=validation_cmd,
-                        validation_allowed=validation_allowed, safe=safe)
-                    cycles += 1
-                if remaining:
-                    await _report(cwd, base_ref, short, ticket_id, design='locked',
-                                  validation=validation,
-                                  review=f'NOT clean ({
-                                      len(remaining)} finding(s) remain)',
-                                  commit='none (review not clean)')
-                    return 1
-            except ReviewGateFailed as e:
-                await _report(cwd, base_ref, short, ticket_id, design='locked',
-                              validation=validation,
-                              review=f'FAILED (the review gate could not run: {e})',
-                              commit='none (review gate failed to run)')
-                return 1
-            review_result = 'clean (no actionable findings)'
-    else:
+    # One outer loop owns validation, review findings, meta-review, and batch repair. Even when
+    # code review is disabled with zero cycles, normal mode still validates before it can commit.
+    try:
+        clean, remaining, checks = await _run_review_loop(
+            impl_ctx, cwd, base_name, base_ref, impl_spec, model,
+            max_tool_failure, debug, safe, validation_cmd, validation_allowed,
+            constraints, review_cycles, baseline_checks=baseline_checks,
+            implementor_history=implementor_history)
+    except PrimaryValidationUnavailable as error:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation=f'UNAVAILABLE ({error})', review='not run',
+                      commit='none (primary validation could not run)')
+        return 1
+    except ReviewGateFailed as error:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation='not verified',
+                      review=f'FAILED (the review gate could not run: {error})',
+                      commit='none (review gate failed to run)')
+        return 1
+    except ImplementorFailed as error:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation='not verified', review=f'FAILED ({error})',
+                      commit='none (implementor failed during repair)')
+        return 1
+    except (tools.ToolFailureLimitExceeded, KeyboardInterrupt) as error:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation='not verified', review='NOT clean',
+                      commit=f'none (review cycle stopped: {error})')
+        return 1
+    validation = _validation_summary(checks, safe, validation_allowed)
+    if not clean:
+        await _report(cwd, base_ref, short, ticket_id, design='locked',
+                      validation=validation,
+                      review=f'NOT clean ({len(remaining)} unresolved finding(s))',
+                      commit='none (review/validation cycle cap reached)')
+        return 1
+    if review_cycles == 0:
         review_result = 'skipped (--review-cycles 0)'
+    elif safe and not validation_allowed:
+        review_result = 'clean (no open findings; validation skipped in safe mode)'
+    else:
+        review_result = 'clean (no open findings; validation passed)'
 
     # --- Safe mode: leave edits uncommitted; no PR proposal. ---
     if safe:
@@ -1288,7 +1716,7 @@ async def run_diff(
         commit_title = _commit_title(
             await _recent_commit_subjects(cwd), short, ticket_id)
         _commit_body = _pr_title_and_body(
-            commit_title, spec_text, validation_cmd, review_result)[1]
+            commit_title, impl_spec, validation_cmd, review_result)[1]
         commit_sha = await _commit(cwd, commit_title, _commit_body)
     except (Exception, KeyboardInterrupt) as e:
         await _report(cwd, base_ref, short, ticket_id, design='locked',
@@ -1297,9 +1725,10 @@ async def run_diff(
 
     # --- PR proposal + interactive accept/reject (with optional refine-on-reject). ---
     exit_code, commit_title, commit_sha = await _propose_and_maybe_refine(
-        read_line, cwd, source, spec_text, original_fields, current_repo, base_name,
+        read_line, cwd, source, impl_spec, original_fields, current_repo, base_name,
         base_ref, impl_ctx, commit_title, validation_cmd, review_result, model,
-        max_tool_failure, debug)
+        max_tool_failure, review_cycles, debug,
+        baseline_checks=baseline_checks)
     await _report(cwd, base_ref, short, ticket_id, design='locked', validation=validation,
                   review=review_result, commit=f'{commit_sha} ({commit_title})')
     return exit_code

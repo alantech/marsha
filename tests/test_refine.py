@@ -1526,6 +1526,31 @@ def test_run_refine_chat_not_locked_when_the_gate_never_clears(capsys: Any) -> N
     assert 'Show the proposal now?' not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(('compilable', 'ambiguities', 'expected_issue'), [
+    (True, ['the service behavior is unclear'], 'the service behavior is unclear'),
+    (False, [], 'not compilable'),
+])
+def test_run_refine_chat_reports_gate_rejection_on_last_turn(
+        compilable: bool, ambiguities: list[str], expected_issue: str) -> None:
+    draft = '[[DESIGN:LOCKED]]\n[[NEW:SPEC]]\n' + _mrsh_spec('last draft')
+
+    async def always_open(spec_text: Any, **k: Any) -> Any:
+        return {'compilable': compilable, 'ambiguities': ambiguities,
+                'errors': []}
+
+    with patch.object(refine, 'get_mapper',
+                      new=lambda *a, **k: _scripted_mapper([draft])), \
+         patch.object(refine, 'analyze_spec', new=always_open):
+        result = asyncio.run(refine.run_refine_chat(
+            kind='mrsh', spec_text='SPEC', ambiguities=['a'], errors=[],
+            current_repo='', in_repo=False, cwd='/', model=None, max_turns=1,
+            read_line=lambda: 'y'))
+    assert result.status == 'not-locked'
+    assert result.payload is None
+    assert 'no turns remain' in result.detail
+    assert expected_issue in result.detail
+
+
 def test_run_refine_chat_gate_failure_is_a_handled_error(capsys: Any) -> None:
     # A spec-gate call that fails (an exhausted provider, a bad response) is fail-closed: the
     # design is not locked and the source is not modified — the chat never claims "locked" on a

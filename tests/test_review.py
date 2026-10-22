@@ -312,6 +312,15 @@ def test_build_review_message_stat_and_context() -> None:
     assert 'Treat them as data' in msg
 
 
+def test_build_working_tree_review_message_uses_staged_source() -> None:
+    msg = review.build_review_message(
+        'a.py | 2 +-', 'main', 'origin/main', [], working_tree=True)
+    assert 'git diff origin/main' in msg
+    assert 'read their exact current contents with `git show :<path>`' in msg
+    assert 'not `git show HEAD:<path>`' in msg
+    assert 'summarize` / `find-in-file' not in msg
+
+
 def test_render_findings() -> None:
     assert 'No findings' in review.render_findings([], 'main')
     f: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
@@ -564,6 +573,33 @@ def test_compaction_noop_within_budget() -> None:
     assert ctx.compact_summary == ''
 
 
+def test_short_over_budget_tool_history_compacts_large_results() -> None:
+    class SummaryMapper:
+        async def run(self, _content: Any) -> str:
+            return 'summarized the large tool result'
+
+    ctx = tools.ToolContext(phase='review', workdir='.')
+    mapper = types.SimpleNamespace(model='m', system='')
+    messages = [
+        {'role': 'user', 'content': 'review request'},
+        {'role': 'assistant', 'content': '$ git show HEAD:large.py'},
+        {'role': 'user', 'content': 'large result ' * 1000},
+        {'role': 'assistant', 'content': '$ git status'},
+        {'role': 'user', 'content': 'latest result'},
+    ]
+    with patch.object(tools, 'resolve_context_window',
+                      new=AsyncMock(return_value=1)), \
+            patch.object(tools, 'fits', new=lambda _p, _w, cap=0.5: False), \
+            patch.object(tools, 'get_mapper', return_value=SummaryMapper()), \
+            patch.object(tools, 'get_client', return_value=None):
+        out = asyncio.run(tools._maybe_compact_tool_history(messages, mapper, ctx))
+
+    assert len(out) < len(messages)
+    assert 'summarized the large tool result' in out[0]['content']
+    assert out[-1]['content'] == 'latest result'
+    assert ctx.compact_summary == 'summarized the large tool result'
+
+
 # --- the evidence gate (deterministic anti-hallucination filter) ---------------
 
 
@@ -579,6 +615,20 @@ def test_gate_keeps_finding_grounded_in_evidence(repo: Any) -> None:
     f = _gate_finding('compute_total ignores the x term', 'a.txt:2', ev)
     kept = asyncio.run(review.evidence_gate([f], repo, 'main'))
     assert kept == [f]
+
+
+def test_working_tree_gate_accepts_read_file_output_for_untracked_code(
+        repo: Any) -> None:
+    source = 'def newly_added_handler():\n    return True\n'
+    with open(os.path.join(repo, 'new_module.py'), 'w') as f:
+        f.write(source)
+    finding = _gate_finding(
+        'newly_added_handler mishandles the valid case', 'new_module.py:1',
+        [('$ git diff --stat main', '1 file changed')])
+    finding['sources'] = [('$ read-file new_module.py 1..2',
+                           '1: def newly_added_handler():\n2:     return True')]
+    assert asyncio.run(review.evidence_gate(
+        [finding], repo, 'main', working_tree=True)) == [finding]
 
 
 def test_gate_drops_finding_whose_symbol_was_never_retrieved(repo: Any) -> None:
@@ -894,20 +944,24 @@ def test_symbol_present_working_tree_mode(repo: Any) -> None:
     assert asyncio.run(review._symbol_present('TWO', repo, {}, working_tree=True)) is False
     assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=False)) is False
     assert asyncio.run(review._symbol_present('WORKTREE_ONLY', repo, {}, working_tree=True)) is True
+    with open(os.path.join(repo, 'new.py'), 'w') as f:
+        f.write('UNTRACKED_ONLY = True\n')
+    assert asyncio.run(review._symbol_present(
+        'UNTRACKED_ONLY', repo, {}, working_tree=True)) is True
 
 
 def test_collect_personas_results_incomplete_not_clean() -> None:
-    # An incomplete review (any reviewer failed) that produced no findings must raise when
-    # fail_on_incomplete is set (it must not be mistaken for a clean "no findings" verdict); an
-    # incomplete review that DID find things still returns them (they are real); without the flag
-    # the survivors' findings are returned; and a complete review is untouched by the flag.
+    # With fail_on_incomplete, any reviewer failure is fatal, even when another reviewer returned
+    # findings that a later critique or evidence gate could remove. Without the flag, survivors are
+    # preserved; a complete review is unaffected.
     f: Finding = {'name': 'n', 'label': 'A1', 'severity': 'MAJOR',
                   'location': 'a.py:1', 'desc': 'd'}
     with pytest.raises(Exception, match='did not complete'):
         personas._collect_personas_results([Exception('x'), Exception('y')], 2, True)
     with pytest.raises(Exception, match='did not complete'):
         personas._collect_personas_results([Exception('x'), []], 2, True)
-    assert personas._collect_personas_results([Exception('x'), [f]], 2, True) == [f]
+    with pytest.raises(Exception, match='did not complete'):
+        personas._collect_personas_results([Exception('x'), [f]], 2, True)
     assert personas._collect_personas_results([Exception('x'), []], 2, False) == []
     assert personas._collect_personas_results([Exception('x'), [f]], 2, False) == [f]
     assert personas._collect_personas_results([[f], [f]], 2, True) == [f, f]
@@ -1083,6 +1137,50 @@ def test_review_pass_merges_evidence_across_rounds(repo: Any) -> None:
         ('$ git show HEAD:calc.py', 'def compute_total():\n    return x + y')]
 
 
+def test_review_pass_preserves_distinct_findings_at_same_line(repo: Any) -> None:
+    findings: list[Finding] = [
+        {'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+         'location': 'src/api.py:20', 'desc': 'the version check is skipped',
+         'support': 'The request path never checks the version.'},
+        {'name': 'Eli', 'label': 'A2', 'severity': 'MAJOR',
+         'location': 'src/api.py:20', 'desc': 'the request body is read twice',
+         'support': 'The second read sees an empty stream.'},
+    ]
+
+    async def fake_personas(*args: Any, **kwargs: Any) -> list[Finding]:
+        return findings
+
+    with patch.object(review, 'run_personas', new=fake_personas):
+        result = asyncio.run(review._review_pass(
+            [('Sage', 'body', 1), ('Eli', 'body', 2)], 'msg', 'm', 'main', 'main', 0,
+            '', tools.ToolContext(phase='review', workdir=repo), {}, {}, None, 1, False))
+    assert [finding['desc'] for finding in result] == [
+        'the version check is skipped', 'the request body is read twice']
+
+
+def test_working_tree_review_pass_marks_critic_code_mode(repo: Any) -> None:
+    finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                               'location': 'a.txt:2', 'desc': 'uncommitted defect',
+                               'support': 'I read the changed code.'}]
+    received: list[bool] = []
+
+    async def fake_personas(*args: Any, **kwargs: Any) -> list[Finding]:
+        return finding
+
+    async def fake_critic(*args: Any, **kwargs: Any) -> str:
+        received.append(bool(kwargs.get('working_tree')))
+        return ''
+
+    with patch.object(review, 'run_personas', new=fake_personas), \
+         patch.object(review, 'critic_gate', new=fake_critic):
+        result = asyncio.run(review._review_pass(
+            [('Sage', 'body', 1)], 'msg', 'm', 'main', 'main', 0, '',
+            tools.ToolContext(phase='review', workdir=repo, notes=[]),
+            {}, {}, None, 0, False, working_tree=True))
+    assert result == finding
+    assert received == [True]
+
+
 # --- the conventions gate -----------------------------------------------------
 
 
@@ -1164,6 +1262,32 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
          patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
         out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
     assert out == ''
+
+
+def test_critic_gate_in_working_tree_mode_targets_staged_code(repo: Any) -> None:
+    class Mapper:
+        n_results = 1
+        model = 'm'
+        system = ''
+
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def run(self, messages: Any) -> str:
+            self.calls.append(messages)
+            return 'NO OBJECTIONS\n$ finished'
+
+    finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+                               'location': 'a.txt:2', 'desc': 'a current change'}]
+    ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
+    mapper = Mapper()
+    with patch.object(review, 'get_mapper', return_value=mapper):
+        result = asyncio.run(_CRITIC_GATE(
+            finding, ctx, 'm', 'main', 'main', working_tree=True))
+    assert result == ''
+    request = mapper.calls[0][0]['content']
+    assert 'git show :<path>' in request
+    assert 'git show HEAD:<path>' not in request
 
 
 def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
@@ -1790,6 +1914,57 @@ def test_per_persona_critique_failed_revision_drops_finding(repo: Any) -> None:
             [('Sage', 'body', 1)], findings, 'msg', 'm', 'main', 'main', '',
             ctx, {}, None, None, False))
     assert out == []
+
+
+def test_per_persona_revision_requires_complete_panel_when_requested(repo: Any) -> None:
+    finding: Finding = {
+        'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'a.txt:2', 'desc': 'phantomThing is undefined',
+        'support': '', 'evidence': [],
+    }
+
+    async def fake_critic(*args: Any, **kwargs: Any) -> str:
+        return '[Sage-A1] - phantomThing is defined at a.txt:3'
+
+    async def failed_revision(*args: Any, **kwargs: Any) -> list[Finding]:
+        assert kwargs['fail_on_incomplete'] is True
+        raise RuntimeError('revision provider failed')
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+            patch.object(review, 'run_personas', new=failed_revision):
+        with pytest.raises(RuntimeError, match='revision provider failed'):
+            asyncio.run(review._per_persona_critique(
+                [('Sage', 'body', 1)], [finding], 'msg', 'm', 'main', 'main', '',
+                ctx, {}, None, None, False, fail_on_incomplete=True))
+
+
+def test_review_pass_propagates_incomplete_failure_policy_to_revision(
+        repo: Any) -> None:
+    finding: Finding = {
+        'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'a.txt:2', 'desc': 'phantomThing is undefined',
+        'support': '', 'evidence': [],
+    }
+    calls = {'n': 0}
+
+    async def panel(*args: Any, **kwargs: Any) -> list[Finding]:
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return [finding]
+        assert kwargs['fail_on_incomplete'] is True
+        raise RuntimeError('revision provider failed')
+
+    async def fake_critic(*args: Any, **kwargs: Any) -> str:
+        return '[Sage-A1] - phantomThing is defined at a.txt:3'
+
+    ctx = tools.ToolContext(phase='review', workdir='.', notes=[], require_evidence=True)
+    with patch.object(review, 'critic_gate', new=fake_critic), \
+            patch.object(review, 'run_personas', new=panel):
+        with pytest.raises(RuntimeError, match='revision provider failed'):
+            asyncio.run(review._review_pass(
+                [('Sage', 'body', 1)], 'msg', 'm', 'main', 'main', 0, '',
+                ctx, {}, {}, None, 1, False, fail_on_incomplete=True))
 
 
 def test_corroborated_keeps_only_recurring_concerns() -> None:

@@ -65,7 +65,7 @@ _REFUTE_CONFIDENCE_RULE = (
     'your findings. For each of your findings from last round that they rebutted, you may '
     'either DROP it or DEFEND it. To defend a finding, provide specific counter-evidence: '
     'code you read with the git tool that contradicts the rebuttal, a source you retrieved '
-    'that supports your claim, or a `run` command whose output confirms the bug. If you '
+    'that supports your claim. If you '
     'cannot defend it with concrete evidence, drop it. A finding that rests on standard '
     'toolchain or language-runtime behavior (Cargo defaults, npm behavior, compiler '
     'semantics) does not need a retrieved source — the behavior is established knowledge. '
@@ -458,9 +458,10 @@ def build_review_message(stat_text: str, base_name: str, base_ref: str,
     if working_tree:
         diff_ref = (f'`git diff {base_ref}` — the working tree against `{base_ref}`, which '
                     'includes uncommitted changes')
-        changed_files = ('the changed files (they are uncommitted, so read them with '
-                         '`summarize` / `find-in-file`, not `git show HEAD:<path>`, which would '
-                         'show the base version)')
+        changed_files = ('the changed files are staged for review; read their exact current '
+                         'contents with `git show :<path>` or inspect them with '
+                         f'`git diff {base_ref} -- <path>`, not `git show HEAD:<path>`, which '
+                         'would show the old version)')
     else:
         diff_ref = f'`git diff {base_ref}...HEAD`'
         changed_files = 'the changed files (`git show HEAD:<path>`)'
@@ -496,9 +497,8 @@ def build_review_message(stat_text: str, base_name: str, base_ref: str,
          'configuration is a bug), and does it reject invalid inputs (a validator that '
          'accepts a malformed one is a bug). A regex that matches inside string literals, '
          'a manifest check that omits a required field, or a path construction that points '
-         'to the wrong directory are all findings. If you have a `run` tool available and '
-         'the change includes a type-checking or compilation step, you may execute the '
-         'project\'s type-checker to confirm a suspected type error before reporting.'),
+         'to the wrong directory are all findings. Use the validation results supplied in the '
+         'review context; this review phase cannot execute commands.'),
     ]
     if context_blocks:
         parts.append(
@@ -654,7 +654,8 @@ you were given them, and no other words.
 async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
                       model: str | None, base_name: str, base_ref: str, debug: bool = False,
                       reasoning_effort: str | None = None, seed: int | None = None,
-                      max_rounds: int | None = None) -> str:
+                      max_rounds: int | None = None,
+                      working_tree: bool = False) -> str:
     # The critic (Vera): actively search the code for counter-evidence to each finding — a
     # claimed-missing call/import that is present, a claimed-undefined symbol that is defined, a
     # "corrupted" file that is actually valid — and return refutations citing the [Name-Label]s,
@@ -704,11 +705,13 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
     sources_block = ('\n\n# Sources the reviewers retrieved (docs/URLs)\n\n'
                      + '\n\n'.join(source_lines)
                      if source_lines else '')
+    source_read = (f'`git show :<path>` or `git diff {base_ref} -- <path>`'
+                   if working_tree else '`git show HEAD:<path>`')
     user = (
         f'Falsify the findings below against the actual code (default branch `{base_name}`, '
         f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
         f'symbols as whole words, with no language-specific definition keyword assumed, and read '
-        f'the cited lines with `git show HEAD:<path>`. A finding whose claim rests on general '
+        f'the cited lines with {source_read}. A finding whose claim rests on general '
         f'knowledge (a performance characteristic, a security property, a known-bad pattern, or a '
         f'style best practice) must name, in its support, a source the reviewer actually retrieved '
         f'(listed under "Sources the reviewers retrieved"); if such a claim names no retrieved '
@@ -1657,7 +1660,10 @@ async def _symbol_present(symbol: str, cwd: str | None, cache: dict[str, bool | 
     # is not proof of absence). Cached per symbol.
     if symbol in cache:
         return cache[symbol]
-    args = ['grep', '-F', '-w', symbol]
+    args = ['grep', '-F', '-w']
+    if working_tree:
+        args.append('--untracked')
+    args.append(symbol)
     if not working_tree:
         args.append('HEAD')
     rc, _out, _err = await _git(*args, cwd=cwd)
@@ -1728,12 +1734,22 @@ async def evidence_gate(findings: list[Finding], cwd: str, base_ref: str, debug:
         # query string as evidence would ground a fabricated symbol in its own lookup. A symbol is
         # "read" only if it appears in code the reviewer actually retrieved.
         output_scope = '\n'.join(out for _cmd, out in evidence)
+        if working_tree:
+            # `read-file` reads exact on-disk contents, including untracked files. Its output is
+            # stored in sources (not the git evidence ledger), but is valid code evidence here.
+            output_scope += '\n' + '\n'.join(
+                out for cmd, out in (f.get('sources') or [])
+                if tools._command_tool(cmd) == 'read-file')
         # The file-opened check (for a finding that names no symbol) matches against the COMMAND
         # text: a cited filename appears in a command (git show HEAD:a.txt), not in the output.
         # `git grep` commands are excluded from that scope — a search is not a file open, and a
         # no-match grep read no code from its pathspec — so a location-only finding must be
         # grounded on a `git show`, not on a grep.
         command_scope = tools.opened_command_scope(evidence)
+        if working_tree:
+            command_scope += ' ' + ' '.join(
+                cmd for cmd, _out in (f.get('sources') or [])
+                if tools._command_tool(cmd) == 'read-file')
         ok, reason = True, ''
         if not evidence:
             ok, reason = False, 'no git verification: reported without reading the code'
@@ -2152,7 +2168,8 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
                                 guidance: str, tool_ctx: tools.ToolContext,
                                 prior_labels_by_number: dict[int, set[str]],
                                 reasoning_effort: str | None, seed: int | None,
-                                debug: bool) -> list[Finding]:
+                                debug: bool, working_tree: bool = False,
+                                fail_on_incomplete: bool = False) -> list[Finding]:
     # Critique each reviewer's findings in isolation — a small, focused set, not the pooled panel —
     # and where the critic refutes one, give that single reviewer one pass to correct or drop it.
     # A finding that falsely claims real code is wrong ("foo is undefined" when it is defined) is
@@ -2167,7 +2184,8 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
     async def handle(name: str, group: list[Finding]) -> list[Finding]:
         refutation = await critic_gate(
             group, tool_ctx, model, base_name, base_ref, debug=debug,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            working_tree=working_tree)
         if not refutation:
             return group
         if debug:
@@ -2187,7 +2205,8 @@ async def _per_persona_critique(reviewers: list[tuple[str, str, int]],
             [spec], rev_message, model, 'review', debug=debug, loop='review',
             guidance=guidance, tool_ctx=rev_ctx, max_tool_rounds=REVIEW_MAX_TOOL_ROUNDS,
             prior_block_by_number=None, prior_labels_by_number=prior_labels_by_number,
-            reasoning_effort=reasoning_effort, seed=seed)
+            reasoning_effort=reasoning_effort, seed=seed,
+            fail_on_incomplete=fail_on_incomplete)
         # A finding the reviewer verified in round 0 but merely re-states in the revision would
         # otherwise sit on an empty revision-round ledger; merge the code it already read so the
         # evidence gate still grounds it.
@@ -2207,11 +2226,12 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
                        prior_block_by_number: dict[int, str],
                        prior_labels_by_number: dict[int, set[str]],
                        reasoning_effort: str | None, seed: int,
-                       debug: bool, fail_on_incomplete: bool = False) -> list[Finding]:
+                       debug: bool, fail_on_incomplete: bool = False,
+                       working_tree: bool = False) -> list[Finding]:
     # One full review pass: the panel proposes findings; the conventions gate rebuts the ones that
     # violate a real convention; the panel revises with the rebuttal (rounds >= 2). Converges when
     # the gate is quiet, the panel is clean, or the round budget is exhausted. Returns the
-    # same-location-collapsed findings (before semantic consolidation) — ready for consensus
+    # exact-duplicate-collapsed findings (before semantic consolidation) — ready for consensus
     # voting across passes, or a single-pass consolidation.
     prior_findings: list[Finding] = []
     prior_preamble: str = ''
@@ -2239,7 +2259,9 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
         if i == 0 and findings:
             findings = await _per_persona_critique(
                 reviewers, findings, message, model, base_name, base_ref, guidance,
-                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug)
+                tool_ctx, prior_labels_by_number, reasoning_effort, seed, debug,
+                working_tree=working_tree,
+                fail_on_incomplete=fail_on_incomplete)
         # Accumulate each reviewer's git evidence across EVERY round of this pass. A reviewer
         # verifies with git in an early round and may re-state the finding in a later round without
         # re-probing (its later-round ledger is then empty), so its evidence spans all rounds — not
@@ -2274,7 +2296,10 @@ async def _review_pass(reviewers: list[tuple[str, str, int]], message: str,
             _label_reviewer_number(f['label']), list(f.get('evidence') or []))
         f['sources'] = sources_by_number.get(
             _label_reviewer_number(f['label']), list(f.get('sources') or []))
-    return dedup_by_location(actionable)
+    # The diff loop needs every distinct concern, even when two findings point at the same line.
+    # The outer findings ledger preserves reviewer labels and lets the validation meta-reviewer
+    # reconcile them without erasing provenance based on location alone.
+    return dedup_findings(actionable)
 
 
 async def run_review(args: Any) -> int:

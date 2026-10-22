@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from marsha.log import dump
+from marsha.stats import check_price_limit
 
 
 class ContextOverflowError(Exception):
@@ -41,6 +42,7 @@ class BaseMapper():
             # TODO: Log the error before re-raise?
             raise e
         dump(f'{label}: response', self.output)
+        check_price_limit()
 
         iters = self.check_retries
         while iters > 0:

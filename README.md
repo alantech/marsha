@@ -23,7 +23,7 @@ make install    # Linux / macOS
 install.bat     # Windows
 ```
 
-This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (`~/.local/bin/marsha.bat` on Windows; override the location with `make install PREFIX=/usr/local` or `install.bat C:\tools`) that runs `python -P -m marsha` from that virtualenv, passing your arguments through. The `-P` flag (PEP 670) keeps your current working directory off Python's module search path, so `marsha` always uses the installed copy in the virtualenv rather than a `marsha/` folder that happens to sit in the directory you run it from. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` / `uninstall.bat` remove the launcher.
+This builds a virtualenv with Marsha in it and drops a small launcher script at `~/.local/bin/marsha` (`~/.local/bin/marsha.bat` on Windows; override the location with `make install PREFIX=/usr/local` or `install.bat C:\tools`) that runs `python -P -m marsha` from that virtualenv, passing your arguments through. The `-P` flag (Python 3.11+, also available through `PYTHONSAFEPATH`) keeps your current working directory off Python's module search path, so `marsha` always uses the installed copy in the virtualenv rather than a `marsha/` folder that happens to sit in the directory you run it from. The venv location can be overridden per-invocation with the `MARSHA_VENV` environment variable, and `make uninstall` / `uninstall.bat` remove the launcher.
 
 ## Syntax
 
@@ -109,7 +109,7 @@ Before generating any code, the compiler runs a sanity check that the definition
 
 The compiler then generates a test suite for the definition — the *oracle* — anchored to the description and examples in the `.mrsh` file, and only then generates the implementation to satisfy it. The implementation is written against this fixed oracle rather than the two being generated independently and reconciled afterwards.
 
-During the code and test generation stages — and, with `--optimize`, in the optimization and test-correction loops — the LLM has a simple *fake terminal* for looking up information it does not have. If it decides it needs more, it ends a response with a single line beginning with `$`; the compiler executes the command, feeds the result back (wrapped as explicitly-untrusted reference data), and repeats until the LLM produces its final output with no trailing command. The tools are grouped by category and scoped per phase. The language-agnostic set — the general web (`web-search`, `view-web-page`, with an SSRF guard) and sandboxed computation (`calc`, an isolated QuickJS subprocess) — is defined once in [`marsha/tools.py`](./marsha/tools.py) and shared by every target; the language-specific set — the package registry (for Python: `search-dependencies`, `dependency-docs`) and, only in the optimize/correction loops where a candidate virtualenv exists, installed-environment introspection (`list-dependencies`, `show-dependency`, `list-symbols`, `show-symbol`) — is layered on by the target's backend in [`marsha/backends/`](./marsha/backends/), so adding a target only adds its registry and environment tools. The MCP standard is deliberately out of scope. `--no-tools` disables the interface. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
+During the code and test generation stages — and, with `--optimize`, in the optimization and test-correction loops — the LLM has a simple *fake terminal* for looking up information it does not have. If it decides it needs more, it ends a response with a single line beginning with `$`; the compiler executes the command, feeds the result back (wrapped as explicitly-untrusted reference data), and repeats until the LLM produces its final output with no trailing command. `$ finished` is a standalone completion marker: it must be the only command in its response, after any required tool results have been received. This interface is not a shell: pipes, redirection, command chaining, and external POSIX utilities such as `head` and `sed` are not available. Use the built-in `read-file <path> <start>..<end>` command for exact lines in the current working tree, or `PAGE=<n> git ...` for paginated Git output. The tools are grouped by category and scoped per phase. The language-agnostic set — the general web (`web-search`, `view-web-page`, with an SSRF guard) and sandboxed computation (`calc`, an isolated QuickJS subprocess) — is defined once in [`marsha/tools.py`](./marsha/tools.py) and shared by every target; the language-specific set — the package registry (for Python: `search-dependencies`, `dependency-docs`) and, only in the optimize/correction loops where a candidate virtualenv exists, installed-environment introspection (`list-dependencies`, `show-dependency`, `list-symbols`, `show-symbol`) — is layered on by the target's backend in [`marsha/backends/`](./marsha/backends/), so adding a target only adds its registry and environment tools. The MCP standard is deliberately out of scope. `--no-tools` disables the interface. When a generated implementation fails the oracle, the compiler diagnoses whether the fault lies in the implementation or in a test: a faulty implementation is fixed directly, while a test that over-specifies or contradicts the definition is corrected through a separate, spec-anchored pass that must justify every change against the definition and will not weaken a test that is actually correct. The implementation is never allowed to edit the tests, and the tests are only ever edited by that spec-anchored path, so a correct test is never bent to match a buggy implementation.
 
 The TDD methodology above (sanity check, oracle-first generation, diagnose→fix routing, persona review loops) is target-language-agnostic: the language-specific steps — prompts, artifact naming and layout, output validation, linting, formatting, test execution, and the runnable-CLI step — are delegated to a **language backend** in [`marsha/backends/`](./marsha/backends/), selected with `--target`. Only the Python backend is wired today; the registry and dispatch are ready for additional targets.
 
@@ -179,8 +179,9 @@ usage: marsha compile [-h] [-t TARGET] [--target-version TARGET_VERSION] [-d]
               [--fix-personas FIX_PERSONAS]
               [--optimize-severity OPTIMIZE_SEVERITY]
               [--context-window CONTEXT_WINDOW] [--context-cap CONTEXT_CAP]
-              [-s] [--api-base API_BASE] [--model MODEL]
-              [--provider {openai,anthropic}]
+               [-s] [--api-base API_BASE] [--model MODEL]
+               [--provider {openai,anthropic}]
+               [--max-price USD]
               source
 
 Marsha AI Compiler
@@ -264,9 +265,13 @@ options:
                         file (openai provider only)
   --model MODEL         Model to use for code generation, overriding the model
                         in the config file
-  --provider {openai,anthropic}
-                        LLM provider to use: openai (default; any OpenAI-
-                        compatible API) or anthropic (Claude)
+   --provider {openai,anthropic}
+                         LLM provider to use: openai (default; any OpenAI-
+                         compatible API) or anthropic (Claude)
+   --max-price USD      Stop before another model request when estimated
+                        cumulative spend reaches this amount in USD. The
+                        request that crosses the cap completes; in-flight
+                        requests cannot be interrupted.
 ```
 
 * `-d` adds a significant amount of debug information to the screen. Probably not useful if you're not working on Marsha itself.
@@ -285,6 +290,7 @@ options:
 * `--context-window` Overrides the context window (in tokens) used to size review/editor prompts. It is auto-detected from the service when possible (eg a llama.cpp server's `n_ctx`), else a documented default is used; set it if your backend mis-reports its window.
 * `--context-cap` The fraction of the context window a single prompt may occupy before its findings are compacted (default `0.5`).
 * `--provider` Selects the LLM provider: `openai` (default; any OpenAI-compatible API) or `anthropic` (Claude, keyed by `CLAUDE_API_KEY` or `ANTHROPIC_API_KEY`).
+* `--max-price USD` sets an estimated cumulative spend cap for `compile`, `review`, `refine`, and `diff`. It uses provider-reported token usage and Marsha's model pricing table. A request that reaches or crosses the cap completes before Marsha stops; already in-flight requests cannot be interrupted. With the cap enabled, Marsha refuses models that have no configured token pricing.
 * `--target` Selects the target language for the generated code, by backend id or alias (`python`, default). The compiler's language-specific steps — prompts, artifact layout, validation, linting, formatting, test execution, and the runnable-CLI helper — are delegated to a language backend; only `python` is wired today, and the registry is ready for more.
 * `--target-version` The version of the target language the generated code should target (eg `3.12` for Python, where it becomes the project's `requires-python`). Defaults to the interpreter running Marsha — the only one the generated code is verified against.
 
@@ -307,7 +313,7 @@ Optional context (both are treated as **untrusted** reference data, never as ins
 * `--linear <ticket>` (needs the `linear` CLI) — pulls the ticket's requirements and prepends them to the pull-request context.
 * `--post-review` (requires `--pr`) — posts the findings back to the PR as inline comments at the correct file and line, folding any finding whose line isn't in the diff into the review body.
 
-`--target` selects the target language for reviewer guidance; unlike `compile`, its toolchain does not need to be installed. The global flags (`--model`, `--provider`, `--api-base`, `-d`, `--trace`) work as they do for `compile`.
+`--target` selects the target language for reviewer guidance; unlike `compile`, its toolchain does not need to be installed. The global flags (`--model`, `--provider`, `--api-base`, `--max-price`, `-d`, `--trace`) work as they do for `compile`.
 
 ## Using compiled Marsha code
 

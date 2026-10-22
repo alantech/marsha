@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import signal
 import sys
 import tempfile
@@ -22,7 +23,8 @@ from marsha.diff import run_diff
 from marsha.meta import MarshaMeta
 from marsha.refine import run_refine
 from marsha.review import run_review
-from marsha.stats import stats
+from marsha.stats import (PriceLimitExceeded, begin_invocation, format_cost,
+                          ensure_price_limit, stats)
 from marsha.utils import read_file, copy_file, copy_tree, prettify_time_delta, write_composed
 
 # Parse the input arguments. Subcommands hang off `marsha <command>`; the
@@ -34,6 +36,26 @@ parser = argparse.ArgumentParser(
 )
 sub = parser.add_subparsers(
     dest='command', title='commands', metavar='COMMAND')
+
+
+def _positive_price(value: str) -> float:
+    try:
+        price = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError('must be a positive finite dollar amount') from e
+    if not math.isfinite(price) or price <= 0:
+        raise argparse.ArgumentTypeError('must be a positive finite dollar amount')
+    return price
+
+
+def _add_max_price_argument(command_parser: argparse.ArgumentParser) -> None:
+    command_parser.add_argument(
+        '--max-price', type=_positive_price, metavar='USD',
+        help='Stop before another model request when estimated cumulative spend reaches this '
+             'amount in USD. The request that crosses the cap completes; in-flight requests '
+             'cannot be interrupted.')
+
+
 compile_parser = sub.add_parser(
     'compile',
     help='Compile a .mrsh definition into generated code and a test suite.')
@@ -84,6 +106,7 @@ compile_parser.add_argument('--model',
 compile_parser.add_argument('--provider',
                             choices=['openai', 'anthropic'],
                             help='LLM provider to use: openai (default; any OpenAI-compatible API) or anthropic (Claude)')
+_add_max_price_argument(compile_parser)
 
 help_parser = sub.add_parser(
     'help',
@@ -145,6 +168,7 @@ review_parser.add_argument('--model',
                            help='Model to use for the review.')
 review_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
+_add_max_price_argument(review_parser)
 refine_parser = sub.add_parser(
     'refine',
     help='Interactively resolve the ambiguities in a spec (.mrsh, GitHub issue, or Linear ticket) and lock it down before implementation.')
@@ -183,6 +207,7 @@ refine_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
 refine_parser.add_argument('--api-base',
                            help='OpenAI-compatible API base URL for the LLM.')
+_add_max_price_argument(refine_parser)
 diff_parser = sub.add_parser(
     'diff',
     help='Implement a design-locked spec (.mrsh, GitHub issue, or Linear ticket) in the '
@@ -200,13 +225,13 @@ diff_parser.add_argument('--linear', default=None,
                          'run inside a git repository). Mutually exclusive with the '
                          'positional path and --issue.')
 diff_parser.add_argument('--review-cycles', type=int, default=30, metavar='N',
-                         help='Fix-and-review cycles after the initial review gate (N >= 0). '
-                         '0 disables the code-quality review (a one-shot implementation '
-                         'plus the test suite only). Default: 30.')
-diff_parser.add_argument('--max-tool-failure', type=int, default=5, metavar='N',
+                         help='Complete validation/review/meta-review/repair iterations (N >= 0). '
+                         'The run stops clean only when findings are closed and validation passes. '
+                         '0 skips code review but still runs validation. Default: 30.')
+diff_parser.add_argument('--max-tool-failure', type=int, default=10, metavar='N',
                          help='Consecutive failed tool invocations before the implementor is '
-                         'interrupted (N >= 1); a command that runs but reports failing '
-                         'tests is validation feedback, not a failure. Default: 5.')
+                              'interrupted (N >= 1); a command that runs but reports failing '
+                              'tests is validation feedback, not a failure. Default: 10.')
 diff_parser.add_argument('--safe', action='store_true',
                          help='Restricted mode: no network, no dependency installation, no '
                          'destructive git operations, and no automatic commit (a '
@@ -229,6 +254,7 @@ diff_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                          help='LLM provider: openai (default) or anthropic (Claude).')
 diff_parser.add_argument('--api-base',
                          help='OpenAI-compatible API base URL for the LLM.')
+_add_max_price_argument(diff_parser)
 
 
 def _normalize_argv(argv: list[str]) -> tuple[list[str], bool]:
@@ -250,21 +276,21 @@ def print_help(topic: str | None) -> None:
         '  compile   Compile a .mrsh definition into generated code and a\n'
         '            test suite. Example: marsha compile your.mrsh\n'
         '            Key flags: -t/--target, -a/--attempts, --optimize,\n'
-        '            --model, --provider, --api-base, -d/--debug, --trace.\n'
+        '            --model, --provider, --api-base, --max-price, --trace.\n'
         '\n'
         '  review    Review a branch diff against the default branch with the\n'
         '            review personas. Example: marsha review --pr 123\n'
-        '            Key flags: --pr, --linear, --post-review, --personas.\n'
+        '            Key flags: --pr, --linear, --post-review, --personas, --max-price.\n'
         '\n'
         '  refine    Interactively resolve the ambiguities in a spec (.mrsh, GitHub\n'
         '            issue, or Linear ticket) and lock it down before implementation.\n'
         '            Example: marsha refine spec.mrsh or marsha refine --issue 218\n'
-        '            Key flags: --issue, --linear, --check, --dry-run.\n'
+        '            Key flags: --issue, --linear, --check, --dry-run, --max-price.\n'
         '\n'
         '  diff      Implement a design-locked spec (.mrsh, GitHub issue, or Linear\n'
         '            ticket) in the current Git repository, with a validation and a\n'
         '            review gate before committing. Example: marsha diff spec.mrsh\n'
-        '            Key flags: --issue, --linear, --review-cycles, --safe.\n'
+        '            Key flags: --issue, --linear, --review-cycles, --safe, --max-price.\n'
         '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'
@@ -312,27 +338,33 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == 'help':
         print_help(args.topic)
         return 0
-    if args.command == 'review':
-        _setup_runtime(args, require_toolchain=False)
-        return asyncio.run(run_review(args))
-    if args.command == 'refine':
-        # The interactive chat drives a live transcript; the per-call progress heartbeat would
-        # clobber it, so it is off by default there (still available via --trace). Headless
-        # `refine --check` (like compile and review) keeps it on.
-        log.set_progress(args.check)
-        _setup_runtime(args, require_toolchain=False)
-        return asyncio.run(run_refine(args))
-    if args.command == 'diff':
-        # Like compile and review this is a long headless run (the brief PR-proposal prompt at
-        # the end is on stdout; the progress heartbeat is on stderr, so they do not collide).
-        _setup_runtime(args, require_toolchain=False)
-        return asyncio.run(run_diff(args))
-    if args.command != 'compile':
-        parser.print_help(sys.stderr)
-        return 2
-    _setup_runtime(args)
-    asyncio.run(main(args))
-    return 0
+    begin_invocation(getattr(args, 'max_price', None))
+    try:
+        if args.command == 'review':
+            _setup_runtime(args, require_toolchain=False)
+            return asyncio.run(run_review(args))
+        if args.command == 'refine':
+            # The interactive chat drives a live transcript; the per-call progress heartbeat would
+            # clobber it, so it is off by default there (still available via --trace). Headless
+            # `refine --check` (like compile and review) keeps it on.
+            log.set_progress(args.check)
+            _setup_runtime(args, require_toolchain=False)
+            return asyncio.run(run_refine(args))
+        if args.command == 'diff':
+            # Like compile and review this is a long headless run (the brief PR-proposal prompt at
+            # the end is on stdout; the progress heartbeat is on stderr, so they do not collide).
+            _setup_runtime(args, require_toolchain=False)
+            return asyncio.run(run_diff(args))
+        if args.command != 'compile':
+            parser.print_help(sys.stderr)
+            return 2
+        _setup_runtime(args)
+        asyncio.run(main(args))
+        return 0
+    except PriceLimitExceeded as error:
+        print(f'error: {error}', file=sys.stderr)
+        print(format_cost(), file=sys.stderr)
+        return 1
 
 
 def _setup_runtime(args: Any, require_toolchain: bool = True) -> None:
@@ -359,6 +391,9 @@ def _setup_runtime(args: Any, require_toolchain: bool = True) -> None:
     if is_local_backend():
         for note in apply_available_models(discover_models(resolve_api_base())):
             print(f'Note: {note}')
+    # Validate the resolved model before a subcommand starts doing repository or spec work. The
+    # mapper repeats this check for fallback models and immediately before every later request.
+    ensure_price_limit(resolve_model())
     # Bind the target-language backend (--target) and verify its toolchain.
     target = backends.select(args.target)
     if require_toolchain and not target.toolchain_ok():
