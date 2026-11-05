@@ -43,6 +43,32 @@ DOC = '# example_test.py\n\n```py\ndef test():\n    pass\n```\n'
 VALID_ORACLE = '# example_test.py\n\n```py\ndef test():\n    pass\n```\n'
 VALID_IMPL = '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
 
+TERMINAL_COMMANDS = ('submit', 'no-findings', 'submit-review')
+
+
+def fake_execute(fallback: str) -> Any:
+    """A fake execute_command for tests that script a tool call before a terminal command:
+    ordinary tool commands return `fallback`, but the terminal commands run their real
+    handlers so the submitted payload round-trips (a blanket mock would return the fallback
+    for the terminal too, and the loop would complete with the wrong text)."""
+    real = tools.execute_command
+    calls: list[Any] = []
+
+    async def execute(commands: Any, name: str, args: Any, page: Any = None) -> Any:
+        calls.append((name, args))
+        if name in TERMINAL_COMMANDS:
+            return await real(commands, name, args, page=page)
+        return fallback
+
+    def assert_awaited_once() -> None:
+        # Exactly one ordinary tool call (the terminal command's own dispatch is not a tool call).
+        tool_calls = [c for c in calls if c[0] not in TERMINAL_COMMANDS]
+        assert len(tool_calls) == 1, calls
+
+    execute.assert_awaited_once = assert_awaited_once  # type: ignore[attr-defined]
+    execute.calls = calls  # type: ignore[attr-defined]
+    return execute
+
 
 # --- $ command extraction (one per turn) --------------------------------------
 
@@ -64,6 +90,20 @@ def test_extract_single_command() -> None:
     assert pending.args == ['pandas read_csv parameters']
     assert pending.line == '$ web-search "pandas read_csv parameters"'
     assert pending.malformed is False
+
+
+def test_extract_unicode_delimited_multiline_literal() -> None:
+    # A Unicode-delimited argument spans multiple lines; the content is literal.
+    text = (f'$ write-file src/foo.py {tools.LITERAL_BLOCK_OPEN}\n'
+            'line1\n'
+            'line2 with "quotes" and \\backslash\n'
+            f'{tools.LITERAL_BLOCK_CLOSE}\n'
+            '$ finished\n')
+    cmds = tools.extract_pending_commands(text)
+    assert len(cmds) == 2
+    assert cmds[0].name == 'write-file'
+    assert cmds[0].args == ['src/foo.py', 'line1\nline2 with "quotes" and \\backslash\n']
+    assert cmds[1].name == 'finished'
 
 
 def test_extract_page_prefixed_command() -> None:
@@ -113,7 +153,9 @@ def test_extract_url_argument_is_a_single_token() -> None:
 def test_extract_malformed_command_lines() -> None:
     for bad in (DOC + '\n$\n',
                 DOC + '\n$web-search "a"\n',
-                DOC + '\n$ web-search "unterminated\n'):
+                DOC + '\n$ web-search "unterminated\n',
+                '$ write-file src/a.py """source"""',
+                f'$ write-file src/a.py {tools.LITERAL_BLOCK_OPEN}\nsource\n'):
         pending = tools.extract_pending_command(bad)
         assert pending is not None and pending.malformed is True, bad
 
@@ -177,7 +219,7 @@ def test_build_commands_honors_a_categories_override() -> None:
     assert set(tools.build_commands(ctx)) == {'web-search', 'view-web-page'}
     # Without an override, the phase's standard set applies.
     assert set(tools.build_commands(tools.ToolContext(phase='refine'))) == {
-        'git', 'notes', 'list-tree', 'summarize', 'find-in-file',
+        'git', 'notes', 'read-file', 'list-tree', 'summarize', 'find-in-file',
         'web-search', 'view-web-page'}
 
 
@@ -187,6 +229,105 @@ def test_execute_known_command_runs_handler() -> None:
         out = asyncio.run(tools.execute_command(cmds, 'web-search', ['q']))
     assert out == 'OK'
     h.assert_awaited_once_with(['q'])
+
+
+def test_todo_tool_adds_completes_and_reopens_review_items() -> None:
+    ctx = tools.ToolContext(phase='implement')
+    commands = tools.build_commands(ctx)
+    assert 'todo' in commands
+
+    added = asyncio.run(tools.execute_command(
+        commands, 'todo', ['add', 'Implement', 'the', 'CLI', 'tests']))
+    assert 'added todo 1' in added
+    assert 'Implementation todo list:' in added
+    assert not tools.todo_list_ready(ctx)
+    assert 'Implement the CLI tests' in added
+    assert asyncio.run(tools.todo_tool(['list'], ctx)).startswith(
+        'error: todo operation must be')
+
+    completed = asyncio.run(tools.execute_command(commands, 'todo', ['complete', '1']))
+    assert '0 pending' in completed
+    assert 'Implementation todo list:' in completed
+    assert 'Implement the CLI tests' in completed
+    assert tools.todo_list_ready(ctx)
+
+    tools.add_todo_item(
+        ctx, '[Review-A1] MAJOR src/cli.py:1: handle empty args',
+        source='review', key='Review-A1')
+    assert '[ ] 2. (review)' in tools.format_todo_list(ctx)
+    tools.reconcile_todo_items(ctx, {'Review-A1'})
+    assert '[ ] 2. (review)' in tools.format_todo_list(ctx)
+    tools.reconcile_todo_items(ctx, set())
+    assert '[x] 2. (review)' in tools.format_todo_list(ctx)
+    assert tools.todo_list_ready(ctx)
+    assert tools.clear_completed_todo_checkpoint(ctx)
+    assert ctx.todo_items == [] and ctx.todo_checkpoint_complete
+    assert tools.todo_list_ready(ctx)
+    assert 'cleared at the last successful' in tools.format_todo_list(ctx)
+    tools.add_todo_item(ctx, 'Handle a newly discovered follow-up.')
+    assert not tools.todo_list_ready(ctx)
+
+
+def test_todo_tool_is_only_available_in_implement_phases() -> None:
+    assert 'todo' not in tools.build_commands(tools.ToolContext(phase='review'))
+    assert 'todo' not in tools.build_commands(tools.ToolContext(phase='refine'))
+    assert asyncio.run(tools.todo_tool(['list'], tools.ToolContext(phase='review'))) \
+        .startswith('error:')
+
+
+def test_todo_tool_rejects_review_findings_with_reason() -> None:
+    # A rejected finding is a disposition, not open work: it records the reason (which the
+    # reviewers see) and counts as complete, so it unblocks the next review cycle. A re-raised
+    # (defended) finding reopens with the prior rejection still visible.
+    ctx = tools.ToolContext(phase='implement')
+    commands = tools.build_commands(ctx)
+    tools.add_todo_item(
+        ctx, '[Review-A1] MAJOR src/cli.py:1: handle empty args',
+        source='review', key='Review-A1')
+    out = asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '1', 'the spec requires empty args to pass through']))
+    assert 'rejected todo 1' in out
+    item = ctx.todo_items[0]
+    assert item.completed and item.rejected
+    assert item.rejection_reason == 'the spec requires empty args to pass through'
+    assert tools.todo_list_ready(ctx)
+    assert 'rejected: the spec requires empty args to pass through' \
+        in tools.format_todo_list(ctx)
+    tools.reconcile_todo_items(ctx, {'Review-A1'})
+    assert not ctx.todo_items[0].completed and ctx.todo_items[0].rejected
+    assert 'rejected before: the spec requires empty args to pass through' \
+        in tools.format_todo_list(ctx)
+    # A new rejection overwrites the reason; completing the item keeps the rejection record.
+    out = asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '1', 'fixed and re-tested']))
+    assert 'rejected todo 1' in out
+    assert ctx.todo_items[0].rejection_reason == 'fixed and re-tested'
+    assert ctx.todo_items[0].completed and ctx.todo_items[0].rejected
+
+
+def test_todo_tool_reject_refuses_own_tasks_and_empty_reasons() -> None:
+    ctx = tools.ToolContext(phase='implement')
+    commands = tools.build_commands(ctx)
+    asyncio.run(tools.execute_command(commands, 'todo', ['add', 'Build the CLI']))
+    out = asyncio.run(tools.execute_command(commands, 'todo', ['reject', '1', 'nope']))
+    assert out.startswith('error:')
+    assert 'your own task' in out
+    assert not ctx.todo_items[0].rejected and not ctx.todo_items[0].completed
+    tools.add_todo_item(ctx, '[Review-B2] MINOR src/x.py:2: y',
+                        source='review', key='Review-B2')
+    assert asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '2'])).startswith('error:')
+    assert 'reason' in asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '2', '   ']))
+    assert 'no todo item has id 99' in asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '99', 'x']))
+    assert asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', 'not-an-id', 'x'])).startswith('error:')
+    # Validation findings may be rejected too (the implementor can contest a survey failure).
+    tools.add_todo_item(ctx, '[pytest -q] MAJOR: suite fails',
+                        source='validation', key='pytest -q')
+    assert 'rejected todo 3' in asyncio.run(tools.execute_command(
+        commands, 'todo', ['reject', '3', 'known flake, passes in isolation']))
 
 
 def test_execute_command_forwards_page_only_to_paged_handlers() -> None:
@@ -222,7 +363,10 @@ def test_execute_handler_exception_is_error_text() -> None:
 # The command names, by category, for the (only) wired target: python. The
 # language-agnostic set is shared by every target; the registry + installed-env
 # sets are python-specific and layered on by the backend.
-AGNOSTIC = {'web-search', 'view-web-page', 'calc', 'list-tree', 'summarize', 'find-in-file'}
+AGNOSTIC = {
+    'web-search', 'view-web-page', 'calc', 'read-file', 'list-tree', 'summarize',
+    'find-in-file',
+}
 PY_REGISTRY = {'search-dependencies', 'dependency-docs'}
 ENV = {'list-dependencies', 'show-dependency', 'list-symbols', 'show-symbol'}
 
@@ -259,12 +403,30 @@ def test_phase_scoping_no_backend_is_agnostic_only() -> None:
     assert set(tools.build_commands(tools.ToolContext('gen'))) == AGNOSTIC
 
 
+def test_implement_safe_phase_drops_run_and_network() -> None:
+    # Safe mode leaves command execution to the harness, after its explicit validation approval.
+    b = backends.current()
+    impl = set(tools.build_commands(tools.ToolContext('implement', backend=b)))
+    impl_safe = set(tools.build_commands(tools.ToolContext('implement-safe', backend=b)))
+    assert 'write-file' in impl and 'write-file' in impl_safe
+    assert 'replace-lines-in-file' in impl
+    assert 'remove-lines-from-file' in impl
+    assert 'append-file' in impl
+    assert 'run' in impl and 'run' not in impl_safe
+    assert 'todo' in impl and 'todo' in impl_safe
+    assert 'web-search' in impl and 'web-search' not in impl_safe  # no network in safe mode
+    assert 'run' not in tools.build_commands(tools.ToolContext('review', backend=b))
+
+
 def test_backend_layers_tools_on_the_agnostic_base() -> None:
     # The point of the per-target design: a backend supplies the language-specific
     # tools on top of the once-defined agnostic set, each tagged by category. The raw set
     # also carries the review-only git/notes tools (build_commands filters them per phase).
     cmds = backends.current().tool_commands(tools.ToolContext('gen'))
-    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | {'git', 'notes'}
+    assert set(cmds) == AGNOSTIC | PY_REGISTRY | ENV | \
+        {'git', 'notes', 'write-file', 'replace-lines-in-file',
+         'remove-lines-from-file', 'append-file', 'run', 'todo',
+         'review-request', 'punt'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WEB} \
         == {'web-search', 'view-web-page'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_REGISTRY} == PY_REGISTRY
@@ -272,15 +434,475 @@ def test_backend_layers_tools_on_the_agnostic_base() -> None:
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_GIT} == {'git'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_NOTES} == {'notes'}
     assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_READ} \
-        == {'list-tree', 'summarize', 'find-in-file'}
+        == {'read-file', 'list-tree', 'summarize', 'find-in-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_WRITE} \
+        == {'write-file', 'replace-lines-in-file', 'remove-lines-from-file', 'append-file'}
+    assert {c.name for c in cmds.values() if c.category == tools.CATEGORY_RUN} == {'run'}
+
+
+def test_write_file_writes_inside_tree(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['src/foo.py', 'print(1)\\n'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'src' / 'foo.py').read_text() == 'print(1)\n'
+
+
+def test_read_file_range_reads_exact_lines_from_new_file(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    source = repo / 'new module.py'
+    source.write_text('alpha\nbeta\ngamma\ndelta\nepsilon\n')
+    result = asyncio.run(tools.read_file_range(
+        ['new module.py', '2..4'], tools.ToolContext(workdir=str(repo))))
+    assert result == ('Contents of new module.py (requested lines 2-4):\n'
+                      '2: beta\n3: gamma\n4: delta')
+
+
+def test_read_file_range_rejects_bad_ranges_and_git_metadata(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'sample.py').write_text('line\n')
+    (repo / '.GIT').mkdir()
+    (repo / '.GIT' / 'config').write_text('sensitive\n')
+    ctx = tools.ToolContext(workdir=str(repo))
+    assert asyncio.run(tools.read_file_range(['sample.py', '0..2'], ctx)).startswith(
+        'error: invalid line range')
+    assert asyncio.run(tools.read_file_range(['../secret', '1..2'], ctx)).startswith(
+        'error: path')
+    assert asyncio.run(tools.read_file_range(['.GIT/config', '1..2'], ctx)).startswith(
+        'error: read-file cannot read Git metadata')
+
+
+def test_literal_block_write_content_preserves_backslashes(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    literal = r'print("a\nb")'
+    command = tools._parse_command_line(
+        f'$ write-file sample.py {tools.LITERAL_BLOCK_OPEN}'
+        + literal + tools.LITERAL_BLOCK_CLOSE)
+    assert command is not None
+    assert isinstance(command.args[1], tools.LiteralArgument)
+    result = asyncio.run(tools.write_file_tool(command.args, tools.ToolContext(
+        workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'sample.py').read_text() == literal
+
+    (repo / 'replace.py').write_text('old\n')
+    replace = tools._parse_command_line(
+        f'$ replace-lines-in-file replace.py 1..1 {tools.LITERAL_BLOCK_OPEN}'
+        + literal + tools.LITERAL_BLOCK_CLOSE)
+    assert replace is not None
+    asyncio.run(tools.replace_lines_tool(replace.args, tools.ToolContext(
+        workdir=str(repo))))
+    assert (repo / 'replace.py').read_text() == literal + '\n'
+
+    (repo / 'append.py').write_text('header\n')
+    append = tools._parse_command_line(
+        f'$ append-file append.py {tools.LITERAL_BLOCK_OPEN}'
+        + literal + tools.LITERAL_BLOCK_CLOSE)
+    assert append is not None
+    asyncio.run(tools.append_file_tool(append.args, tools.ToolContext(
+        workdir=str(repo))))
+    assert (repo / 'append.py').read_text() == 'header\n' + literal + '\n'
+
+
+def test_literal_block_write_preserves_python_docstrings(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    source = 'def f():\n    """First line.\n\n    More docs.\n    """\n    return 1\n'
+    response = (f'$ write-file doc.py {tools.LITERAL_BLOCK_OPEN}\n'
+                + source + tools.LITERAL_BLOCK_CLOSE + '\n'
+                + '$ finished\n')
+    commands = tools.extract_pending_commands(response)
+    assert len(commands) == 2 and commands[0].malformed is False
+    assert isinstance(commands[0].args[1], tools.LiteralArgument)
+    result = asyncio.run(tools.write_file_tool(
+        commands[0].args, tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'doc.py').read_text() == source
+
+
+def test_literal_block_write_keeps_shell_examples_inside_content() -> None:
+    response = (f'$ write-file README.md {tools.LITERAL_BLOCK_OPEN}\n'
+                '# Setup\n'
+                '$ pip install example-package\n'
+                'Then run the application.\n'
+                + tools.LITERAL_BLOCK_CLOSE + '\n'
+                + '$ finished\n')
+    commands = tools.extract_pending_commands(response)
+    assert len(commands) == 2
+    assert commands[0].name == 'write-file' and not commands[0].malformed
+    assert commands[0].args[1] == (
+        '# Setup\n$ pip install example-package\nThen run the application.\n')
+    assert commands[1].name == 'finished'
+
+
+def test_prose_triple_quotes_do_not_open_a_literal_block() -> None:
+    response = ('Python uses """ to delimit a docstring.\n'
+                f'$ write-file a.py {tools.LITERAL_BLOCK_OPEN}\n'
+                'value = 1\n'
+                + tools.LITERAL_BLOCK_CLOSE + '\n'
+                + '$ finished\n')
+    commands = tools.extract_pending_commands(response)
+    assert [command.name for command in commands] == ['write-file', 'finished']
+    assert commands[0].args[1] == 'value = 1\n'
+
+
+def test_batched_literal_block_writes_remain_separate(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    response = (f'$ write-file a.py {tools.LITERAL_BLOCK_OPEN}\n'
+                'x = 1\n'
+                + tools.LITERAL_BLOCK_CLOSE + '\n'
+                + f'$ write-file b.py {tools.LITERAL_BLOCK_OPEN}\n'
+                + 'y = 2\n'
+                + tools.LITERAL_BLOCK_CLOSE + '\n'
+                + '$ finished\n')
+    commands = tools.extract_pending_commands(response)
+    assert [command.name for command in commands] == [
+        'write-file', 'write-file', 'finished']
+    assert commands[0].args[1] == 'x = 1\n'
+    assert commands[1].args[1] == 'y = 2\n'
+    ctx = tools.ToolContext(workdir=str(repo))
+    for command in commands[:2]:
+        result = asyncio.run(tools.write_file_tool(command.args, ctx))
+        assert result.startswith('wrote')
+    assert (repo / 'a.py').read_text() == 'x = 1\n'
+    assert (repo / 'b.py').read_text() == 'y = 2\n'
+
+
+def test_write_file_is_portable_without_o_nofollow(
+        tmp_path: Any, monkeypatch: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    monkeypatch.delattr(os, 'O_NOFOLLOW', raising=False)
+    result = asyncio.run(tools.write_file_tool(
+        ['sample.py', 'print(1)'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('wrote')
+    assert (repo / 'sample.py').read_text() == 'print(1)'
+
+
+def test_write_file_refuses_dotdot_escape(tmp_path: Any) -> None:
+    # A `..` path that leaves the working tree is refused before anything is written.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.write_file_tool(
+        ['../escape.txt', 'x'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert not (tmp_path / 'escape.txt').exists()
+
+
+def test_write_file_refuses_git_metadata(tmp_path: Any) -> None:
+    # The working tree includes the repo's .git directory; write-file must refuse to touch Git
+    # metadata (it would corrupt the repo), while a normal source file still writes.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ok = asyncio.run(tools.write_file_tool(
+        ['src/a.py', 'print(1)'], tools.ToolContext(workdir=str(repo))))
+    assert ok.startswith('wrote')
+    bad = asyncio.run(tools.write_file_tool(
+        ['.git/config', '[core]'], tools.ToolContext(workdir=str(repo))))
+    assert bad.startswith('error:') and 'Git metadata' in bad
+    assert not (repo / '.git' / 'config').exists()
+    mixed_case = asyncio.run(tools.write_file_tool(
+        ['.GIT/config', '[core]'], tools.ToolContext(workdir=str(repo))))
+    assert mixed_case.startswith('error:') and 'Git metadata' in mixed_case
+
+
+def test_write_file_refuses_symlink_outside_tree(tmp_path: Any) -> None:
+    # A path inside the tree that traverses an outside-pointing symlink must be refused: a lexical
+    # prefix check alone would let open(..., 'w') follow the link and write outside the tree.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('original')
+    os.symlink(outside, repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert outside.read_text() == 'original'  # the outside file is untouched
+
+
+def test_edit_file_refuses_diff_headers_for_another_path(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    target = repo / 'target.py'
+    target.write_text('value = 1\n')
+    diff_text = ('--- a/other.py\n+++ b/other.py\n'
+                 '@@ -1 +1 @@\n-value = 1\n+value = 2\n')
+    result = asyncio.run(tools.edit_file_tool(
+        ['target.py', diff_text], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:') and 'headers' in result
+    assert target.read_text() == 'value = 1\n'
+
+
+def test_edit_file_applies_only_the_requested_path(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    target = repo / 'target.py'
+    target.write_text('value = 1\n')
+    diff_text = ('--- a/target.py\n+++ b/target.py\n'
+                 '@@ -1 +1 @@\n-value = 1\n+value = 2\n')
+    result = asyncio.run(tools.edit_file_tool(
+        ['target.py', diff_text], tools.ToolContext(workdir=str(repo))))
+    assert result == 'applied diff to target.py'
+    assert target.read_text() == 'value = 2\n'
+
+
+# --- run tool (whitelisted command execution) ------------------------------------
+
+def test_run_tool_refuses_without_whitelist(tmp_path: Any) -> None:
+    # No whitelist: the run tool refuses with a clear error.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    result = asyncio.run(tools.run_tool(
+        ['pytest', '-q'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:') and 'no whitelist' in result
+
+
+def test_run_tool_refuses_non_whitelisted_command(tmp_path: Any) -> None:
+    # A command not in the whitelist is refused, naming the allowed set.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    wl = [tools.RunRule(('pytest',), 'pytest [args]')]
+    result = asyncio.run(tools.run_tool(
+        ['rm', '-rf', '/'], tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('error:') and 'not in the allowed command set' in result
+
+
+def test_run_tool_runs_whitelisted_command(tmp_path: Any) -> None:
+    # A whitelisted command runs and returns its exit code and output.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'script.py').write_text('print("hello")\n')
+    wl = [tools.RunRule((sys.executable,), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        [sys.executable, 'script.py'],
+        tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('[exit 0]')
+    assert 'hello' in result
+
+
+def test_run_tool_scrubs_llm_credentials(tmp_path: Any, monkeypatch: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'env.py').write_text(
+        'import os\n'
+        'print([key for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", '
+        '"CLAUDE_API_KEY", "SIGNOZ_API_KEY", "KNOWN_PROD_DB", '
+        '"OPENCODE_CONSOLE_TOKEN") if key in os.environ])\n')
+    for key in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY',
+                'SIGNOZ_API_KEY', 'KNOWN_PROD_DB', 'OPENCODE_CONSOLE_TOKEN'):
+        monkeypatch.setenv(key, 'test-secret')
+    whitelist = [tools.RunRule((sys.executable,), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        [sys.executable, 'env.py'],
+        tools.ToolContext(workdir=str(repo), run_whitelist=whitelist)))
+    assert result.startswith('[exit 0]')
+    assert '[]' in result
+
+
+def test_line_edit_tools_preserve_line_endings_and_reject_invalid_text(
+        tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ctx = tools.ToolContext(workdir=str(repo))
+
+    (repo / 'crlf.txt').write_bytes(b'first\r\nsecond\r\nthird\r\n')
+    result = asyncio.run(tools.remove_lines_tool(['crlf.txt', '2..2'], ctx))
+    assert result.startswith('removed lines')
+    assert (repo / 'crlf.txt').read_bytes() == b'first\r\nthird\r\n'
+
+    invalid = b'first\n\xff\nthird\n'
+    (repo / 'invalid.txt').write_bytes(invalid)
+    result = asyncio.run(tools.replace_lines_tool(
+        ['invalid.txt', '1..1', 'changed'], ctx))
+    assert result.startswith('error:')
+    assert (repo / 'invalid.txt').read_bytes() == invalid
+
+
+def test_append_and_replace_at_eof_separate_unterminated_lines(
+        tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    ctx = tools.ToolContext(workdir=str(repo))
+    (repo / 'append.txt').write_bytes(b'first')
+    result = asyncio.run(tools.append_file_tool(['append.txt', 'second'], ctx))
+    assert result.startswith('appended')
+    assert (repo / 'append.txt').read_bytes() == b'first\nsecond\n'
+
+    (repo / 'replace.txt').write_bytes(b'first')
+    result = asyncio.run(tools.replace_lines_tool(
+        ['replace.txt', '2..2', 'second'], ctx))
+    assert result.startswith('replaced')
+    assert (repo / 'replace.txt').read_bytes() == b'first\nsecond\n'
+
+
+def test_run_tool_reports_nonzero_exit(tmp_path: Any) -> None:
+    # A command that runs but exits nonzero is a successful tool invocation (feedback), not an error.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'fail.py').write_text('import sys; sys.exit(42)\n')
+    wl = [tools.RunRule((sys.executable,), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        [sys.executable, 'fail.py'],
+        tools.ToolContext(workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('[exit 42]')
+    assert not result.startswith('error:')
+
+
+def test_run_tool_keeps_tail_of_verbose_successful_command(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'verbose.py').write_text(
+        'import sys\nsys.stdout.write("x" * 300000)\nprint("FINAL-MARKER")\n')
+    whitelist = [tools.RunRule((sys.executable,), 'python [args]')]
+    result = asyncio.run(tools.run_tool(
+        [sys.executable, 'verbose.py'],
+        tools.ToolContext(workdir=str(repo), run_whitelist=whitelist)))
+    assert result.startswith('[exit 0]')
+    assert 'FINAL-MARKER' in result
+    assert len(result) < tools.RUN_RESULT_CHAR_LIMIT + 128
+
+
+def test_run_tool_refuses_network_in_safe_mode(tmp_path: Any) -> None:
+    # A network command is refused in safe mode.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    wl = [tools.RunRule(('pip', 'install'), 'pip install <package>', network=True)]
+    result = asyncio.run(tools.run_tool(
+        ['pip', 'install', 'requests'],
+        tools.ToolContext(phase='implement-safe', workdir=str(repo), run_whitelist=wl)))
+    assert result.startswith('error:') and 'safe mode' in result
+
+    review_result = asyncio.run(tools.run_tool(
+        ['pip', 'install', 'requests'],
+        tools.ToolContext(phase='review', workdir=str(repo), run_whitelist=wl,
+                          no_network=True)))
+    assert review_result.startswith('error:') and 'safe mode' in review_result
+
+
+def test_run_tool_no_args() -> None:
+    # An empty command is an error.
+    result = asyncio.run(tools.run_tool([], tools.ToolContext()))
+    assert result.startswith('error:') and 'needs a command' in result
+
+
+def test_check_run_whitelist_prefix_match() -> None:
+    # The whitelist check matches on argv prefix: a longer command still matches its prefix rule.
+    wl = [tools.RunRule(('pytest',), 'pytest [args]')]
+    assert tools._check_run_whitelist(['pytest', '-q'], wl) is not None
+    assert tools._check_run_whitelist(['pytest', '-q', 'tests/'], wl) is not None
+    assert tools._check_run_whitelist(['rm', '-rf', '/'], wl) is None
+    assert tools._check_run_whitelist([], wl) is None
+
+
+def test_write_file_never_follows_a_symlink(tmp_path: Any) -> None:
+    # O_NOFOLLOW: even an in-tree symlink (which passes the realpath boundary check) is not
+    # written through — the final component is refused at the syscall level, so the tool never
+    # follows a symlink.
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'real.txt').write_text('original')
+    os.symlink(repo / 'real.txt', repo / 'link.txt')
+    result = asyncio.run(tools.write_file_tool(
+        ['link.txt', 'pwned'], tools.ToolContext(workdir=str(repo))))
+    assert result.startswith('error:')
+    assert (repo / 'real.txt').read_text() == 'original'  # not written through the link
+
+
+def test_summarize_refuses_url_in_safe_mode() -> None:
+    # Safe mode forbids the network: summarize must refuse a URL (before any fetch) rather than
+    # let the safe implementor reach the web through this read tool.
+    result = asyncio.run(tools.summarize(
+        ['https://example.com/page'], tools.ToolContext(phase='implement-safe')))
+    assert result.startswith('error:') and 'safe mode' in result
+    review_result = asyncio.run(tools.summarize(
+        ['https://example.com/page'], tools.ToolContext(phase='review', no_network=True)))
+    assert review_result.startswith('error:') and 'safe mode' in review_result
+    git_result = asyncio.run(tools.git(
+        ['ls-remote', 'origin'], tools.ToolContext(phase='review', no_network=True)))
+    assert git_result.startswith('error:') and 'safe mode' in git_result
+
+
+def test_review_request_includes_untracked_written_files(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t'], cwd=repo, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=repo, check=True)
+    (repo / 'base.py').write_text('value = 1\n')
+    subprocess.run(['git', 'add', 'base.py'], cwd=repo, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=repo, check=True)
+    ctx = tools.ToolContext(phase='implement', workdir=str(repo), base_ref='HEAD')
+    blocked = asyncio.run(tools.review_request_tool(['correctness'], ctx))
+    assert blocked.startswith('error: review-request is blocked')
+    task = tools.add_todo_item(ctx, 'Implement and test the requested change.')
+    task.completed = True
+    result = asyncio.run(tools.write_file_tool(
+        ['new_module.py', 'def added():\n    return 2\n'], ctx))
+    assert result.startswith('wrote')
+    captured: dict[str, Any] = {}
+
+    async def fake_run_with_tools(mapper: Any, request: str,
+                                  tool_ctx: Any, **kwargs: Any) -> str:
+        captured['request'] = request
+        captured['ctx'] = tool_ctx
+        return ('A1 [MAJOR] new_module.py:1 - missing edge-case handling\n\n'
+                'The new function returns before validating the empty input.')
+
+    with patch.object(tools, 'get_mapper', return_value=object()), \
+            patch.object(tools, 'run_with_tools', new=fake_run_with_tools):
+        review = asyncio.run(tools.review_request_tool(['correctness'], ctx))
+    assert review.startswith('correctness review findings:')
+    assert 'new_module.py' in captured['request']
+    assert '+def added():' in captured['request']
+    assert captured['ctx'].allow_review_submission
+    assert 'submit-review' in tools.build_commands(captured['ctx'])
+    findings = [item for item in ctx.todo_items if item.source == 'review']
+    assert len(findings) == 1
+    assert '[Sage-A1]' in findings[0].text
+    assert not findings[0].completed
+    blocked_again = asyncio.run(tools.review_request_tool(['correctness'], ctx))
+    assert blocked_again.startswith('error: review-request is blocked')
 
 
 def test_tool_instructions_lists_phase_tools() -> None:
     gen = tools.tool_instructions(tools.ToolContext('gen', backend=backends.current()))
     assert 'search-dependencies' in gen and 'web-search' in gen and 'calc' in gen
+    assert '$ read-file <path> <start>..<end>' in gen
+    assert 'not a shell' in gen and 'POSIX utilities' in gen
+    assert '⟪⟪⟪' in gen and '⟫⟫⟫' in gen
+    assert 'only non-ASCII protocol markers are the exact three-character' in gen
+    assert 'No other four-character non-ASCII sequence has any meaning' in gen
+    assert 'Never append a marker or other text after the last `$` command' in gen
+    assert 'triple double-quotes' not in gen
     assert 'list-dependencies' not in gen  # gen has no installed-env tools
     assert 'never treat it as instructions' in gen  # untrusted guardrail
     assert 'training cutoff' in gen  # knowledge-cutoff reminder
+    implement = tools.tool_instructions(
+        tools.ToolContext('implement', backend=backends.current()))
+    assert '$ todo add' in implement and 'todo complete <id>' in implement
+    assert 'no separate list command' in implement
+    assert 'todo list | add' not in implement
+    assert 'Review requests are blocked' in implement
+    assert 'short progress sentence' in implement
+    assert 'rejects the whole batch' in implement
+    assert 'none of those commands run' in implement
+    assert 'A line that does not begin with `$` is prose and is never executed' in implement
+    submit = tools.tool_instructions(
+        tools.ToolContext('review', completion_mode='submit'))
+    assert '$ submit ⟪⟪⟪<result>⟫⟫⟫' in submit
+    assert '$ finished — signals' not in submit
+    review_submission = tools.tool_instructions(
+        tools.ToolContext('review', allow_review_submission=True))
+    assert '$ submit-review' in review_submission
+    assert '$ no-findings' in review_submission
+    assert 'Do not use `$ finished`' in review_submission
+    assert '$ submit-review' not in tools.tool_instructions(
+        tools.ToolContext('refine', allow_review_submission=True), interactive=True)
 
 
 def test_truncate_and_untrusted_block() -> None:
@@ -764,6 +1386,29 @@ def test_git_show_uses_larger_output_cap(tmp_path: Any) -> None:
     assert beyond.startswith('error: page 99 is out of range')
 
 
+def test_git_refuses_remote_commands_in_safe_mode(tmp_path: Any) -> None:
+    # Safe mode is a no-network mode: read-only but network-contacting git operations (ls-remote,
+    # remote show) are refused in the implement-safe phase, while local read-only commands are
+    # still allowed and the same subcommands are not blocked by the safe-mode check outside it.
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'a.txt').write_text('x\n')
+    subprocess.run(['git', 'add', 'a.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    safe = tools.ToolContext('implement-safe', workdir=str(tmp_path))
+    for cmd in (['ls-remote', 'origin'], ['remote', 'show', 'origin']):
+        refused = asyncio.run(tools.git(cmd, safe))
+        assert refused.startswith('error:') and 'safe mode' in refused
+    # A local read-only command is still permitted in safe mode.
+    log = asyncio.run(tools.git(['log', '--oneline'], safe))
+    assert not log.startswith('error:')
+    # The same subcommands are not blocked by the safe-mode check outside safe mode.
+    review = tools.ToolContext('review', workdir=str(tmp_path))
+    assert 'safe mode' not in asyncio.run(tools.git(['ls-remote', 'origin'], review))
+    assert 'safe mode' not in asyncio.run(tools.git(['remote', 'show', 'origin'], review))
+
+
 def test_git_page_result_preserves_leading_blank_line_numbers(tmp_path: Any) -> None:
     # A file that begins with blank lines: git output is rstripped (not stripped), so the leading
     # blanks are kept and the page's 1-based range starts at line 1 (a blank), not at the first
@@ -908,12 +1553,14 @@ def test_run_with_tools_does_not_record_error_evidence(tmp_path: Any) -> None:
     # Bare request for a file over the cap -> "name a page" error (no content) -> not recorded.
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     asyncio.run(tools.run_with_tools(
-        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC]), 'REQ', ctx))
+        ScriptedMapper(['$ git show HEAD:huge.txt\n', DOC + '\n$ finished']),
+        'REQ', ctx))
     assert ctx.evidence == []
     # A named page -> real content -> recorded.
     ctx2 = tools.ToolContext('review', workdir=str(tmp_path))
     asyncio.run(tools.run_with_tools(
-        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC]), 'REQ', ctx2))
+        ScriptedMapper(['$ PAGE=1 git show HEAD:huge.txt\n', DOC + '\n$ finished']),
+        'REQ', ctx2))
     assert len(ctx2.evidence) == 1
     assert 'hello world' in ctx2.evidence[0][1]
 
@@ -936,7 +1583,7 @@ class ScriptedMapper:
 
 def test_run_with_tools_wraps_result_untrusted() -> None:
     doc_with_cmd = DOC + '\n$ web-search "pandas read_csv"\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
@@ -951,12 +1598,526 @@ def test_run_with_tools_wraps_result_untrusted() -> None:
 
 
 def test_run_with_tools_single_call_without_commands() -> None:
-    mapper = ScriptedMapper([DOC])
+    mapper = ScriptedMapper([DOC + '\n$ finished'])
     with patch.object(tools, 'execute_command', new=AsyncMock()) as ex:
         out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
     ex.assert_not_awaited()
     assert len(mapper.calls) == 1
+
+
+def test_submit_completion_mode_returns_payload() -> None:
+    mapper = ScriptedMapper([
+        f'$ submit {tools.LITERAL_BLOCK_OPEN}\nNO OBJECTIONS\n{tools.LITERAL_BLOCK_CLOSE}'])
+    ctx = tools.ToolContext('review', completion_mode='submit')
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Falsify these findings.', ctx))
+
+    assert result == 'NO OBJECTIONS'
+    assert len(mapper.calls) == 1
+
+
+def test_submit_completion_mode_rejects_commandless_final_response() -> None:
+    # A structured-output stage ALWAYS ends with its `$ submit` terminal: a bare final answer
+    # (even a well-formed one) is a protocol violation, not a completed result.
+    mapper = ScriptedMapper(['NO OBJECTIONS'] * (tools.MAX_PROTOCOL_BOUNCES + 1))
+    ctx = tools.ToolContext('review', completion_mode='submit')
+
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid tool-protocol'):
+        asyncio.run(tools.run_with_tools(mapper, 'Falsify these findings.', ctx))
+
+    assert len(mapper.calls) == tools.MAX_PROTOCOL_BOUNCES + 1
+
+
+@pytest.mark.parametrize('source_line', [
+    '$var = 1;',
+    '${value}',
+    '$ pytest -q',
+    '$ list-tree',
+])
+def test_submit_completion_mode_preserves_dollar_prefixed_fenced_content(
+        source_line: str) -> None:
+    # A `$` line inside the submitted payload (a PHP variable, a documented terminal command) is
+    # literal content, not a command: the payload round-trips verbatim.
+    answer = f'{DOC}\n\n```text\n{source_line}\n```'
+    mapper = ScriptedMapper([
+        f'$ submit {tools.LITERAL_BLOCK_OPEN}\n{answer}\n{tools.LITERAL_BLOCK_CLOSE}'])
+    ctx = tools.ToolContext('review', completion_mode='submit')
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Return a Markdown result.', ctx))
+
+    assert result == answer
+    assert len(mapper.calls) == 1
+
+
+def test_submit_completion_mode_runs_tools_before_final_answer() -> None:
+    mapper = ScriptedMapper([
+        '$ list-tree',
+        f'$ submit {tools.LITERAL_BLOCK_OPEN}\nNO OBJECTIONS\n{tools.LITERAL_BLOCK_CLOSE}'])
+    ctx = tools.ToolContext('review', workdir='.', completion_mode='submit')
+    with patch.object(tools, 'execute_command', new=fake_execute('TREE')) as execute:
+        result = asyncio.run(tools.run_with_tools(mapper, 'Inspect repository conventions.', ctx))
+
+    assert result == 'NO OBJECTIONS'
+    execute.assert_awaited_once()
+    assert '[tool:list-tree]' in mapper.calls[1][-1]['content']
+
+
+def test_submit_completion_mode_fails_closed_on_malformed_tool_batches() -> None:
+    mapper = ScriptedMapper(['$ list-tree\ntrailing prose']
+                            * (tools.MAX_PROTOCOL_BOUNCES + 1))
+    ctx = tools.ToolContext('review', completion_mode='submit')
+
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid tool-protocol'):
+        asyncio.run(tools.run_with_tools(mapper, 'Inspect the repository.', ctx))
+
+    assert len(mapper.calls) == tools.MAX_PROTOCOL_BOUNCES + 1
+
+
+def test_no_findings_is_a_terminal_command_in_review_sessions() -> None:
+    # A clean review ends with the `$ no-findings` command (not a bare `NO FINDINGS` response):
+    # the sentinel it returns is what the evidence gate and the caller parse.
+    mapper = ScriptedMapper(['$ no-findings'])
+    ctx = tools.ToolContext('review', require_evidence=True,
+                            allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 1
+    assert '$ no-findings' in tools.tool_instructions(ctx)
+
+
+@pytest.mark.parametrize('transient_response', [
+    '',
+    'This assistant response was interrupted. If you still need this assistant, please try again.',
+])
+def test_review_retries_empty_or_interrupted_responses(
+        transient_response: str) -> None:
+    mapper = ScriptedMapper([transient_response, '$ no-findings'])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 2
+    assert 'previous review response was empty or interrupted' in mapper.calls[1][-1]['content']
+
+
+def test_review_retries_consecutive_empty_and_interrupted_responses() -> None:
+    mapper = ScriptedMapper([
+        '',
+        'This assistant response was interrupted. If you still need this assistant, please try again.',
+        '$ no-findings',
+    ])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 3
+    assert all('previous review response was empty or interrupted'
+               in mapper.calls[index][-1]['content'] for index in (1, 2))
+
+
+def test_review_repeated_empty_responses_fail_closed() -> None:
+    mapper = ScriptedMapper([''] * (tools.MAX_TRANSIENT_REVIEW_RETRIES + 1))
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    with pytest.raises(tools.ToolFailureLimitExceeded,
+                       match='reviewer repeatedly returned an empty or interrupted response'):
+        asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert len(mapper.calls) == tools.MAX_TRANSIENT_REVIEW_RETRIES + 1
+
+
+def test_submit_review_is_opt_in_and_scoped_to_code_review() -> None:
+    ordinary_review = tools.ToolContext('review')
+    enabled_review = tools.ToolContext('review', allow_review_submission=True)
+    refine = tools.ToolContext('refine', allow_review_submission=True)
+
+    assert 'submit-review' not in tools.build_commands(ordinary_review)
+    assert 'submit-review' in tools.build_commands(enabled_review)
+    assert 'submit-review' not in tools.build_commands(refine)
+    assert '$ submit-review' in tools.tool_instructions(enabled_review)
+    assert '$ submit-review' not in tools.tool_instructions(refine, interactive=True)
+
+
+def test_submit_review_returns_final_payload_without_finished_marker() -> None:
+    ctx = tools.ToolContext('review', allow_review_submission=True,
+                            require_evidence=True)
+    payload = 'NO FINDINGS'
+    mapper = ScriptedMapper([
+        f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\n{payload}\n'
+        f'{tools.LITERAL_BLOCK_CLOSE}'])
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == payload
+    assert len(mapper.calls) == 1
+
+
+def test_no_findings_after_incomplete_message_completes_review() -> None:
+    mapper = ScriptedMapper([
+        'This review did not complete. Please rerun it so I can inspect the code.',
+        '$ no-findings',
+    ])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 2
+    assert 'PROTOCOL VIOLATION' in mapper.calls[1][-1]['content']
+    assert '$ no-findings' in mapper.calls[1][-1]['content']
+
+
+def test_opted_in_review_still_fails_without_a_terminal_verdict() -> None:
+    incomplete = 'This review did not complete. Please rerun it.'
+    mapper = ScriptedMapper([incomplete] * (tools.MAX_PROTOCOL_BOUNCES + 1))
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid tool-protocol'):
+        asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert len(mapper.calls) == tools.MAX_PROTOCOL_BOUNCES + 1
+
+
+def test_opted_in_review_rejects_finished_but_accepts_no_findings() -> None:
+    mapper = ScriptedMapper(['$ finished', '$ no-findings'])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 2
+    assert 'does not submit review findings' in mapper.calls[1][-1]['content']
+    assert '$ no-findings' in mapper.calls[1][-1]['content']
+
+
+def test_submit_review_rejects_non_report_payload_and_allows_retry() -> None:
+    payload = 'NO FINDINGS'
+    submit = (f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\n{payload}\n'
+              f'{tools.LITERAL_BLOCK_CLOSE}')
+    mapper = ScriptedMapper([
+        f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\nnot a report\n'
+        f'{tools.LITERAL_BLOCK_CLOSE}',
+        submit,
+    ])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == payload
+    assert len(mapper.calls) == 2
+    assert 'supported finding with evidence text' in mapper.calls[1][-1]['content']
+
+
+def test_submit_review_invalid_payload_attempts_are_bounded() -> None:
+    invalid = (f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\nnot a report\n'
+               f'{tools.LITERAL_BLOCK_CLOSE}')
+    mapper = ScriptedMapper([invalid] * (tools.MAX_REVIEW_SUBMISSION_BOUNCES + 1))
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid terminal payload'):
+        asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert len(mapper.calls) == tools.MAX_REVIEW_SUBMISSION_BOUNCES + 1
+
+
+def test_submit_review_requires_evidence_and_can_be_resubmitted(tmp_path: Any) -> None:
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'module.py').write_text('def work():\n    return False\n')
+    subprocess.run(['git', 'add', 'module.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = ('A1 [MAJOR] module.py:2 - this branch returns the wrong result\n'
+               'I confirmed the branch with `git show HEAD:module.py`.')
+    submitted = (f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\n{finding}\n'
+                 f'{tools.LITERAL_BLOCK_CLOSE}')
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True,
+                            allow_review_submission=True)
+    mapper = ScriptedMapper([
+        submitted,
+        '$ git show HEAD:module.py',
+        submitted,
+    ])
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == finding
+    assert len(ctx.evidence) == 1
+    assert len(mapper.calls) == 3
+    assert 'submit again' in mapper.calls[1][-1]['content']
+
+
+def test_submit_review_cannot_be_batched_with_other_tools() -> None:
+    payload = 'NO FINDINGS'
+    submit = (f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\n{payload}\n'
+              f'{tools.LITERAL_BLOCK_CLOSE}')
+    mapper = ScriptedMapper([submit + '\n$ list-tree', submit])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == payload
+    assert len(mapper.calls) == 2
+    assert 'must be the only command' in mapper.calls[1][-1]['content']
+
+
+def test_submission_enabled_review_executes_complete_batch_before_ellipsis() -> None:
+    mapper = ScriptedMapper([
+        '$ list-tree\n...',
+        '$ no-findings',
+    ])
+    ctx = tools.ToolContext('review', allow_review_submission=True)
+    with patch.object(tools, 'execute_command', new=fake_execute('TREE')) as execute:
+        result = asyncio.run(tools.run_with_tools(mapper, 'Review the change.', ctx))
+
+    assert result == 'NO FINDINGS'
+    assert len(mapper.calls) == 2
+    execute.assert_awaited_once()
+    assert '[tool:list-tree]' in mapper.calls[1][-1]['content']
+    assert 'PROTOCOL REJECTION' not in mapper.calls[1][-1]['content']
+
+
+def test_run_with_tools_resumes_ci_feedback_in_retained_history() -> None:
+    mapper = ScriptedMapper([
+        'Initial implementation checkpoint.\n$ finished',
+        'Fixed the CI finding.\n$ finished',
+    ])
+    history: list[dict[str, str]] = []
+    ctx = tools.ToolContext('implement')
+    task = tools.add_todo_item(ctx, 'Implement and test the requested change.')
+    task.completed = True
+
+    async def compact_copy(
+            messages: list[dict[str, str]], *_args: Any, **_kwargs: Any
+    ) -> list[dict[str, str]]:
+        # Compaction can replace the local list; the session owner must retain the replacement.
+        return list(messages)
+
+    with patch.object(tools, '_maybe_compact_tool_history', new=compact_copy):
+        first = asyncio.run(tools.run_with_tools(
+            mapper, 'Implement the locked specification.',
+            ctx, history=history))
+    assert ctx.todo_items == [] and ctx.todo_checkpoint_complete
+    second = asyncio.run(tools.run_with_tools(
+            mapper, 'CI feedback: fix the reported issue.',
+            ctx, history=history))
+
+    assert first == 'Initial implementation checkpoint.'
+    assert second == 'Fixed the CI finding.'
+    assert mapper.calls[0] == [{
+        'role': 'user', 'content': 'Implement the locked specification.'}]
+    resumed = mapper.calls[1]
+    assert resumed[0] == {
+        'role': 'user', 'content': 'Implement the locked specification.'}
+    assert resumed[1] == {
+        'role': 'assistant', 'content': 'Initial implementation checkpoint.\n$ finished'}
+    assert resumed[2] == {
+        'role': 'user', 'content': 'CI feedback: fix the reported issue.'}
+    assert history == mapper.calls[1] + [{
+        'role': 'assistant', 'content': 'Fixed the CI finding.\n$ finished'}]
+
+
+def test_run_with_tools_schedules_periodic_historian_for_implementor() -> None:
+    mapper = ScriptedMapper([
+        '$ unknown-command',
+        '$ unknown-command',
+        'Completed the current task.\n$ finished',
+    ])
+    ctx = tools.ToolContext('implement')
+    task = tools.add_todo_item(ctx, 'Implement and test the requested change.')
+    task.completed = True
+    history: list[dict[str, str]] = []
+    historian_triggers: list[bool] = []
+
+    async def record_historian_trigger(
+            messages: list[dict[str, str]], _mapper: Any, _ctx: Any,
+            debug: bool = False, force_historian: bool = False,
+    ) -> list[dict[str, str]]:
+        del debug
+        historian_triggers.append(force_historian)
+        # Simulate the summary replacement while retaining the entire source-of-truth first
+        # message and the current tail.
+        if force_historian:
+            return [messages[0], *messages[-2:]]
+        return messages
+
+    with patch.object(tools, 'HISTORIAN_INTERVAL', 2), \
+            patch.object(tools, '_maybe_compact_tool_history',
+                         new=record_historian_trigger), \
+            patch.object(tools, 'execute_command', new=AsyncMock(return_value='unknown')):
+        result = asyncio.run(tools.run_with_tools(
+            mapper, 'Implement the locked specification.', ctx, history=history))
+
+    assert result == 'Completed the current task.'
+    assert historian_triggers == [False, False, True]
+    assert len(mapper.calls) == 3
+    assert 'unknown-command' in ' '.join(
+        message['content'] for message in mapper.calls[2])
+    assert ctx.implementor_rounds_since_historian == 1
+
+
+def test_finished_must_be_standalone_after_final_write(tmp_path: Any) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    target = repo / 'result.txt'
+
+    class Mapper:
+        n_results = 1
+        system = ''
+        model: str | None = None
+
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def run(self, messages: Any) -> str:
+            self.calls.append([dict(message) for message in messages])
+            if len(self.calls) == 1:
+                assert not target.exists()
+                return (f'$ write-file result.txt {tools.LITERAL_BLOCK_OPEN}done'
+                        f'{tools.LITERAL_BLOCK_CLOSE}\n$ finished')
+            if len(self.calls) == 2:
+                assert not target.exists()  # the mixed batch was rejected without execution
+                assert 'None of the commands in this batch were run' in \
+                    messages[-1]['content']
+                return (f'$ write-file result.txt {tools.LITERAL_BLOCK_OPEN}done'
+                        f'{tools.LITERAL_BLOCK_CLOSE}')
+            assert target.read_text() == 'done'
+            assert 'wrote 4 chars' in messages[-1]['content']
+            return 'Created result.txt.\n$ finished'
+
+    mapper = Mapper()
+    ctx = tools.ToolContext(phase='implement', workdir=str(repo),
+                            context_window=100_000)
+    task = tools.add_todo_item(ctx, 'Implement and test the requested change.')
+    task.completed = True
+    with patch.object(tools, 'resolve_context_window',
+                      new=AsyncMock(return_value=100_000)), \
+            patch.object(tools, 'fits', new=lambda *_args, **_kwargs: True):
+        result = asyncio.run(tools.run_with_tools(
+            mapper, 'Write result.txt', ctx))
+    assert result == 'Created result.txt.'
+    assert target.read_text() == 'done'
+    assert len(mapper.calls) == 3
+
+
+def test_repeated_mixed_finished_batches_are_bounded() -> None:
+    mapper = ScriptedMapper(['$ unknown-command\n$ finished'] * 3)
+    with patch.object(tools, 'execute_command', new=AsyncMock()) as execute:
+        with pytest.raises(tools.ToolFailureLimitExceeded, match='only command'):
+            asyncio.run(tools.run_with_tools(
+                mapper, 'REQ', tools.ToolContext('implement')))
+    execute.assert_not_awaited()
+    assert len(mapper.calls) == tools.MAX_FINISHED_BATCH_BOUNCES + 1
+
+
+def test_implementor_can_finish_after_incomplete_finish_bounces() -> None:
+    ctx = tools.ToolContext(phase='implement', context_window=100_000)
+    task = tools.add_todo_item(ctx, 'Fix and test the outstanding finding.')
+    mapper = ScriptedMapper([
+        '$ list-tree',
+        'I am done.\n$ finished',
+        'Still working.\n$ finished',
+        '$ todo complete 1',
+        'All tasks are done.\n$ finished',
+    ])
+
+    result = asyncio.run(tools.run_with_tools(mapper, 'Implement the spec.', ctx))
+
+    assert result == 'All tasks are done.'
+    assert task.completed
+    assert ctx.todo_items == [] and ctx.todo_checkpoint_complete
+    assert len(mapper.calls) == 5
+    assert '[tool:list-tree]' in mapper.calls[1][-1]['content']
+    assert 'CHECKLIST INCOMPLETE' not in mapper.calls[1][-1]['content']
+    assert 'CHECKLIST INCOMPLETE' in mapper.calls[2][-1]['content']
+    assert 'Fix and test the outstanding finding' in mapper.calls[2][-1]['content']
+    assert 'attempt 2/3' in mapper.calls[3][-1]['content']
+
+
+def test_implementor_fails_on_third_incomplete_finish_attempt() -> None:
+    ctx = tools.ToolContext(phase='implement', context_window=100_000)
+    tools.add_todo_item(ctx, 'Fix and test the outstanding finding.')
+    mapper = ScriptedMapper(['Still working.\n$ finished'] * 3)
+
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='3 times'):
+        asyncio.run(tools.run_with_tools(mapper, 'Implement the spec.', ctx))
+
+    assert len(mapper.calls) == 3
+    assert 'attempt 2/3' in mapper.calls[2][-1]['content']
+
+
+def test_trailing_text_rejects_entire_tool_batch_then_retries() -> None:
+    mapper = ScriptedMapper([
+        '$ list-tree\n...\n',
+        'The prior command was rejected; reissuing it.\n$ list-tree',
+        'The tree is inspected.\n$ finished',
+    ])
+    ctx = tools.ToolContext('implement')
+    task = tools.add_todo_item(ctx, 'Implement and test the requested change.')
+    task.completed = True
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='TREE')) as execute:
+        result = asyncio.run(tools.run_with_tools(mapper, 'Implement the spec.', ctx))
+
+    assert result == 'The tree is inspected.'
+    assert len(mapper.calls) == 3
+    assert execute.await_count == 1
+    assert 'None of the commands in your response were run' in mapper.calls[1][-1]['content']
+
+
+def test_run_with_tools_requires_an_answer_before_standalone_finished() -> None:
+    finding = 'A1 [MAJOR] module.py:7 - a required check is missing'
+    mapper = ScriptedMapper([finding, '$ finished', finding + '\n$ finished'])
+    out = asyncio.run(tools.run_with_tools(
+        mapper, 'REQ', tools.ToolContext('review')))
+    assert out == finding
+    assert len(mapper.calls) == 3
+    assert 'not the final answer' in mapper.calls[2][-1]['content']
+
+
+def test_finished_bounce_does_not_bypass_review_evidence_probe(tmp_path: Any) -> None:
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'module.py').write_text('def cannot_handle():\n    return False\n')
+    subprocess.run(['git', 'add', 'module.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] module.py:1 - this function cannot handle a valid input'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    mapper = ScriptedMapper([
+        finding, '$ finished', '$ git show HEAD:module.py\n', finding + '\n$ finished'])
+    result = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert result == finding
+    assert len(ctx.evidence) == 1
+    # The review-phase protocol bounce must not use the implementor refusal nudge.
+    assert 'required to implement' not in mapper.calls[1][2]['content']
+
+
+def test_finished_batch_requires_evidence_from_an_earlier_turn(
+        tmp_path: Any) -> None:
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@t.t'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', 't'], cwd=tmp_path, check=True)
+    (tmp_path / 'module.py').write_text('def cannot_handle():\n    return False\n')
+    subprocess.run(['git', 'add', 'module.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
+    finding = 'A1 [MAJOR] module.py:1 - this function cannot handle a valid input'
+    ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
+    mapper = ScriptedMapper([
+        finding + '\n$ git show HEAD:module.py\n$ finished',
+        '$ git show HEAD:module.py\n',
+        finding + '\n$ finished',
+    ])
+    result = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert result == finding
+    assert len(mapper.calls) == 3
+    assert 'must be the only command in a response' in mapper.calls[1][2]['content']
+    assert 'def cannot_handle' in mapper.calls[2][-1]['content']
+    assert len(ctx.evidence) == 1
 
 
 def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
@@ -971,7 +2132,7 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     ctx = tools.ToolContext('review', workdir=str(tmp_path))
     with_cmd = 'A1 [MAJOR] mid.py:2 - beta is wrong'
-    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd])
+    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', with_cmd + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == with_cmd
     assert len(ctx.evidence) == 1
@@ -982,7 +2143,7 @@ def test_run_with_tools_records_git_evidence(tmp_path: Any) -> None:
 
 def test_run_with_tools_does_not_record_non_git_evidence() -> None:
     # Only git output is evidence; a web-search result is not evidence (it is a retrieved source).
-    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC])
+    mapper = ScriptedMapper(['$ web-search "pandas"\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('gen')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='SEARCH-RESULT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -993,7 +2154,7 @@ def test_run_with_tools_does_not_record_non_git_evidence() -> None:
 def test_run_with_tools_records_retrieved_sources() -> None:
     # A retrieval tool (view-web-page) records its output on ctx.sources, not ctx.evidence, so the
     # evidence gate's citation check can prove a finding's cited URL was really fetched.
-    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='PAGE-CONTENT')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1005,7 +2166,7 @@ def test_run_with_tools_records_retrieved_sources() -> None:
 
 
 def test_run_with_tools_records_summarize_as_source() -> None:
-    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC])
+    mapper = ScriptedMapper(['$ summarize docs/NOTES.md\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command',
                       new=AsyncMock(return_value='Summary of docs/NOTES.md: overflow.')):
@@ -1015,10 +2176,26 @@ def test_run_with_tools_records_summarize_as_source() -> None:
     assert 'summarize docs/NOTES.md' in ctx.sources[0][0]
 
 
+def test_run_with_tools_records_read_file_as_source() -> None:
+    mapper = ScriptedMapper([
+        '$ read-file tests/test_non_python_backends.py 220..410\n',
+        DOC + '\n$ finished',
+    ])
+    ctx = tools.ToolContext('review')
+    with patch.object(tools, 'execute_command',
+                      new=AsyncMock(return_value='220: source line')):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert ctx.evidence == []
+    assert len(ctx.sources) == 1
+    line, result = ctx.sources[0]
+    assert 'read-file tests/test_non_python_backends.py 220..410' in line
+    assert result == '220: source line'
+
+
 def test_run_with_tools_list_tree_is_not_a_source() -> None:
     # list-tree proves a doc EXISTS, not that its contents were read, so it is not a source: a
     # directory listing must not satisfy a citation.
-    mapper = ScriptedMapper(['$ list-tree docs\n', DOC])
+    mapper = ScriptedMapper(['$ list-tree docs\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='docs/NOTES.md')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1028,7 +2205,7 @@ def test_run_with_tools_list_tree_is_not_a_source() -> None:
 def test_run_with_tools_does_not_record_error_source() -> None:
     # An `error:` result from a retrieval tool carries no retrieved content, so it is not recorded
     # as a source (mirroring the git evidence rule).
-    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC])
+    mapper = ScriptedMapper(['$ view-web-page https://example.com/x\n', DOC + '\n$ finished'])
     ctx = tools.ToolContext('review')
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='error: bad url')):
         asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
@@ -1055,14 +2232,15 @@ def test_run_with_tools_requires_probe_before_findings(tmp_path: Any) -> None:
     finding = 'A1 [MAJOR] mid.py:2 - beta is wrong'
     ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
     # Reports a finding (no probe yet) -> bounced -> probes -> reports again (accepted).
-    mapper = ScriptedMapper([finding, '$ git show HEAD:mid.py\n', finding])
+    mapper = ScriptedMapper(
+        [finding + '\n$ finished', '$ git show HEAD:mid.py\n', finding + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == finding
     assert len(ctx.evidence) == 1  # it was forced to probe before the finding was accepted
     # A "NO FINDINGS" answer is exempt: accepted without any probe.
     ctx2 = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
     out2 = asyncio.run(
-        tools.run_with_tools(ScriptedMapper(['NO FINDINGS']), 'REQ', ctx2))
+        tools.run_with_tools(ScriptedMapper(['NO FINDINGS\n$ finished']), 'REQ', ctx2))
     assert out2 == 'NO FINDINGS' and ctx2.evidence == []
 
 
@@ -1083,9 +2261,9 @@ def test_run_with_tools_bounces_unretrieved_citation(tmp_path: Any) -> None:
     # git probe -> finding citing an unread doc (bounced) -> retrieve the doc -> finding (kept).
     mapper = ScriptedMapper([
         '$ git show HEAD:mid.py\n',
-        finding,
+        finding + '\n$ finished',
         '$ git show HEAD:docs/NOTES.md\n',
-        finding,
+        finding + '\n$ finished',
     ])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
     assert out == finding
@@ -1104,10 +2282,80 @@ def test_run_with_tools_citation_bounce_is_bounded(tmp_path: Any) -> None:
     subprocess.run(['git', 'commit', '-qm', 'init'], cwd=tmp_path, check=True)
     finding = 'A1 [MAJOR] mid.py:2 - beta is wrong, per docs/NOTES.md'
     ctx = tools.ToolContext('review', workdir=str(tmp_path), require_evidence=True)
-    # git probe -> finding (bounce 1) -> finding (bounce 2) -> finding (returned, at the cap).
-    mapper = ScriptedMapper(['$ git show HEAD:mid.py\n', finding, finding, finding])
+    # Git probe -> incomplete finish (citation bounce 1) -> bounce 2 -> finding at the cap.
+    mapper = ScriptedMapper([
+        '$ git show HEAD:mid.py\n',
+        finding + '\n$ finished',
+        finding + '\n$ finished',
+        finding + '\n$ finished',
+    ])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx, max_rounds=10))
     assert out == finding
+
+
+def test_run_with_tools_bounces_implementor_before_first_command() -> None:
+    # An implement-phase response that gives up before issuing any command (e.g. claiming the
+    # terminal "is not responding") violates the $ protocol (every response must end with a
+    # `$` line): the harness bounces it with the protocol-violation reminder, and the
+    # exchange continues once the model issues a command (the implementer's task is to edit
+    # the working tree).
+    give_up = ("I'm unable to inspect or modify the repository because the terminal tool "
+               'is not responding.')
+    ctx = tools.ToolContext('implement', workdir='.')
+    task = tools.add_todo_item(ctx, 'Implement and test the locked specification.')
+    task.completed = True
+    mapper = ScriptedMapper([give_up, '$ list-tree\n', DOC + '\n$ finished'])
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='TREE')):
+        out = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert out == DOC
+    assert len(mapper.calls) == 3
+    nudge = mapper.calls[1][2]['content']
+    assert 'not acceptable' in nudge
+    assert 'required to implement' in nudge
+    assert '$' in nudge
+
+
+def test_protocol_bounce_budget_resets_after_valid_tool_progress() -> None:
+    give_up = 'the terminal tool is not responding'
+    responses = [item for _ in range(tools.MAX_PROTOCOL_BOUNCES + 1)
+                 for item in (give_up, '$ list-tree')]
+    responses.append('The task is complete.\n$ finished')
+    mapper = ScriptedMapper(responses)
+    ctx = tools.ToolContext('implement', workdir='.')
+    task = tools.add_todo_item(ctx, 'Implement and test the locked specification.')
+    task.completed = True
+
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='TREE')) as execute:
+        result = asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+
+    assert result == 'The task is complete.'
+    assert len(mapper.calls) == 2 * (tools.MAX_PROTOCOL_BOUNCES + 1) + 1
+    assert execute.await_count == tools.MAX_PROTOCOL_BOUNCES + 1
+
+
+def test_run_with_tools_protocol_bounces_are_bounded_and_fail_explicitly() -> None:
+    # A model that never issues a valid command is not returned as a completed implementor pass.
+    give_up = 'the terminal tool is not responding'
+    ctx = tools.ToolContext('implement', workdir='.')
+    mapper = ScriptedMapper([give_up] * (tools.MAX_PROTOCOL_BOUNCES + 1))
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid tool-protocol'):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert len(mapper.calls) == tools.MAX_PROTOCOL_BOUNCES + 1
+
+
+def test_run_with_tools_protocol_bounces_apply_in_every_phase() -> None:
+    # Every autonomous phase bounces commandless responses and fails explicitly once the bounce
+    # budget is exhausted: a stage that never ends with its terminal command never completes.
+    give_up = 'the terminal tool is not responding'
+    ctx = tools.ToolContext('review', workdir='.')
+    mapper = ScriptedMapper([give_up] * (tools.MAX_PROTOCOL_BOUNCES + 1))
+    with pytest.raises(tools.ToolFailureLimitExceeded, match='invalid tool-protocol'):
+        asyncio.run(tools.run_with_tools(mapper, 'REQ', ctx))
+    assert len(mapper.calls) == tools.MAX_PROTOCOL_BOUNCES + 1
+    nudge = mapper.calls[1][2]['content']
+    assert 'PROTOCOL VIOLATION' in nudge
+    # The bounce names the `$`-prefix rule that run 52's doom loop violated.
+    assert 'begins with `$`' in nudge
 
 
 def test_unretrieved_citations_extraction() -> None:
@@ -1140,8 +2388,8 @@ def test_unretrieved_citations_requires_a_real_read() -> None:
 
 
 def test_unretrieved_citations_config_files_and_paged_reads() -> None:
-    # A repo config file (pyproject.toml, setup.cfg, ...) is a citable source like a doc, and a
-    # paged `git show` (PAGE=<n>) is a real read of the cited file.
+    # A repo config file (pyproject.toml, setup.cfg, ...) is a citable source like a doc; a paged
+    # `git show` and exact working-tree `read-file` are both real reads of the cited file.
     cfg = 'the lint convention is in pyproject.toml'
     assert tools.cited_sources(cfg) == (['pyproject.toml'], [])
     assert tools.unretrieved_citations(cfg, [], []) == ['pyproject.toml']
@@ -1150,6 +2398,9 @@ def test_unretrieved_citations_config_files_and_paged_reads() -> None:
     assert tools.unretrieved_citations(
         'see docs/big.md',
         [('$ PAGE=2 git show HEAD:docs/big.md', 'page two')], []) == []
+    assert tools.unretrieved_citations(
+        'see docs/NOTES.md', [],
+        [('$ read-file docs/NOTES.md 1..5', '1: the note')]) == []
 
 
 def test_unretrieved_citations_size_type_queries_are_not_reads() -> None:
@@ -1321,7 +2572,7 @@ def test_cited_sources_strips_angle_bracket_autolinks() -> None:
 
 def test_run_with_tools_unknown_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$ frobnicate x\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
     followup = mapper.calls[1][2]['content']
@@ -1331,20 +2582,31 @@ def test_run_with_tools_unknown_command_feeds_error() -> None:
 
 def test_run_with_tools_malformed_command_feeds_error() -> None:
     doc_with_cmd = DOC + '\n$\n'
-    mapper = ScriptedMapper([doc_with_cmd, DOC])
+    mapper = ScriptedMapper([doc_with_cmd, DOC + '\n$ finished'])
     out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen')))
     assert out == DOC
     assert 'error' in mapper.calls[1][2]['content'].lower()
 
 
-def test_run_with_tools_round_cap_returns_last_text() -> None:
-    # On the round cap the last (still-a-command) response is returned so the
-    # stage's validation fails and its normal retry takes over (no exception).
+def test_nonimplementor_round_cap_fails_instead_of_returning_unfinished_text() -> None:
+    # A run that never reaches its terminal command is a failure in every phase, not a
+    # silently-returned in-progress response.
     cmd_doc = DOC + '\n$ web-search "x"\n'
     mapper = ScriptedMapper([cmd_doc] * 10)
     with patch.object(tools, 'execute_command', new=AsyncMock(return_value='r')):
-        out = asyncio.run(tools.run_with_tools(mapper, 'REQ', tools.ToolContext('gen'), max_rounds=3))
-    assert out == cmd_doc
+        with pytest.raises(tools.ToolFailureLimitExceeded, match='before the terminal command'):
+            asyncio.run(tools.run_with_tools(
+                mapper, 'REQ', tools.ToolContext('gen'), max_rounds=3))
+    assert len(mapper.calls) == 3
+
+
+def test_implementor_round_cap_fails_instead_of_returning_unfinished_text() -> None:
+    cmd_doc = DOC + '\n$ read-file module.py 1..5\n'
+    mapper = ScriptedMapper([cmd_doc] * 10)
+    with patch.object(tools, 'execute_command', new=AsyncMock(return_value='source')):
+        with pytest.raises(tools.ToolFailureLimitExceeded, match='before standalone'):
+            asyncio.run(tools.run_with_tools(
+                mapper, 'REQ', tools.ToolContext('implement'), max_rounds=3))
     assert len(mapper.calls) == 3
 
 
@@ -1377,15 +2639,17 @@ def test_oracle_stage_appends_tool_instructions_when_enabled() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_ORACLE]
+        m.responses = [f'$ submit {tools.LITERAL_BLOCK_OPEN}\n{VALID_ORACLE}\n'
+                       f'{tools.LITERAL_BLOCK_CLOSE}']
         seen['mapper'] = m
         return m
 
     with patch.object(llm, 'get_mapper', new=make):
         doc = asyncio.run(llm.gpt_test_suite(make_meta(), True, debug=False))
-    assert doc == VALID_ORACLE
+    assert doc == VALID_ORACLE.rstrip('\n')
     assert tools.tool_instructions(
-        tools.ToolContext('gen', backend=backends.current())) in seen['mapper'].system
+        tools.ToolContext('gen', backend=backends.current(),
+                          completion_mode='submit')) in seen['mapper'].system
     assert 'search-dependencies' in seen['mapper'].system
     assert 'list-dependencies' not in seen['mapper'].system  # gen phase: no env tools
     assert isinstance(seen['mapper'].requests[0], list)
@@ -1412,14 +2676,16 @@ def test_oracle_stage_follows_up_on_commands() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_ORACLE + '\n$ web-search "pandas read_csv"\n', VALID_ORACLE]
+        m.responses = [VALID_ORACLE + '\n$ web-search "pandas read_csv"\n',
+                       f'$ submit {tools.LITERAL_BLOCK_OPEN}\n{VALID_ORACLE}\n'
+                       f'{tools.LITERAL_BLOCK_CLOSE}']
         seen['mapper'] = m
         return m
 
     with patch.object(llm, 'get_mapper', new=make), \
-         patch.object(tools, 'execute_command', new=AsyncMock(return_value='RESULT')):
+         patch.object(tools, 'execute_command', new=fake_execute('RESULT')):
         doc = asyncio.run(llm.gpt_test_suite(make_meta(), True, debug=False))
-    assert doc == VALID_ORACLE
+    assert doc == VALID_ORACLE.rstrip('\n')
     assert len(seen['mapper'].requests) == 2
 
 
@@ -1428,22 +2694,27 @@ def test_impl_stage_tool_use_runs_one_conversation_per_candidate() -> None:
 
     def make(system: Any, **kw: Any) -> Any:
         m = CapturingMapper(system, **kw)
-        m.responses = [VALID_IMPL + '\n$ web-search "httpx post"\n', VALID_IMPL]
+        m.responses = [VALID_IMPL + '\n$ web-search "httpx post"\n',
+                       f'$ submit {tools.LITERAL_BLOCK_OPEN}\n{VALID_IMPL}\n'
+                       f'{tools.LITERAL_BLOCK_CLOSE}']
         seen.append(m)
         return m
 
     with patch.object(llm, 'get_mapper', new=make), \
-         patch.object(tools, 'execute_command', new=AsyncMock(return_value='RESULT')) as ex:
+         patch.object(tools, 'execute_command', new=fake_execute('RESULT')) as ex:
         mds = asyncio.run(llm.gpt_implementation(
             make_meta(), 'ORACLE', n_results=2, tool_use=True, debug=False))
-    assert mds == [VALID_IMPL, VALID_IMPL]
+    assert mds == [VALID_IMPL.rstrip('\n')] * 2
     assert len(seen) == 2
     for m in seen:
         assert m.kwargs.get('n_results') == 1
         assert tools.tool_instructions(
-            tools.ToolContext('gen', backend=backends.current())) in m.system
+            tools.ToolContext('gen', backend=backends.current(),
+                              completion_mode='submit')) in m.system
         assert len(m.requests) == 2
-    assert ex.await_count == 2
+    # Each candidate ran its own web-search and its own `$ submit` terminal.
+    assert sorted(n for n, _ in ex.calls) == ['submit', 'submit',
+                                              'web-search', 'web-search']
 
 
 def test_impl_stage_without_tools_keeps_single_call_fanout() -> None:
@@ -1813,8 +3084,8 @@ def test_fd_target_path_reports_opened_file(tmp_path: Any) -> None:
     assert target is None or os.path.realpath(target) == os.path.realpath(str(p))
 
 
-def test_open_workdir_file_rejects_unknown_target(tmp_path: Any,
-                                                   monkeypatch: Any) -> None:
+def test_open_workdir_file_rejects_unknown_target(
+        tmp_path: Any, monkeypatch: Any) -> None:
     # Where the opened file's target cannot be determined, the open is refused:
     # failing open would let a swap slip past the post-open containment check.
     (tmp_path / 'f.txt').write_text('x')
@@ -1823,8 +3094,8 @@ def test_open_workdir_file_rejects_unknown_target(tmp_path: Any,
         tools._open_workdir_file(str(tmp_path), str(tmp_path / 'f.txt'))
 
 
-def test_open_workdir_file_rejects_outside_descriptor(tmp_path: Any,
-                                                      monkeypatch: Any) -> None:
+def test_open_workdir_file_rejects_outside_descriptor(
+        tmp_path: Any, monkeypatch: Any) -> None:
     # When the facility reports the descriptor pointing outside the tree, the open
     # is refused even though the pre-open check passed.
     tree = tmp_path / 'tree'
@@ -1863,8 +3134,8 @@ def test_list_tree_refuses_swapped_directory(tmp_path: Any, monkeypatch: Any) ->
     assert 'incomplete' in out
 
 
-def test_list_tree_refuses_directory_with_unknown_target(tmp_path: Any,
-                                                          monkeypatch: Any) -> None:
+def test_list_tree_refuses_directory_with_unknown_target(
+        tmp_path: Any, monkeypatch: Any) -> None:
     # A directory whose descriptor target cannot be determined is not listed:
     # failing open would let a swapped path slip past the containment check.
     tree = tmp_path / 'tree'
@@ -2529,7 +3800,10 @@ def test_run_personas_threads_tool_ctx() -> None:
             [('ada', 'You are a reviewer.', 1)], 'MSG', 'model', 'first_stage',
             False, loop='oracle', guidance='', tool_ctx=ctx))
     rw.assert_awaited_once()
-    assert any(tools.tool_instructions(ctx) in s for s in systems)
+    # The oracle loop is a structured-output stage: its instructions carry the `$ submit`
+    # terminal, not the plain-response wording.
+    assert any(f'$ submit {tools.LITERAL_BLOCK_OPEN}<result>{tools.LITERAL_BLOCK_CLOSE}'
+               in s for s in systems)
 
 
 def test_run_editor_threads_tool_ctx() -> None:
@@ -2550,7 +3824,9 @@ def test_run_editor_threads_tool_ctx() -> None:
         artifact, _ = asyncio.run(llm._run_editor(
             'impl', make_meta(), 'MSG', 'model', 'third_stage', tool_ctx=ctx))
     assert artifact == VALID_IMPL
-    assert tools.tool_instructions(ctx) in seen['system']
+    assert f'$ submit {tools.LITERAL_BLOCK_OPEN}<result>{tools.LITERAL_BLOCK_CLOSE}' \
+        in seen['system']
+    assert '$ finished — signals' not in seen['system']
 
 
 # --- mapper conversation support ------------------------------------------------------

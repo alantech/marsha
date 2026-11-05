@@ -16,9 +16,10 @@ from marsha.parse import split_preamble
 
 def test_registry_has_expected_personas() -> None:
     reg = p.build_registry()
-    assert len(reg) == 25
-    for name in ['ada', 'vera', 'sage', 'sasha', 'kit', 'dot', 'otto', 'sol', 'regan', 'fay',
-                 'hollis', 'penelope']:
+    assert len(reg) == 33
+    for name in ['ada', 'cleo', 'rosa', 'vera', 'sage', 'sasha', 'kit', 'dot',
+                 'otto', 'sol', 'regan', 'fay', 'hollis', 'penelope', 'scout',
+                 'norm', 'iris', 'felix', 'garrick', 'sylvia']:
         assert name in reg
     # Editors (and the review conventions gate) are excluded from the reviewer registry.
     for name in ['wren', 'cody', 'rex', 'norman']:
@@ -32,6 +33,17 @@ def test_resolve_persona_by_name_is_case_insensitive() -> None:
     assert body.startswith('You are Ada')
     assert os.path.basename(path) == 'oracle-completeness.md'
     assert p.resolve_persona('ELI', reg)[0] == 'Eli'
+
+
+def test_prior_issues_persona_returns_no_findings_when_no_documented_pattern_exists() -> None:
+    name, body, _path = p.resolve_persona('penelope', p.build_registry())
+    normalized_body = ' '.join(body.split())
+
+    assert name == 'Penelope'
+    assert 'If `docs/` or another suggested directory does not exist' in normalized_body
+    assert ('your final report content is exactly `NO FINDINGS` (submitted with '
+            'the terminal command your instructions specify)') in normalized_body
+    assert 'Do not say the review is incomplete' in normalized_body
 
 
 def test_resolve_persona_by_path(tmp_path: Any) -> None:
@@ -128,8 +140,8 @@ def test_parse_findings_honors_multiletter_label() -> None:
 def test_parse_findings_reraise_honors_prior_label() -> None:
     # A well-formed label that is one of the reviewer's prior labels is honored (a re-raise), so
     # it maps back onto the prior thread.
-    fs = p.parse_findings('A1 [MAJOR] x.py:1 - re-raised', 'Sage', 1,
-                           prior_labels={'A1', 'B1'})
+    fs = p.parse_findings(
+        'A1 [MAJOR] x.py:1 - re-raised', 'Sage', 1, prior_labels={'A1', 'B1'})
     assert [f['label'] for f in fs] == ['A1']
 
 

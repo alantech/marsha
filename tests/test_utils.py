@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import sys
 from typing import Any
 
 from marsha.utils import run_subprocess, write_file_no_follow
@@ -75,6 +76,53 @@ def test_run_subprocess_bounded_output() -> None:
     out, err = asyncio.run(scenario())
     assert out == 'hello'
     assert err == ''
+
+
+def test_run_subprocess_bounded_merged_stderr() -> None:
+    # exec and validation merge stderr into stdout (stderr=STDOUT); the bounded reader must drain
+    # stdout (the only pipe) rather than assert on the absent stderr, and report err as empty.
+    async def scenario() -> tuple[str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            'sh', '-c', 'printf out; printf err 1>&2',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        return await run_subprocess(proc, timeout=10, max_bytes=1000)
+
+    out, err = asyncio.run(scenario())
+    assert out == 'outerr'
+    assert err == ''
+
+
+def test_run_subprocess_bounded_merged_stderr_overflow_fails() -> None:
+    # The merged stream is still bounded: a child whose combined (stdout + merged stderr) output
+    # exceeds the limit fails with the overflow error and is reaped, as with separate pipes.
+    async def scenario() -> tuple[str, int | None]:
+        proc = await asyncio.create_subprocess_exec(
+            'head', '-c', '200', '/dev/zero',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            await run_subprocess(proc, timeout=10, max_bytes=100)
+            return ('ok', None)
+        except Exception:
+            return ('overflow', proc.returncode)
+
+    kind, returncode = asyncio.run(scenario())
+    assert kind == 'overflow'
+    assert returncode is not None
+
+
+def test_run_subprocess_tail_mode_keeps_verbose_process_bounded() -> None:
+    async def scenario() -> tuple[str, str, int | None]:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, '-c',
+            'import sys; sys.stdout.write("a" * 100000); sys.stderr.write("b" * 100000)',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await run_subprocess(proc, timeout=10, tail_bytes=32)
+        return out, err, proc.returncode
+
+    out, err, returncode = asyncio.run(scenario())
+    assert out == 'a' * 32
+    assert err == 'b' * 32
+    assert returncode == 0
 
 
 def test_run_subprocess_bounded_drains_stderr_concurrently() -> None:

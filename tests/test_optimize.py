@@ -14,7 +14,7 @@ import types
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from marsha import llm
+from marsha import llm, tools
 from marsha.meta import MarshaMeta
 from marsha.utils import read_file, write_file
 
@@ -156,15 +156,18 @@ def test_impl_converges_with_no_findings() -> None:
 
 def test_impl_generation_normalizes_single_result_for_n1() -> None:
     # run() returns a bare string for a single result; gpt_implementation must treat it as one doc.
+    doc = '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
     async def scenario() -> list[str]:
         class FakeMapper:
             async def run(self, req: Any) -> str:
-                return '# example.py\n\n```py\ndef f():\n    return 1\n```\n'
+                return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n{doc}\n'
+                        f'{tools.LITERAL_BLOCK_CLOSE}')
         with patch.object(llm, 'get_mapper', new=lambda *a, **k: FakeMapper()):
             return await llm.gpt_implementation(make_meta(), 'ORACLE', n_results=1, debug=False)
     mds = asyncio.run(scenario())
     assert isinstance(mds, list)
     assert len(mds) == 1
+    assert mds[0] == doc.rstrip('\n')
 
 
 # --- Correction phase: validate_test_correction ----------------------------

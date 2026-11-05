@@ -10,8 +10,10 @@ from anthropic.types import Message
 from marsha.config import resolve_model, resolve_strong_model
 from marsha.log import log, progress
 from marsha.llm_client import get_client
-from marsha.mappers.base import BaseMapper, ContextOverflowError
-from marsha.stats import stats
+from marsha.mappers.base import (BaseMapper, ContextOverflowError,
+                                 MAX_EMPTY_RESPONSE_RETRIES)
+from marsha.stats import (ensure_price_limit, max_price_enabled,
+                          record_usage, stats)
 from marsha.utils import prettify_time_delta
 
 # Get time at startup to make human legible "start times" in the logs
@@ -66,18 +68,13 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
     if 'max_tokens' not in query:
         query['max_tokens'] = DEFAULT_MAX_TOKENS
     log(f'-> {label}: request sent (model={model})')
+    empty_response_retries = 0
     while True:
+        ensure_price_limit(query['model'])
         try:
             # Streaming is required by the API for requests that may take long
             async with client.messages.stream(**query) as stream:
                 out = await stream.get_final_message()
-            t2 = time.time()
-            total_tokens = out.usage.input_tokens + out.usage.output_tokens
-            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
-                     f'started at {prettify_time_delta(t1 - t0)}, '
-                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
-            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} (model={model})')
-            return out
         except anthropic.BadRequestError as e:
             message = str(getattr(getattr(e, 'error', None), 'message', ''))
             if 'too long' in message or 'context' in message.lower():
@@ -87,7 +84,8 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
                 if query['model'] != resolve_strong_model():
                     query['model'] = resolve_strong_model()
                 else:
-                    raise ContextOverflowError(f'prompt exceeds context window: {message}')
+                    raise ContextOverflowError(
+                        f'prompt exceeds context window: {message}')
             max_tries = max_tries - 1
             if max_tries == 0:
                 raise e
@@ -97,6 +95,26 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
             if max_tries == 0:
                 raise e
             time.sleep(3 / max_tries)
+        else:
+            text = response_text(out)
+            if not text.strip() and empty_response_retries < MAX_EMPTY_RESPONSE_RETRIES:
+                empty_response_retries += 1
+                record_usage(query['model'], out.usage.input_tokens,
+                             out.usage.output_tokens)
+                log(f'<= {label}: empty completion (model={query["model"]}, '
+                    f'stop_reason={out.stop_reason or "unknown"}); retry '
+                    f'{empty_response_retries}/{MAX_EMPTY_RESPONSE_RETRIES}')
+                continue
+            t2 = time.time()
+            total_tokens = out.usage.input_tokens + out.usage.output_tokens
+            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
+                     f'started at {prettify_time_delta(t1 - t0)}, '
+                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
+            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} '
+                f'(model={query["model"]})')
+            record_usage(query['model'], out.usage.input_tokens,
+                         out.usage.output_tokens)
+            return out
         if max_tries == 0:
             raise Exception('Could not execute message creation')
 
@@ -140,22 +158,29 @@ class ClaudeMapper(BaseMapper):
         }
         if self.max_tokens is not None:
             query_obj['max_tokens'] = self.max_tokens
-        if self.seed is not None:
-            # Best-effort sampling reproducibility (Anthropic honors seed).
-            query_obj['seed'] = self.seed
+        # The Anthropic SDK's stream() does not accept a seed kwarg, so the seed is
+        # silently dropped (reproducibility is best-effort on this provider).
         # Anthropic has no n parameter, so fan out one request per result
         if self.n_results > 1:
-            reses = list(await asyncio.gather(*[
-                retry_message_create(
-                    dict(query_obj), self.model, self.max_retries, self.label)
-                for _ in range(self.n_results)
-            ]))
+            if max_price_enabled():
+                # Keep capped requests sequential: after each response the next iteration checks
+                # the cumulative spend before issuing another billable request.
+                reses = []
+                for _ in range(self.n_results):
+                    reses.append(await retry_message_create(
+                        dict(query_obj), self.model, self.max_retries, self.label))
+            else:
+                reses = list(await asyncio.gather(*[
+                    retry_message_create(
+                        dict(query_obj), self.model, self.max_retries, self.label)
+                    for _ in range(self.n_results)
+                ]))
         else:
             reses = [await retry_message_create(query_obj, self.model, self.max_retries, self.label)]
 
         if self.stats_stage is not None:
             stats.stage_update(self.stats_stage, [
-                           normalize_response(res) for res in reses])
+                normalize_response(res) for res in reses])
 
         texts = [response_text(res) for res in reses]
         return texts if self.n_results > 1 else texts[0]

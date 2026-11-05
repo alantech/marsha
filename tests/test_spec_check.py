@@ -135,6 +135,24 @@ def test_analyze_spec_bare_uses_mapper_not_tools() -> None:
     rwt.assert_not_awaited()
 
 
+def test_analyze_spec_uses_a_fixed_seed_for_reproducibility() -> None:
+    # The gate runs the same way from `refine` and `diff`; the mapper must be created with the
+    # shared SPEC_CHECK_SEED so the sampling is as reproducible as the provider allows — a spec
+    # refine finds clean, diff finds clean, instead of a non-deterministic gate re-flagging a
+    # design refine already resolved.
+    out = json.dumps({'compilable': True, 'ambiguities': []})
+    seen: dict[str, Any] = {}
+
+    def get_mapper(system: str, **kw: Any) -> Any:
+        seen.update(kw)
+        return _ScriptedMapper([out])
+
+    with patch.object(spec_check, 'get_mapper', new=get_mapper), \
+         patch.object(tools, 'run_with_tools', new=AsyncMock()):
+        asyncio.run(spec_check.analyze_spec('SPEC'))
+    assert seen['seed'] == spec_check.SPEC_CHECK_SEED
+
+
 def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
     out = json.dumps({'compilable': True, 'ambiguities': []})
     captured: dict[str, str] = {}
@@ -145,6 +163,7 @@ def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
 
     async def fake_rwt(mapper: Any, request: str, ctx: Any, debug: bool = False,
                        max_rounds: int = 99) -> str:
+        captured['completion_mode'] = ctx.completion_mode
         return out
 
     ctx = tools.ToolContext(phase='refine', workdir='.')
@@ -154,6 +173,7 @@ def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
     assert got == {'compilable': True, 'ambiguities': [], 'errors': []}
     # A grounded analysis appends the note and drives the read-only tool loop.
     assert spec_check.SPEC_CHECK_GROUNDED_NOTE in captured['system']
+    assert captured['completion_mode'] == 'submit'
 
 
 def test_analyze_spec_wraps_source_as_untrusted_data() -> None:

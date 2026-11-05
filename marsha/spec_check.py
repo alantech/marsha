@@ -7,6 +7,7 @@ so the analysis never diverges. Kept in its own module (rather than `refine.py`)
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any
 
@@ -19,6 +20,13 @@ from marsha.mappers.chatgpt import uses_completion_tokens
 # A bounded round budget for the codebase-grounded analysis (the read-only tool loop): enough to
 # probe the codebase before answering, not so many that a wandering model exhausts it first.
 SPEC_CHECK_MAX_TOOL_ROUNDS = 25
+# The spec-check gate (the "is this spec locked?" analysis) runs the SAME way from `refine` and
+# from `diff`. A fixed seed makes its sampling as reproducible as the provider allows (as
+# REVIEW_SEED does for the review panel): a non-deterministic gate would let refine lock a design
+# and then have diff's fresh pass over the identical spec re-flag something refine already
+# resolved (or the reverse), so the refine -> diff loop could never converge. With a shared seed,
+# a spec refine finds clean, diff finds clean too.
+SPEC_CHECK_SEED = 1
 
 SPEC_CHECK_PROMPT = '''You are a senior software engineer assessing whether a specification is complete enough to implement. The specification may be a structured assignment (for example a `.mrsh` listing functions with their inputs, outputs, descriptions, and usage examples), a GitHub issue, or a Linear ticket — each with a title and a body/description and possibly comments.
 
@@ -28,7 +36,7 @@ First, decide whether the specification is implementable as written. Use this te
 
 Second, list the significant ambiguities. An ambiguity is an underspecified or unclear area that could lead two competent implementers to build something that behaves differently, for example a missing exception type or message, missing edge cases, an ambiguous output precision or format, unclear error or failure behavior, or non-deterministic behavior that would make the result flaky. Be conservative: only list an ambiguity when it is significant enough that two reasonable implementers could plausibly produce different behavior. Do not list style preferences, and do not ask for more examples or more precision in areas that are merely unspecified but unlikely to change behavior.
 
-Respond with a single JSON object and nothing else, in exactly this shape:
+Your final result is a single JSON object and nothing else, in exactly this shape:
 {"compilable": true, "ambiguities": ["...", "..."]}
 When the specification is not implementable, include a third key, an "errors" array with one or more entries:
 {"compilable": false, "ambiguities": ["..."], "errors": ["...", "..."]}
@@ -86,11 +94,14 @@ def _spec_check_kwargs() -> dict[str, Any]:
     # Reasoning models need a larger output budget for their chain of thought. GPT-6 has no
     # 'minimal' tier (its lowest is 'none' = no reasoning); 'low' is the cheapest tier that
     # still reasons. Local OpenAI-compatible servers: leave the output budget to the server.
+    # Every path carries the fixed seed (SPEC_CHECK_SEED) so the gate is reproducible across the
+    # refine and diff call sites (see the constant's note).
+    kwargs: dict[str, Any] = {'seed': SPEC_CHECK_SEED}
     if resolve_provider() == 'openai' and uses_completion_tokens(resolve_model()):
-        return {'max_tokens': 8192, 'reasoning_effort': 'low'}
+        return {**kwargs, 'max_tokens': 8192, 'reasoning_effort': 'low'}
     if resolve_provider() == 'anthropic':
-        return {'max_tokens': 4096}
-    return {}
+        return {**kwargs, 'max_tokens': 4096}
+    return kwargs
 
 
 async def analyze_spec(spec_text: str, *, tool_ctx: 'tools.ToolContext | None' = None,
@@ -104,6 +115,10 @@ async def analyze_spec(spec_text: str, *, tool_ctx: 'tools.ToolContext | None' =
     model inspect the repository before deciding what is genuinely ambiguous. A malformed
     response is retried up to `retries` more times.
     """
+    if tool_ctx is not None:
+        # This stage's terminal output is the JSON object parsed below, not a conversational
+        # summary or `$ finished` checkpoint. Tool calls remain available during analysis.
+        tool_ctx = dataclasses.replace(tool_ctx, completion_mode='submit')
     system = SPEC_CHECK_PROMPT
     if tool_ctx is not None:
         system += SPEC_CHECK_GROUNDED_NOTE

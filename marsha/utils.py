@@ -59,7 +59,8 @@ def write_file(filename: str, content: str | bytes, mode: str = 'w') -> None:
             f.write(content)
 
 
-def write_file_no_follow(filename: str, content: str) -> None:
+def write_file_no_follow(filename: str, content: str,
+                         newline: str | None = None) -> None:
     # Write `content` to `filename`, refusing to follow a symlink at the final path component.
     # For writes to a user-named path whose symlink-ness was checked earlier in the run: the
     # check and the write are not atomic, so a path swapped for a symlink in between must not
@@ -71,15 +72,16 @@ def write_file_no_follow(filename: str, content: str) -> None:
     if hasattr(os, 'O_NOFOLLOW'):
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
         fd = os.open(filename, flags, 0o644)
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline=newline) as f:
             f.write(content)
         return
     if os.path.islink(filename):
         raise OSError(f'refusing to write through a symlink: {filename}')
-    _win32_write_no_follow(filename, content)
+    _win32_write_no_follow(filename, content, newline=newline)
 
 
-def _win32_write_no_follow(filename: str, content: str) -> None:
+def _win32_write_no_follow(filename: str, content: str,
+                           newline: str | None = None) -> None:
     # The no-follow write for a platform whose os.open cannot carry the guarantee:
     # CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT opens a symlink at the final path
     # component as the reparse point itself — without following it — so a path swapped
@@ -149,7 +151,7 @@ def _win32_write_no_follow(filename: str, content: str) -> None:
     # the plain open is all that is available; the caller already refused a symlink
     # present at its check.
     fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8', newline=newline) as f:
         f.write(content)
 
 
@@ -179,44 +181,62 @@ def get_filename_from_path(path: str) -> str:
 
 async def run_subprocess(stream: Process, timeout: float = 60.0,
                          input: bytes | None = None,
-                         max_bytes: int | None = None) -> tuple[str, str]:
-    if max_bytes is None or input is not None:
+                         max_bytes: int | None = None,
+                         tail_bytes: int | None = None) -> tuple[str, str]:
+    if input is not None or (max_bytes is None and tail_bytes is None):
         read = stream.communicate(input)
     else:
-        # Bounded: stream both pipes in chunks and fail at max_bytes of combined output, so an
-        # oversized response is refused before it is buffered into memory (a caller's size
-        # guard must get the chance to run on the size, not after the whole payload is in RAM).
+        # Stream both pipes in chunks. max_bytes rejects oversized output; tail_bytes keeps only
+        # the final bytes while allowing verbose validation commands to run to completion.
         chunks: list[bytes] = []
         err_chunks: list[bytes] = []
+        out_tail = bytearray()
+        err_tail = bytearray()
         total = 0
 
         async def _bounded() -> tuple[bytes, bytes]:
-            assert stream.stdout is not None and stream.stderr is not None
+            assert stream.stdout is not None
 
-            # Both pipes are drained concurrently: a child that fills one pipe while keeping
-            # the other open would otherwise block on the full pipe and never close the
-            # other, deadlocking a read that only ever looked at one of them.
-            async def _drain(reader: asyncio.StreamReader, sink: list[bytes]) -> None:
+            # A caller may merge stderr into stdout (stderr=STDOUT, as exec and validation do);
+            # then stream.stderr is None and only stdout carries output.
+            # Otherwise both pipes exist and are drained concurrently: a child that fills one pipe
+            # while keeping the other open would otherwise block on the full pipe and never close
+            # the other, deadlocking a read that only ever looked at one of them.
+            async def _drain(reader: asyncio.StreamReader, sink: list[bytes],
+                             tail: bytearray) -> None:
                 nonlocal total
                 while True:
                     chunk = await reader.read(65536)
                     if not chunk:
                         break
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise Exception(
-                            f'command output exceeds the {max_bytes}-byte limit')
-                    sink.append(chunk)
+                    if max_bytes is not None:
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise Exception(
+                                f'command output exceeds the {max_bytes}-byte limit')
+                        sink.append(chunk)
+                    else:
+                        assert tail_bytes is not None
+                        tail.extend(chunk)
+                        excess = len(tail) - tail_bytes
+                        if excess > 0:
+                            del tail[:excess]
 
-            out_task = asyncio.ensure_future(_drain(stream.stdout, chunks))
-            err_task = asyncio.ensure_future(_drain(stream.stderr, err_chunks))
+            out_task = asyncio.ensure_future(
+                _drain(stream.stdout, chunks, out_tail))
+            err_task = (asyncio.ensure_future(
+                _drain(stream.stderr, err_chunks, err_tail))
+                if stream.stderr is not None else None)
             try:
-                await asyncio.gather(out_task, err_task)
+                if err_task is not None:
+                    await asyncio.gather(out_task, err_task)
+                else:
+                    await out_task
             except BaseException:
                 # Any failure (overflow, outer cancellation): cancel and reap the drain that
                 # is still running so it does not linger as an unhandled task.
                 for task in (out_task, err_task):
-                    if not task.done():
+                    if task is not None and not task.done():
                         task.cancel()
                         try:
                             await task
@@ -224,6 +244,8 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
                             pass
                 raise
             await stream.wait()
+            if max_bytes is None:
+                return bytes(out_tail), bytes(err_tail)
             return b''.join(chunks), b''.join(err_chunks)
 
         read = _bounded()
@@ -243,7 +265,9 @@ async def run_subprocess(stream: Process, timeout: float = 60.0,
         # the same way before the error propagates.
         await _kill_and_reap(stream)
         raise
-    return (stdout.decode('utf-8'), stderr.decode('utf-8'))
+    errors = 'replace' if max_bytes is None and tail_bytes is not None else 'strict'
+    return (stdout.decode('utf-8', errors=errors),
+            stderr.decode('utf-8', errors=errors))
 
 
 async def _kill_and_reap(stream: Process) -> None:

@@ -46,6 +46,31 @@ def test_print_help_compile_shows_compile_usage(capsys: Any) -> None:
     out = capsys.readouterr().out
     assert 'usage: marsha compile' in out
     assert '--optimize' in out
+    assert '--max-price USD' in out
+
+
+def test_max_price_is_available_on_every_model_subcommand() -> None:
+    argv = {
+        'compile': ['compile', 'spec.mrsh', '--max-price', '1.25'],
+        'review': ['review', '--max-price', '1.25'],
+        'refine': ['refine', 'spec.mrsh', '--max-price', '1.25'],
+        'diff': ['diff', 'spec.mrsh', '--max-price', '1.25'],
+    }
+    for command, command_argv in argv.items():
+        args = base.parser.parse_args(command_argv)
+        assert args.command == command
+        assert args.max_price == 1.25
+
+
+@pytest.mark.parametrize('value', ['0', '-1', 'nan', 'inf', 'not-a-price'])
+def test_max_price_must_be_positive_and_finite(value: str) -> None:
+    with pytest.raises(SystemExit):
+        base.parser.parse_args(['review', '--max-price', value])
+
+
+def test_diff_default_max_tool_failure_is_ten() -> None:
+    args = base.parser.parse_args(['diff', 'spec.mrsh'])
+    assert args.max_tool_failure == 10
 
 
 def test_print_help_unknown_topic_reports_and_lists(capsys: Any) -> None:
@@ -63,6 +88,22 @@ def test_run_help_returns_zero(capsys: Any) -> None:
 def test_run_help_topic_returns_zero(capsys: Any) -> None:
     assert base.run(['help', 'compile']) == 0
     assert 'usage: marsha compile' in capsys.readouterr().out
+
+
+def test_run_reports_price_limit_and_returns_failure(
+        monkeypatch: Any, capsys: Any) -> None:
+    from marsha.stats import PriceLimitExceeded
+
+    monkeypatch.setattr(base, '_setup_runtime', lambda *_args, **_kwargs: None)
+
+    async def hit_cap(_args: Any) -> int:
+        raise PriceLimitExceeded('test cap reached')
+
+    monkeypatch.setattr(base, 'run_review', hit_cap)
+    assert base.run(['review', '--max-price', '1']) == 1
+    output = capsys.readouterr().err
+    assert 'test cap reached' in output
+    assert 'Total cost:' in output
 
 
 def test_run_no_command_prints_help_and_returns_two(capsys: Any) -> None:
