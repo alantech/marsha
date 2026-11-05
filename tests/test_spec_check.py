@@ -163,6 +163,7 @@ def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
 
     async def fake_rwt(mapper: Any, request: str, ctx: Any, debug: bool = False,
                        max_rounds: int = 99) -> str:
+        captured['completion_mode'] = ctx.completion_mode
         return out
 
     ctx = tools.ToolContext(phase='refine', workdir='.')
@@ -172,6 +173,7 @@ def test_analyze_spec_grounded_appends_note_and_uses_tools() -> None:
     assert got == {'compilable': True, 'ambiguities': [], 'errors': []}
     # A grounded analysis appends the note and drives the read-only tool loop.
     assert spec_check.SPEC_CHECK_GROUNDED_NOTE in captured['system']
+    assert captured['completion_mode'] == 'submit'
 
 
 def test_analyze_spec_wraps_source_as_untrusted_data() -> None:

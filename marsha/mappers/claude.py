@@ -10,7 +10,8 @@ from anthropic.types import Message
 from marsha.config import resolve_model, resolve_strong_model
 from marsha.log import log, progress
 from marsha.llm_client import get_client
-from marsha.mappers.base import BaseMapper, ContextOverflowError
+from marsha.mappers.base import (BaseMapper, ContextOverflowError,
+                                 MAX_EMPTY_RESPONSE_RETRIES)
 from marsha.stats import (ensure_price_limit, max_price_enabled,
                           record_usage, stats)
 from marsha.utils import prettify_time_delta
@@ -67,6 +68,7 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
     if 'max_tokens' not in query:
         query['max_tokens'] = DEFAULT_MAX_TOKENS
     log(f'-> {label}: request sent (model={model})')
+    empty_response_retries = 0
     while True:
         ensure_price_limit(query['model'])
         try:
@@ -94,6 +96,15 @@ async def retry_message_create(query: dict[str, Any], model: str | None = None,
                 raise e
             time.sleep(3 / max_tries)
         else:
+            text = response_text(out)
+            if not text.strip() and empty_response_retries < MAX_EMPTY_RESPONSE_RETRIES:
+                empty_response_retries += 1
+                record_usage(query['model'], out.usage.input_tokens,
+                             out.usage.output_tokens)
+                log(f'<= {label}: empty completion (model={query["model"]}, '
+                    f'stop_reason={out.stop_reason or "unknown"}); retry '
+                    f'{empty_response_retries}/{MAX_EMPTY_RESPONSE_RETRIES}')
+                continue
             t2 = time.time()
             total_tokens = out.usage.input_tokens + out.usage.output_tokens
             progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '

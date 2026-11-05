@@ -4,8 +4,8 @@ First, write a short markdown preamble addressing the findings: for each finding
 Then output the revised test suite. It must stay faithful to the assignment: cover every stated testable behavior, assert nothing the assignment does not state, and never weaken a test that is already faithful.
 {void_note}
 Make sure to follow PEP8 guidelines and include all needed standard library imports.
-Your response must not add any comments, clarifications, notes, explanations, or thoughts outside the preamble and the code.
-Your response must be a markdown file whose first header is `{filename}_test.py`, containing a python code block with the full revised test suite, ending with that code block. It must look like:
+Your final result must not add any comments, clarifications, notes, explanations, or thoughts outside the preamble and the code.
+Your final result must be a markdown file whose first header is `{filename}_test.py`, containing a python code block with the full revised test suite, ending with that code block. It must look like:
 
 <preamble markdown>
 

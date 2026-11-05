@@ -30,6 +30,8 @@ def test_chatgpt_usage_is_attributed_to_context_fallback_model() -> None:
         if len(models) == 1:
             raise ContextOverflow('prompt too long')
         return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='answer'), finish_reason='stop')],
             usage=SimpleNamespace(total_tokens=3, prompt_tokens=2, completion_tokens=1))
 
     client = SimpleNamespace(
@@ -44,6 +46,28 @@ def test_chatgpt_usage_is_attributed_to_context_fallback_model() -> None:
 
     assert models == ['gpt-5-mini', 'gpt-5']
     record.assert_called_once_with('gpt-5', 2, 1)
+
+
+def test_chatgpt_retries_empty_completion_and_records_both_responses() -> None:
+    calls: list[bool] = []
+
+    async def create(**_query: object) -> SimpleNamespace:
+        calls.append(True)
+        content = '' if len(calls) == 1 else 'answer'
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content), finish_reason='stop')],
+            usage=SimpleNamespace(total_tokens=3, prompt_tokens=2, completion_tokens=1))
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    with patch.object(chatgpt, 'get_client', return_value=client), \
+            patch('marsha.mappers.chatgpt.record_usage') as record:
+        result = asyncio.run(chatgpt.ChatGPTMapper(system='system').run('prompt'))
+
+    assert result == 'answer'
+    assert len(calls) == 2
+    assert record.call_count == 2
 
 
 def test_claude_usage_is_attributed_to_context_fallback_model() -> None:
@@ -61,7 +85,10 @@ def test_claude_usage_is_attributed_to_context_fallback_model() -> None:
             return None
 
         async def get_final_message(self) -> SimpleNamespace:
-            return SimpleNamespace(usage=SimpleNamespace(input_tokens=2, output_tokens=1))
+            return SimpleNamespace(
+                content=[SimpleNamespace(type='text', text='answer')],
+                usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                stop_reason='end_turn')
 
     class Messages:
         def stream(self, **query: object) -> Stream:
@@ -80,6 +107,39 @@ def test_claude_usage_is_attributed_to_context_fallback_model() -> None:
 
     assert models == ['claude-sonnet-5', 'claude-opus-5']
     record.assert_called_once_with('claude-opus-5', 2, 1)
+
+
+def test_claude_retries_empty_completion_and_records_both_responses() -> None:
+    calls: list[bool] = []
+
+    class Stream:
+        async def __aenter__(self) -> Stream:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get_final_message(self) -> SimpleNamespace:
+            text = '' if len(calls) == 1 else 'answer'
+            return SimpleNamespace(
+                content=[SimpleNamespace(type='text', text=text)],
+                stop_reason='end_turn',
+                usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                model='claude-sonnet-5')
+
+    class Messages:
+        def stream(self, **_query: object) -> Stream:
+            calls.append(True)
+            return Stream()
+
+    client = SimpleNamespace(messages=Messages())
+    with patch.object(claude, 'get_client', return_value=client), \
+            patch('marsha.mappers.claude.record_usage') as record:
+        result = asyncio.run(claude.ClaudeMapper(system='system').run('prompt'))
+
+    assert result == 'answer'
+    assert len(calls) == 2
+    assert record.call_count == 2
 
 
 def test_chatgpt_mapper_stops_after_request_crosses_price_cap() -> None:

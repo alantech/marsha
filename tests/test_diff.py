@@ -71,6 +71,16 @@ def _git_out(p: str, *args: str) -> str:
     return r.stdout.strip()
 
 
+def test_implementor_system_prompt_covers_checklist_and_response_protocol() -> None:
+    prompt = diff.IMPL_SYSTEM_PROMPT
+    assert 'every todo item is implemented and tested' in prompt
+    assert 'short progress sentence before issuing tools' in prompt
+    assert 'Never add prose or ellipses after a tool command' in prompt
+    assert '... (or any other trailing text)' not in prompt
+    assert 'Two incomplete finish attempts are bounced; a third incomplete attempt stops' in prompt
+    assert 'Do not stop until every specification requirement' in prompt
+
+
 def _spec_path(p: str) -> str:
     return os.path.join(p, 'spec.mrsh')
 
@@ -533,6 +543,8 @@ def test_cycle_fix_request_carries_findings_and_validation_evidence() -> None:
     assert 'The new branch returns before the write.' in request
     assert '[tool:ci-review-findings]' in request
     assert '[tool:validation-results]' in request
+    assert 'trace the violated contract to its root cause' in request
+    assert 'focused regression test' in request
 
 
 def test_run_diff_design_gate_not_locked(tmp_path: Any, capsys: Any) -> None:
@@ -648,7 +660,196 @@ def test_review_loop_repeats_panel_and_sends_prior_findings_to_meta() -> None:
     assert len(review_todos) == 1 and review_todos[0].completed
 
 
-def test_review_loop_does_not_run_first_review_until_todos_are_complete() -> None:
+def test_reviewer_history_block_shows_state_and_dispositions() -> None:
+    # Each reviewer sees its own prior findings from the past couple of cycles, with the
+    # implementor's disposition of each: addressed, or rejected with the recorded reason. A
+    # rejection no later cycle re-raises is settled; one that is re-raised stays contested.
+    a1: Finding = {'name': 'Rosa', 'label': 'A1', 'severity': 'MAJOR',
+                   'location': 'a.py:3', 'desc': 'first issue'}
+    b2: Finding = {'name': 'Rosa', 'label': 'B2', 'severity': 'MINOR',
+                   'location': 'b.py:9', 'desc': 'second issue'}
+    c3: Finding = {'name': 'Rosa', 'label': 'C3', 'severity': 'MAJOR',
+                   'location': 'c.py:1', 'desc': 'third issue'}
+    block = diff._reviewer_history_block(
+        [([a1, b2], {'Rosa-B2': 'the spec requires this behavior'}),
+         ([c3], {})])
+    assert '# Previous review cycles' in block
+    assert '## Cycle 1' in block and '## Cycle 2' in block
+    assert '- [Rosa-A1] MAJOR a.py:3 - first issue' in block
+    assert '- [Rosa-B2] MINOR b.py:9 - second issue' in block
+    assert '- [Rosa-C3] MAJOR c.py:1 - third issue' in block
+    assert 'Disposition: addressed by the implementor' in block
+    assert ('rejected by the implementor (not re-raised, settled) — '
+            '"the spec requires this behavior"') in block
+    contested = diff._reviewer_history_block(
+        [([b2], {'Rosa-B2': 'the spec requires this behavior'}), ([b2], {})])
+    assert ('rejected by the implementor (re-raised in a later cycle, '
+            'still contested) — "the spec requires this behavior"') in contested
+
+
+def test_review_gate_history_block_is_scoped_to_each_reviewer(tmp_path: Any) -> None:
+    # Each reviewer's prior block contains only ITS OWN findings from the past cycles, with its
+    # own rejections — another reviewer's findings never leak into its message.
+    from marsha.personas import build_registry, resolve_loop_reviewers
+
+    p = str(tmp_path)
+    _git_repo(p, {'a.py': 'x = 1\n'})
+    with open(os.path.join(p, 'new.py'), 'w') as f:
+        f.write('y = 2\n')  # a change, so the gate does not skip an empty diff
+    rosa: Finding = {'name': 'Rosa', 'label': 'A1', 'severity': 'MAJOR',
+                     'location': 'a.py:1', 'desc': 'rosa\'s issue'}
+    kit: Finding = {'name': 'Kit', 'label': 'B1', 'severity': 'MAJOR',
+                    'location': 'a.py:2', 'desc': 'kit\'s issue'}
+    history = [([rosa, kit], {'Kit-B1': 'kit\'s was rejected'}),
+               ([rosa], {})]
+    combined = (resolve_loop_reviewers('impl', None, build_registry())
+                + resolve_loop_reviewers('review', None, build_registry()))
+    number_by_name = {name: i + 1 for i, (name, _, _) in enumerate(combined)}
+    captured: list[dict[int, str]] = []
+
+    async def fake_review_pass(*a: Any, **k: Any) -> list[Any]:
+        captured.append(dict(a[8]))
+        return [dict(rosa)]
+
+    async def fake_evidence_gate(findings: Any, *a: Any, **k: Any) -> Any:
+        return findings
+
+    with patch.object(diff, '_review_pass', new=fake_review_pass), \
+         patch.object(diff, 'evidence_gate', new=fake_evidence_gate):
+        with _chdir(p):
+            asyncio.run(
+                diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False,
+                                  constraints='', validation_report='',
+                                  review_history=history))
+    assert len(captured) == 1
+    blocks = captured[0]
+    # Both reviewers had own findings in the history, so both get a block — but only of their
+    # own findings.
+    assert set(blocks) == {number_by_name['Rosa'], number_by_name['Kit']}
+    rosa_block = blocks[number_by_name['Rosa']]
+    kit_block = blocks[number_by_name['Kit']]
+    for block in (rosa_block, kit_block):
+        assert '# Previous review cycles' in block
+        assert '## Cycle 1' in block
+    assert '## Cycle 2' in rosa_block
+    assert '## Cycle 2' not in kit_block  # kit had no own finding in cycle 2
+    assert '- [Rosa-A1] MAJOR a.py:1 - rosa\'s issue' in rosa_block
+    assert '- [Kit-B1] MAJOR a.py:2 - kit\'s issue' not in rosa_block
+    assert '- [Kit-B1] MAJOR a.py:2 - kit\'s issue' in kit_block
+    assert '- [Rosa-A1] MAJOR a.py:1 - rosa\'s issue' not in kit_block
+    # The rejection is shown only to the reviewer whose finding was rejected.
+    assert ('rejected by the implementor (not re-raised, settled) — '
+            '"kit\'s was rejected"') in kit_block
+    assert 'rejected by the implementor' not in rosa_block
+
+
+def test_review_loop_rejects_reach_review_history_and_settle() -> None:
+    from marsha.diff_validation import ValidationCheck, ValidationMetaResult
+
+    finding: Finding = {
+        'name': 'Rosa', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'src/core.py:10', 'desc': 'the update is not persisted',
+        'support': 'The new branch returns before the write.',
+    }
+    panel = AsyncMock(side_effect=[[finding], []])
+    meta = AsyncMock(return_value=ValidationMetaResult([], [], 'settled.'))
+    checks = [ValidationCheck('pytest -q', 'passed', 'ok')]
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return checks
+
+    async def implementor_pass(ctx: tools.ToolContext, *args: Any,
+                               **kwargs: Any) -> str:
+        item = next(entry for entry in ctx.todo_items
+                    if entry.source == 'review' and not entry.completed)
+        tools.reject_todo_item(ctx, item.id, 'the spec requires this behavior')
+        return 'rejected the finding'
+
+    implementor = AsyncMock(side_effect=implementor_pass)
+    implementor_history: list[dict[str, str]] = [
+        {'role': 'user', 'content': 'Original locked specification.'}]
+    ctx = tools.ToolContext(phase='implement')
+    _complete_test_todos(ctx)
+    with patch.object(diff, '_review_gate', new=panel), \
+         patch.object(diff, 'run_validation_meta_review', new=meta), \
+         patch.object(diff, '_run_implementor', new=implementor), \
+         patch.object(diff, '_run_validation_cycle', new=validated):
+        clean, remaining, final_checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec',
+            'test-model', 5, False, False, 'pytest -q', True, 'constraints', 3,
+            implementor_history=implementor_history))
+
+    assert clean and remaining == [] and final_checks == checks
+    assert panel.await_count == 2
+    # The re-review pass saw the first cycle's finding with the recorded rejection.
+    assert panel.await_args_list[0].kwargs['review_history'] == []
+    assert panel.await_args_list[1].kwargs['review_history'] == [
+        ([finding], {'Rosa-A1': 'the spec requires this behavior'})]
+    # The meta-review reconciles against the finding as before; the reviewer conceding means the
+    # rejection settles: the run converges cleanly with no further repair.
+    assert meta.await_count == 1
+    assert meta.await_args_list[0].args[0] == [finding]
+    item = next(entry for entry in ctx.todo_items if entry.source == 'review')
+    assert item.completed and item.rejected
+    assert 'rejected: the spec requires this behavior' in tools.format_todo_list(ctx)
+    # The repair request told the implementor to reject, not silently skip.
+    request = implementor.await_args_list[0].args[1]
+    assert '$ todo reject <id> "<reason>"' in request
+    assert 'never skipped silently' in request
+
+
+def test_review_loop_defended_rejection_stays_open_and_reopens_todo() -> None:
+    from marsha.diff_validation import ValidationCheck, ValidationMetaResult
+
+    finding: Finding = {
+        'name': 'Rosa', 'label': 'A1', 'severity': 'MAJOR',
+        'location': 'src/core.py:10', 'desc': 'the update is not persisted',
+        'support': 'The new branch returns before the write.',
+    }
+    panel = AsyncMock(return_value=[finding])
+    meta = AsyncMock(return_value=ValidationMetaResult(
+        [finding], [], 'Still open; the panel re-raised it.'))
+    checks = [ValidationCheck('pytest -q', 'passed', 'ok')]
+
+    async def validated(*args: Any, **kwargs: Any) -> list[ValidationCheck]:
+        return checks
+
+    async def implementor_pass(ctx: tools.ToolContext, *args: Any,
+                               **kwargs: Any) -> str:
+        item = next(entry for entry in ctx.todo_items
+                    if entry.source == 'review' and not entry.completed)
+        tools.reject_todo_item(ctx, item.id, 'the spec requires this behavior')
+        return 'rejected the finding'
+
+    implementor = AsyncMock(side_effect=implementor_pass)
+    implementor_history: list[dict[str, str]] = [
+        {'role': 'user', 'content': 'Original locked specification.'}]
+    ctx = tools.ToolContext(phase='implement')
+    _complete_test_todos(ctx)
+    with patch.object(diff, '_review_gate', new=panel), \
+         patch.object(diff, 'run_validation_meta_review', new=meta), \
+         patch.object(diff, '_run_implementor', new=implementor), \
+         patch.object(diff, '_run_validation_cycle', new=validated):
+        clean, remaining, final_checks = asyncio.run(diff._run_review_loop(
+            ctx, '.', 'main', 'main', 'spec',
+            'test-model', 5, False, False, 'pytest -q', True, 'constraints', 2,
+            implementor_history=implementor_history))
+
+    # The reviewer re-raised the rejected finding, so it is still open at the cycle cap: the run
+    # is not clean, and the reopened item keeps the implementor's prior rejection visible.
+    assert not clean
+    assert len(remaining) == 1
+    assert diff.finding_id(remaining[0]) == 'Rosa-A1'
+    assert panel.await_count == 2
+    assert panel.await_args_list[1].kwargs['review_history'] == [
+        ([finding], {'Rosa-A1': 'the spec requires this behavior'})]
+    item = next(entry for entry in ctx.todo_items if entry.source == 'review')
+    assert not item.completed and item.rejected
+    assert 'rejected before: the spec requires this behavior' \
+        in tools.format_todo_list(ctx)
+
+
+def test_review_loop_waits_for_completed_todo_checkpoint_before_review() -> None:
     from marsha.diff_validation import ValidationCheck
 
     ctx = tools.ToolContext(phase='implement')
@@ -659,7 +860,8 @@ def test_review_loop_does_not_run_first_review_until_todos_are_complete() -> Non
                           **kwargs: Any) -> str:
         calls.append(request)
         if not ctx.todo_items:
-            tools.add_todo_item(ctx, 'Implement and test each locked requirement.')
+            item = tools.add_todo_item(ctx, 'Implement and test each locked requirement.')
+            item.completed = True
         else:
             for item in ctx.todo_items:
                 item.completed = True
@@ -676,7 +878,7 @@ def test_review_loop_does_not_run_first_review_until_todos_are_complete() -> Non
             'pytest -q', True, '', 1))
 
     assert clean and remaining == []
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert panel.await_count == 1
     assert tools.todo_list_ready(ctx)
     assert checks[0].passed
@@ -892,11 +1094,27 @@ def test_review_loop_wraps_unexpected_repair_exception() -> None:
     async def failed_implementor(*args: Any, **kwargs: Any) -> str:
         raise RuntimeError('repair model failed')
 
+    ctx = tools.ToolContext(phase='implement')
+    item = tools.add_todo_item(ctx, 'Implement and validate the requested work.')
+    item.completed = True
     with patch.object(diff, '_run_validation_cycle', new=failed_validation), \
             patch.object(diff, '_run_implementor', new=failed_implementor):
         with pytest.raises(diff.ImplementorFailed, match='repair model failed'):
             asyncio.run(diff._run_review_loop(
-                tools.ToolContext(phase='implement'), '.', 'main', 'main', 'spec',
+                ctx, '.', 'main', 'main', 'spec',
+                'test-model', 5, False, False, 'pytest -q', True, '', 0))
+
+
+def test_zero_cycle_loop_wraps_unexpected_todo_checkpoint_exception() -> None:
+    async def failed_implementor(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError('model unavailable')
+
+    ctx = tools.ToolContext(phase='implement')
+    tools.add_todo_item(ctx, 'Implement and validate the requested work.')
+    with patch.object(diff, '_run_implementor', new=failed_implementor):
+        with pytest.raises(diff.ImplementorFailed, match='todo checkpoint failed: model unavailable'):
+            asyncio.run(diff._run_review_loop(
+                ctx, '.', 'main', 'main', 'spec',
                 'test-model', 5, False, False, 'pytest -q', True, '', 0))
 
 
@@ -942,11 +1160,25 @@ def test_impl_request_canonical_spec_and_comments() -> None:
 
 
 def test_implementor_completion_instruction_uses_finished_marker() -> None:
-    assert 'end a separate response with exactly `$ finished`' in diff.IMPL_SYSTEM_PROMPT
-    assert 'Do not send `$ finished` with any pending item' in diff.IMPL_SYSTEM_PROMPT
+    assert 'send `$ finished` alone' in diff.IMPL_SYSTEM_PROMPT
+    assert 'incomplete `$ finished` is rejected' in diff.IMPL_SYSTEM_PROMPT
     assert 'Use `$ todo list`' not in diff.IMPL_SYSTEM_PROMPT
-    assert 'as its only command' in diff.IMPL_SYSTEM_PROMPT
+    assert 'Valid:' in diff.IMPL_SYSTEM_PROMPT
+    assert 'Never add prose or ellipses after a tool command' in diff.IMPL_SYSTEM_PROMPT
+    assert '... (or any other trailing text)' not in diff.IMPL_SYSTEM_PROMPT
     assert 'stop issuing commands' not in diff.IMPL_SYSTEM_PROMPT
+
+
+def test_implementor_prompt_covers_review_dimensions_and_pre_finish_audit() -> None:
+    prompt = diff.IMPL_SYSTEM_PROMPT
+    for facet in (
+            'Spec fidelity and completeness', 'Correctness and regression safety',
+            'Error and execution contracts', 'Adversarial safety',
+            'Architecture, integration, and scope', 'Dependencies and performance',
+            'Test quality and maintainability'):
+        assert facet in prompt
+    assert 'audit before finishing' in prompt
+    assert 'Report only checks that actually ran' in prompt
 
 
 def test_run_diff_safe_leaves_edits_uncommitted(tmp_path: Any, capsys: Any) -> None:
@@ -1026,7 +1258,7 @@ def test_review_gate_includes_untracked_files(tmp_path: Any) -> None:
         with _chdir(p):
             result = asyncio.run(
                 diff._review_gate(p, 'main', 'main', 'spec', 'test-model', False,
-                                  constraints='', validation_report='', prior_findings=[]))
+                                  constraints='', validation_report='', review_history=[]))
     assert result  # the gate ran (not skipped on an empty diff) and returned the finding
 
 
@@ -1048,7 +1280,7 @@ def test_review_gate_propagates_no_network_to_review_tools(tmp_path: Any) -> Non
          patch.object(diff, 'evidence_gate', new=fake_evidence_gate):
         result = asyncio.run(diff._review_gate(
             p, 'main', 'main', 'spec', 'test-model', False,
-            constraints='', validation_report='', prior_findings=[],
+            constraints='', validation_report='', review_history=[],
             no_network=True))
     assert result == []
     assert seen == [True]
@@ -1253,7 +1485,7 @@ def test_review_gate_fails_if_staging_fails(tmp_path: Any) -> None:
         with pytest.raises(diff.ReviewGateFailed):
             asyncio.run(diff._review_gate(
                 p, 'main', 'main', 'spec', 'test-model', False,
-                constraints='', validation_report='', prior_findings=[]))
+                constraints='', validation_report='', review_history=[]))
 
 
 def test_changed_files_includes_untracked_new_files(tmp_path: Any) -> None:

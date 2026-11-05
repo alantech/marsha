@@ -22,6 +22,7 @@ import pytest
 from marsha import context
 from marsha import personas
 from marsha import review
+from marsha import stats
 from marsha import tools
 from marsha.findings import Finding
 
@@ -421,6 +422,68 @@ def test_run_personas_gives_fresh_notes_clone() -> None:
     assert captured[0].notes is not captured[1].notes
 
 
+def test_run_personas_enables_submission_only_for_review_loop() -> None:
+    base = tools.ToolContext(phase='review', workdir='.')
+    captured: list[tools.ToolContext] = []
+    systems: list[str] = []
+
+    async def fake_run_with_tools(mapper: Any, request: Any, ctx: Any = None,
+                                  debug: bool = False,
+                                  max_rounds: int = tools.MAX_TOOL_ROUNDS) -> Any:
+        captured.append(ctx)
+        return 'NO FINDINGS'
+
+    def fake_mapper(system: str, **_kwargs: Any) -> Any:
+        systems.append(system)
+        return types.SimpleNamespace(n_results=1)
+
+    with patch.object(tools, 'run_with_tools', new=fake_run_with_tools), \
+            patch.object(personas, 'get_mapper', new=fake_mapper):
+        asyncio.run(personas.run_personas(
+            [('Sage', 'body', 1)], 'msg', 'm', 'review', loop='review',
+            tool_ctx=base))
+        asyncio.run(personas.run_personas(
+            [('Ada', 'body', 1)], 'msg', 'm', 'first_stage', loop='oracle',
+            tool_ctx=base))
+
+    assert captured[0].allow_review_submission
+    assert 'submit-review' in tools.build_commands(captured[0])
+    assert 'submit-review' in systems[0]
+    assert 'Your review must always end with the terminal command your instructions specify' \
+        in systems[0]
+    assert 'Do not return an empty response' in systems[0]
+    assert not captured[1].allow_review_submission
+    assert captured[1].completion_mode == 'submit'
+    assert 'submit-review' not in tools.build_commands(captured[1])
+    assert '$ submit-review ⟪⟪⟪<final findings report>' not in systems[1]
+
+
+def test_no_findings_command_completes_submission_enabled_persona() -> None:
+    # A clean review ends with the `$ no-findings` terminal (a bare `NO FINDINGS` response is a
+    # protocol violation), and the panel flattens the sentinel into zero findings.
+    class NoFindingsMapper:
+        n_results = 1
+        model = None
+        system = ''
+
+        async def run(self, _messages: Any) -> str:
+            return '$ no-findings'
+
+    async def no_compact(messages: Any, *_args: Any, **_kwargs: Any) -> Any:
+        return messages
+
+    with patch.object(personas, 'get_mapper', new=lambda *a, **k: NoFindingsMapper()), \
+            patch.object(tools, '_maybe_compact_tool_history', new=no_compact):
+        findings = asyncio.run(personas.run_personas(
+            [('Dot', 'reviewer body', 1)], 'review message', 'm', 'review',
+            loop='review', tool_ctx=tools.ToolContext(
+                phase='review', workdir='.', require_evidence=True,
+                context_window=100_000),
+            fail_on_incomplete=True))
+
+    assert findings == []
+
+
 def test_run_personas_gives_fresh_evidence_clone() -> None:
     # Each reviewer's git evidence ledger lives on a fresh clone of the shared ctx (not the shared
     # list), so one reviewer's retrieved code cannot leak into another reviewer's findings.
@@ -571,6 +634,57 @@ def test_compaction_noop_within_budget() -> None:
             tools._maybe_compact_tool_history(messages, mapper, ctx))
     assert out is messages  # no compaction -> unchanged
     assert ctx.compact_summary == ''
+
+
+def test_implementor_historian_compacts_on_schedule_under_budget() -> None:
+    class HistorianMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self) -> None:
+            self.request = ''
+
+        async def run(self, request: str) -> str:
+            self.request = request
+            return ('Completed the CLI and runtime changes.\n'
+                    'Files changed: src/cli.ts, tests/cli.test.ts.\n'
+                    'Checks: pytest -q passed.\n'
+                    'Remaining: [T4] add the HTTP regression test.')
+
+    ctx = tools.ToolContext(phase='implement', workdir='.')
+    tools.add_todo_item(ctx, '[T4] Add the HTTP regression test')
+    ctx.written_files.append('tests/cli.test.ts')
+    mapper = types.SimpleNamespace(model='m', system='implementor system')
+    historian = HistorianMapper()
+    messages = [{'role': 'user', 'content': 'locked specification'}]
+    for index in range(12):
+        messages.extend([
+            {'role': 'assistant', 'content': f'$ edit file {index}'},
+            {'role': 'user', 'content': f'tool result {index}'},
+        ])
+    prompt: list[str] = []
+
+    def get_historian(system: str, **_kwargs: Any) -> HistorianMapper:
+        prompt.append(system)
+        return historian
+
+    with patch.object(tools, 'resolve_context_window',
+                      new=AsyncMock(return_value=100_000)), \
+            patch.object(tools, 'fits', new=lambda *_args, **_kwargs: True), \
+            patch.object(tools, 'get_mapper', side_effect=get_historian), \
+            patch.object(tools, 'get_client', return_value=None):
+        compacted = asyncio.run(tools._maybe_compact_tool_history(
+            messages, mapper, ctx, force_historian=True))
+
+    assert compacted is not messages
+    assert 'locked specification' in compacted[0]['content']
+    assert 'Completed the CLI and runtime changes.' in compacted[0]['content']
+    assert ctx.compact_summary.startswith('Completed the CLI')
+    assert '[T4] Add the HTTP regression test' in historian.request
+    assert 'tests/cli.test.ts' in historian.request
+    assert 'Act as a factual historian' in prompt[0]
+    assert 'Do not prescribe how to implement remaining work' in prompt[0]
+    assert 'tool result 11' in compacted[-1]['content']
 
 
 def test_short_over_budget_tool_history_compacts_large_results() -> None:
@@ -967,6 +1081,22 @@ def test_collect_personas_results_incomplete_not_clean() -> None:
     assert personas._collect_personas_results([[f], [f]], 2, True) == [f, f]
 
 
+def test_run_personas_propagates_price_limit_from_concurrent_reviewers() -> None:
+    # asyncio.gather(return_exceptions=True) returns PriceLimitExceeded as a result. The persona
+    # panel must propagate it to the CLI's price-limit handler instead of translating it into a
+    # generic incomplete-review error.
+    class CappedMapper:
+        async def run(self, _user: str) -> str:
+            raise stats.PriceLimitExceeded('estimated spend reached --max-price')
+
+    with patch.object(personas, 'get_mapper', return_value=CappedMapper()), \
+            patch.object(personas, 'is_local_backend', return_value=False):
+        with pytest.raises(stats.PriceLimitExceeded, match='max-price'):
+            asyncio.run(personas.run_personas(
+                [('Kit', 'reviewer', 1), ('Ari', 'reviewer', 2)],
+                'Review this change.', None, None, fail_on_incomplete=True))
+
+
 def test_gate_drops_cited_file_match_in_unrelated_command(repo: Any) -> None:
     # The cited-file check matches a whole path component, not a substring: a command that read
     # a.txt.backup does not ground a finding that cites a.txt, because a.txt is a prefix of a
@@ -1193,17 +1323,22 @@ def test_conventions_gate_rebuts_and_noobjections(repo: Any) -> None:
             pass
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return '[Sage-A1] - this repo uses no type hints anywhere'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[Sage-A1] - this repo uses no type hints anywhere\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     class QuietMapper:
         system = ''
         model = 'm'
 
         def __init__(self, *a: Any, **k: Any) -> None:
-            pass
+            self.calls = 0
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return 'NO OBJECTIONS'
+            self.calls += 1
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    'NO OBJECTIONS\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'add type hints'}]
@@ -1217,11 +1352,13 @@ def test_conventions_gate_rebuts_and_noobjections(repo: Any) -> None:
         out = asyncio.run(
             review.conventions_gate(finding, ctx, 'm', 'main', 'main'))
     assert 'Sage-A1' in out and 'type hints' in out
+    quiet = QuietMapper()
     with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
-         patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
+         patch.object(review, 'get_mapper', new=lambda *a, **k: quiet):
         out = asyncio.run(
             review.conventions_gate(finding, ctx, 'm', 'main', 'main'))
     assert out == ''
+    assert quiet.calls == 1
 
 
 def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
@@ -1235,17 +1372,22 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
             pass
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return '[Sage-A1] - compute_total is called at calc.py:40'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[Sage-A1] - compute_total is called at calc.py:40\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     class QuietMapper:
         system = ''
         model = 'm'
 
         def __init__(self, *a: Any, **k: Any) -> None:
-            pass
+            self.calls = 0
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return 'NO OBJECTIONS'
+            self.calls += 1
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    'NO OBJECTIONS\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                 'location': 'a.txt:2', 'desc': 'compute_total is never called'}]
@@ -1258,10 +1400,12 @@ def test_critic_gate_refutes_and_noobjections(repo: Any) -> None:
          patch.object(review, 'get_mapper', new=lambda *a, **k: RefuteMapper()):
         out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
     assert 'Sage-A1' in out and 'calc.py:40' in out
+    quiet = QuietMapper()
     with patch.object(tools, '_maybe_compact_tool_history', new=no_compact), \
-         patch.object(review, 'get_mapper', new=lambda *a, **k: QuietMapper()):
+         patch.object(review, 'get_mapper', new=lambda *a, **k: quiet):
         out = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
     assert out == ''
+    assert quiet.calls == 1
 
 
 def test_critic_gate_in_working_tree_mode_targets_staged_code(repo: Any) -> None:
@@ -1275,7 +1419,9 @@ def test_critic_gate_in_working_tree_mode_targets_staged_code(repo: Any) -> None
 
         async def run(self, messages: Any) -> str:
             self.calls.append(messages)
-            return 'NO OBJECTIONS\n$ finished'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    'NO OBJECTIONS\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     finding: list[Finding] = [{'name': 'Sage', 'label': 'A1', 'severity': 'MAJOR',
                                'location': 'a.txt:2', 'desc': 'a current change'}]
@@ -1288,6 +1434,40 @@ def test_critic_gate_in_working_tree_mode_targets_staged_code(repo: Any) -> None
     request = mapper.calls[0][0]['content']
     assert 'git show :<path>' in request
     assert 'git show HEAD:<path>' not in request
+
+
+def test_critic_gate_requests_behavior_claims_checked_against_own_knowledge(repo: Any) -> None:
+    # The critic must be told to check claims about language/runtime/toolchain behavior against
+    # its OWN knowledge and to refute misstatements of established behavior — the failure class
+    # (a false claim like "this syntax is invalid") that a source-cited-only standard lets pass.
+    # The no-source-cited ground remains reserved for claims that rest on external facts.
+    class QuietMapper:
+        system = ''
+        model = 'm'
+
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def run(self, messages: Any) -> str:
+            self.calls.append(messages)
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    'NO OBJECTIONS\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
+
+    finding: list[Finding] = [{'name': 'Ezra', 'label': 'A4', 'severity': 'MAJOR',
+                               'location': 'm.py:69', 'desc': 'invalid except syntax'}]
+    ctx = tools.ToolContext(phase='review', workdir=repo, notes=[])
+    mapper = QuietMapper()
+    with patch.object(review, 'get_mapper', return_value=mapper):
+        result = asyncio.run(_CRITIC_GATE(finding, ctx, 'm', 'main', 'main'))
+    assert result == ''
+    request = mapper.calls[0][0]['content']
+    assert 'own knowledge of that behavior' in request
+    assert 'misstates' in request
+    assert 'ungrounded assertion' in request
+    # The no-source-cited ground is scoped to external facts, not standard behavior: the request
+    # must not tell the critic to pass behavior claims on that ground.
+    assert 'not a reason to let one' in request
 
 
 def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
@@ -1303,9 +1483,11 @@ def test_archivist_clearance_parses_verdicts(repo: Any) -> None:
             pass
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return ('[B9] - CLEARED (tools.py:2101)\n'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[B9] - CLEARED (tools.py:2101)\n'
                     '[C5] - STILL-RAISED\n'
-                    '[D7] - UNCLEAR')
+                    '[D7] - UNCLEAR\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     class WatchmanMapper:
         system = ''
@@ -1358,7 +1540,10 @@ def test_archivist_clearance_conflicting_verdicts_is_unclear(repo: Any) -> None:
             pass
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return '[B9] - STILL-RAISED\n[B9] - CLEARED'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[B9] - STILL-RAISED\n'
+                    '[B9] - CLEARED\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     candidates = [{'label': 'B9', 'thread_id': 'PRRT_B9', 'location': 'tools.py:2101',
                    'desc': 'fixed gap', 'replies': []}]
@@ -1595,7 +1780,9 @@ def test_archivist_clearance_downgrades_unvalidated_clear(repo: Any) -> None:
             pass
 
         async def run(self, *a: Any, **k: Any) -> Any:
-            return '[B9] - CLEARED (tools.py:2101)'
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[B9] - CLEARED (tools.py:2101)\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     class WatchmanMapper:
         system = ''
@@ -1641,8 +1828,14 @@ def test_archivist_clearance_retries_on_no_verdict(repo: Any) -> None:
 
         async def run(self, *a: Any, **k: Any) -> Any:
             if self.flaky:
-                return 'I need to inspect the file before deciding.'
-            return '[B9] - CLEARED (tools.py:2101)'
+                # A terminal response with no recognized verdict line (the r29 flake): the
+                # attempt loop retries once with a fresh ledger.
+                return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                        'I need to inspect the file before deciding.\n'
+                        f'{tools.LITERAL_BLOCK_CLOSE}')
+            return (f'$ submit {tools.LITERAL_BLOCK_OPEN}\n'
+                    '[B9] - CLEARED (tools.py:2101)\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     class WatchmanMapper:
         system = ''
@@ -2151,7 +2344,10 @@ def test_run_review_end_to_end_with_real_personas(repo: Any, capsys: Any) -> Non
             self.n += 1
             if self.n == 1:
                 return '$ git show HEAD:a.txt'
-            return 'A1 [MAJOR] a.txt:2 - bad thing\nI confirmed the defect with git show HEAD:a.txt.'
+            payload = ('A1 [MAJOR] a.txt:2 - bad thing\n'
+                       'I confirmed the defect with git show HEAD:a.txt.')
+            return (f'$ submit-review {tools.LITERAL_BLOCK_OPEN}\n{payload}\n'
+                    f'{tools.LITERAL_BLOCK_CLOSE}')
 
     async def no_compact(messages: Any, mapper: Any, ctx: Any, debug: bool = False) -> Any:
         return messages

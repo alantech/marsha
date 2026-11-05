@@ -9,7 +9,8 @@ from openai.types.chat import ChatCompletion
 from marsha.config import is_local_backend, resolve_model, resolve_strong_model
 from marsha.log import log, progress
 from marsha.llm_client import get_client
-from marsha.mappers.base import BaseMapper, ContextOverflowError
+from marsha.mappers.base import (BaseMapper, ContextOverflowError,
+                                 MAX_EMPTY_RESPONSE_RETRIES)
 from marsha.stats import (ensure_price_limit, ensure_usage_available,
                           record_usage, stats)
 from marsha.utils import prettify_time_delta
@@ -41,6 +42,7 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
     if 'max_tokens' in query and uses_completion_tokens(model):
         query['max_completion_tokens'] = query.pop('max_tokens')
     log(f'-> {label}: request sent (model={model}, n={n_results})')
+    empty_response_retries = 0
     while True:
         ensure_price_limit(query['model'])
         try:
@@ -68,16 +70,28 @@ async def retry_chat_completion(query: dict[str, Any], model: str | None = None,
         else:
             t2 = time.time()
             total_tokens = out.usage.total_tokens if out.usage is not None else 9001
-            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
-                     f'started at {prettify_time_delta(t1 - t0)}, '
-                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
-            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} '
-                f'(model={query["model"]})')
             if out.usage is not None:
                 record_usage(query['model'], out.usage.prompt_tokens,
                              out.usage.completion_tokens)
             else:
                 ensure_usage_available()
+            contents = [choice.message.content for choice in out.choices]
+            empty = not contents or all(
+                not isinstance(content, str) or not content.strip()
+                for content in contents)
+            if empty and empty_response_retries < MAX_EMPTY_RESPONSE_RETRIES:
+                empty_response_retries += 1
+                finish_reasons = ','.join(
+                    str(choice.finish_reason) for choice in out.choices)
+                log(f'<= {label}: empty completion (model={query["model"]}, '
+                    f'finish_reason={finish_reasons or "no choices"}); retry '
+                    f'{empty_response_retries}/{MAX_EMPTY_RESPONSE_RETRIES}')
+                continue
+            progress(f'Chat query took {prettify_time_delta(t2 - t1)}, '
+                     f'started at {prettify_time_delta(t1 - t0)}, '
+                     f'ms/chars = {(t2 - t1) * 1000 / total_tokens}')
+            log(f'<= {label}: done in {prettify_time_delta(t2 - t1)} '
+                f'(model={query["model"]})')
             return out
         if max_tries == 0:
             raise Exception('Could not execute chat completion')

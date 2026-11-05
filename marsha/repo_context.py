@@ -20,7 +20,9 @@ async def run_explorer(spec_text: str, cwd: str, model: str | None,
     """Map the repository files and subsystems relevant to the locked spec."""
     name, body = load_persona(os.path.join(
         personas_dir(), 'explorer-scope.md'))
-    ctx = tools.ToolContext(phase='review', workdir=cwd, no_network=no_network)
+    ctx = tools.ToolContext(
+        phase='review', workdir=cwd, no_network=no_network,
+        completion_mode='submit')
     mapper = get_mapper(
         body + tools.tool_instructions(ctx), n_results=1, model=model,
         label=f'repo-context:{name}', reasoning_effort='high')
@@ -41,7 +43,9 @@ async def run_rule_checker(cwd: str, model: str | None,
     """Extract source-tagged conventions; do not infer feature requirements."""
     name, body = load_persona(
         os.path.join(personas_dir(), 'rule-checker-conventions.md'))
-    ctx = tools.ToolContext(phase='review', workdir=cwd, no_network=no_network)
+    ctx = tools.ToolContext(
+        phase='review', workdir=cwd, no_network=no_network,
+        completion_mode='submit')
     mapper = get_mapper(
         body + tools.tool_instructions(ctx), n_results=1, model=model,
         label=f'repo-context:{name}', reasoning_effort='high')

@@ -7,6 +7,7 @@ so the analysis never diverges. Kept in its own module (rather than `refine.py`)
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any
 
@@ -35,7 +36,7 @@ First, decide whether the specification is implementable as written. Use this te
 
 Second, list the significant ambiguities. An ambiguity is an underspecified or unclear area that could lead two competent implementers to build something that behaves differently, for example a missing exception type or message, missing edge cases, an ambiguous output precision or format, unclear error or failure behavior, or non-deterministic behavior that would make the result flaky. Be conservative: only list an ambiguity when it is significant enough that two reasonable implementers could plausibly produce different behavior. Do not list style preferences, and do not ask for more examples or more precision in areas that are merely unspecified but unlikely to change behavior.
 
-Respond with a single JSON object and nothing else, in exactly this shape:
+Your final result is a single JSON object and nothing else, in exactly this shape:
 {"compilable": true, "ambiguities": ["...", "..."]}
 When the specification is not implementable, include a third key, an "errors" array with one or more entries:
 {"compilable": false, "ambiguities": ["..."], "errors": ["...", "..."]}
@@ -114,6 +115,10 @@ async def analyze_spec(spec_text: str, *, tool_ctx: 'tools.ToolContext | None' =
     model inspect the repository before deciding what is genuinely ambiguous. A malformed
     response is retried up to `retries` more times.
     """
+    if tool_ctx is not None:
+        # This stage's terminal output is the JSON object parsed below, not a conversational
+        # summary or `$ finished` checkpoint. Tool calls remain available during analysis.
+        tool_ctx = dataclasses.replace(tool_ctx, completion_mode='submit')
     system = SPEC_CHECK_PROMPT
     if tool_ctx is not None:
         system += SPEC_CHECK_GROUNDED_NOTE

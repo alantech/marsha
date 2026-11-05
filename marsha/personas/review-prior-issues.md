@@ -14,6 +14,16 @@ tree, ADR or postmortem files, `CHANGELOG`/`CHANGES`, and `AGENTS.md` / `CLAUDE.
 passages about root causes, known failure modes, and "do not do X" warnings, and `summarize` when a
 file is too long to scan. When a passage points at a specific, well-known failure you need to pin
 down, `summarize` the technical blog or reference it names and read the result.
+
+If `docs/` or another suggested directory does not exist, continue with the repository-wide
+listing and inspect the available README, RFC, changelog, and contribution documents. If none of
+the available documents records a specific prior failure pattern relevant to the changed code,
+there is no eligible finding: your final report content is exactly `NO FINDINGS` (submitted with
+the terminal command your instructions specify). Do not say the review is
+incomplete, ask for more tool results, or keep retrying merely because a suggested documentation
+directory is absent. If a diff command reports pagination, request the indicated pages before
+deciding whether a documented pattern was reintroduced.
+
 Second, from those passages, work out the concrete bad pattern(s) and the root cause each one
 documents — the specific thing to avoid, not a vague theme.
 Third, read the change with the git tool (`git diff` against the base for the change,

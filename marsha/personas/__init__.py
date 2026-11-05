@@ -49,7 +49,12 @@ When a finding rests on a general-knowledge claim — a performance characterist
 Validation output supplied in the review context is evidence about what ran; do not claim that a
 command ran unless that output names it. The review phase has no command-execution tool.
 Every variable, class, function, file path, and line you name in a finding or its support must be one you actually opened with the git tool this session — cite only symbols that exist. Do not describe, quote, or reason about code you did not open, and do not infer a file or a line number from a naming convention (for example, that a class must live in a file of its own name) without opening it to confirm. If you cannot point to a real, existing symbol or line, do NOT report the finding: an invented or unverified detail disqualifies it, and a finding whose evidence you did not actually read will be rejected.
-If you have no new, verified finding, respond with exactly: NO FINDINGS
+Your review must always end with the terminal command your instructions specify — a response that
+does not end with a `$` command is not accepted. Do not return an empty response, progress-only
+text, or an explanation that you cannot complete. If a tool result is empty or unavailable, retry
+or use another allowed read-only tool; do not invent evidence, and never report a clean review
+that was not completed.
+If you have no new, verified finding, the final report content is exactly: NO FINDINGS
 Do not restate your own name. Do not add any prose outside a finding (the supporting paragraphs are part of that finding).
 '''
 
@@ -392,6 +397,12 @@ def _collect_personas_results(results: list[Any], total: int,
     findings: list[Finding] = []
     failures = 0
     for r in results:
+        # `PriceLimitExceeded` (and other process-control exceptions) deliberately derive from
+        # BaseException so ordinary reviewer recovery cannot swallow them. asyncio.gather with
+        # return_exceptions=True returns those as results; preserve them rather than translating a
+        # spend-limit stop into a generic incomplete-review error.
+        if isinstance(r, BaseException) and not isinstance(r, Exception):
+            raise r
         if isinstance(r, BaseException):
             failures += 1
         else:
@@ -451,7 +462,12 @@ async def run_personas(
         # reviewer in the run so one summarize/find-in-file serves them all.
         rctx = dataclasses.replace(
             tool_ctx, notes=list(tool_ctx.notes), evidence=[],
-            sources=[]) if tool_ctx is not None else None
+            sources=[],
+            allow_review_submission=(loop == 'review' and tool_ctx.phase == 'review'),
+            completion_mode=(
+                'submit' if loop in {'oracle', 'impl', 'correction'}
+                else tool_ctx.completion_mode)
+        ) if tool_ctx is not None else None
         if rctx is not None:
             system += tools.tool_instructions(rctx)
         label = f'{loop}:{name}' if loop else name

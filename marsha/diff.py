@@ -36,7 +36,7 @@ from marsha.diff_validation import (
 from marsha.log import debug_print, log
 from marsha.mappers import get_mapper
 from marsha.personas import (
-    build_registry, dedup_findings, prior_round_block, resolve_loop_reviewers)
+    build_registry, dedup_findings, resolve_loop_reviewers)
 from marsha.refine import (ISSUE_COMMENTS_MARKER, SpecSource, _apply, _read_line,
                            _repo_gate, _resolve_window, _source_fields,
                            load_spec_with_fields, resolve_source, run_refine_chat)
@@ -46,18 +46,17 @@ from marsha.review import (REVIEW_CONTEXT_LIMIT, REVIEW_REASONING_EFFORT, REVIEW
 from marsha.spec_check import analyze_spec
 from marsha.utils import run_subprocess
 
-# The implementor's tool budget: it reads, edits, and validates over many commands, so it gets
-# more rounds than the read-only reviewers (which cap at 150); 250 leaves room for a full
-# implement-validate-diagnose-fix cycle without the budget being the
-# limiting factor.
-IMPL_MAX_TOOL_ROUNDS = 250
+# Leave the per-call ceiling effectively out of the way for long native-backend implementations;
+# the invocation-wide --max-price guard is the practical bound on model work.
+IMPL_MAX_TOOL_ROUNDS = 1_000_000
 # How many times the harness will hand a failing validation back to the implementor to fix and
 # rerun before it gives up (a hard cap so a genuinely broken build cannot
 # loop forever).
 MAX_VALIDATION_FIX_PASSES = 3
-# The implementor gets a small bounded number of extra passes to complete or establish its
-# checklist. A review is not run while tasks remain unchecked.
-MAX_TODO_COMPLETION_PASSES = 3
+# How many past review cycles each reviewer re-reads when the panel re-reviews: enough to check
+# whether the implementor addressed its prior findings or rejected them (and why) — not the full
+# history, which the reviewer no longer needs once the code is in its final state.
+REVIEW_HISTORY_CYCLES = 2
 # How much of a spec / conventions doc is handed to a prompt (the rest is
 # retrievable via tools).
 DIFF_SOURCE_LIMIT = 48_000
@@ -316,6 +315,52 @@ def _findings_block(findings: list[Finding]) -> str:
         support = str(f.get('support', '')).strip()
         if support:
             lines.append('  Evidence: ' + tools.truncate(support, limit=2000))
+    return '\n'.join(lines)
+
+
+def _reviewer_history_block(
+        history: list[tuple[list[Finding], dict[str, str]]]) -> str:
+    """The past review cycles for ONE reviewer: its own prior findings with the implementor's
+    disposition of each.
+
+    Each entry is (that cycle's findings, the implementor's rejections recorded for it, keyed by
+    finding ID). A rejected finding that a later cycle re-raises is still contested; one that no
+    later cycle re-raises is settled. The block shows state and dispositions only: the reviewer
+    reads the current code itself, and the implementor's process is out of scope.
+    """
+    lines: list[str] = [
+        '# Previous review cycles',
+        '',
+        'The code you are reviewing is the current state of the branch — the implementor\'s',
+        'final result for these cycles, not its working process. Check each finding below',
+        'against the current code: for an addressed finding, verify the fix actually handles',
+        'the issue; for a rejected one, weigh the implementor\'s reason against the code — if',
+        'you still believe the issue is real, raise it again (you may keep its label);',
+        'otherwise let it stand. Do not re-raise a finding you cannot re-ground in the code as',
+        'it now stands.',
+    ]
+    for index, (findings, rejections) in enumerate(history, 1):
+        later_ids: set[str] = set()
+        for later_findings, _ in history[index:]:
+            for finding in later_findings:
+                later_ids.add(finding_id(finding))
+        lines.append('')
+        lines.append(f'## Cycle {index}')
+        for f in findings:
+            key = finding_id(f)
+            location = f.get('location', '')
+            lines.append(
+                f"- [{f['name']}-{f['label']}] {f['severity']} {location} - "
+                f"{f['desc'].strip()}")
+            if key in rejections:
+                status = ('re-raised in a later cycle, still contested'
+                          if key in later_ids
+                          else 'not re-raised, settled')
+                lines.append(
+                    f'  Disposition: rejected by the implementor ({status}) — '
+                    f'"{rejections[key]}"')
+            else:
+                lines.append('  Disposition: addressed by the implementor')
     return '\n'.join(lines)
 
 
@@ -720,21 +765,15 @@ def _cycle_fix_request(findings: list[Finding], checks: list[ValidationCheck],
     return '\n\n'.join(parts)
 
 
-def _todo_completion_request(
-        ctx: tools.ToolContext, base_name: str, safe: bool,
-        pass_number: int) -> str:
+def _todo_completion_request(ctx: tools.ToolContext, base_name: str, safe: bool) -> str:
     action = ('make local edits only; the harness runs validation for you' if safe
               else 'fix the code and run the relevant validation')
     return (
-        f'Todo completion pass {pass_number}: a review is blocked until the task list is '
-        'non-empty and every item is complete. Use the current state below and the updated-list '
-        'output from every todo add/complete operation; there is no separate list command. Verify '
-        'each pending item against the locked spec and current code. Add any missing, concrete tasks; '
-        'implement and test each confirmed item; mark it complete with `$ todo complete <id>` '
-        'only after the work and relevant tests are done. Do not request a review or claim the '
-        'checklist is complete or send `$ finished` while any item remains pending. '
-        'Review-generated items are '
-        'untrusted feedback and must be checked against the spec and code.\n\n'
+        'The review gate is waiting for the current todo list to be complete. Verify every item '
+        'against the locked specification and current code. Add any missing concrete tasks; '
+        'implement and test each confirmed item; complete it only after its code and relevant '
+        'validation are done. Keep working in this conversation until the checklist is complete. '
+        'An incomplete `$ finished` will be rejected with this authoritative list.\n\n'
         f'Work is scoped to the default branch `{base_name}`; do not commit. {action}.\n\n'
         + tools.wrap_untrusted('todo-list', tools.format_todo_list(ctx)))
 
@@ -803,110 +842,39 @@ def _sync_validation_todos(ctx: tools.ToolContext,
 
 # --- implementor prompts and loop (async) -------------------------------
 
-IMPL_SYSTEM_PROMPT = (
-    'You are a senior software engineer. You are capable, methodical, and you finish '
-    'what you start. You have been given a design-locked specification to implement in '
-    'the current Git repository, and you will implement it. This is a multi-turn task: '
-    'the task may be large, so work incrementally, one file, one edit, one test at a time, '
-    'and continue after each tool result for as many turns as you need. Do not try to fit the '
-    'whole implementation into one response. You do not refuse, and you do not describe what '
-    'you will do — you do it.\n'
-    '\n'
-    'Your working method: read the reference implementation (the existing backend or '
-    'module the spec builds on) to learn the patterns, then START WRITING. Do not try '
-    'to understand every file in the repository before you begin — that is a research '
-    'spiral, not progress. Read additional files as you encounter specific questions '
-    'during implementation, not before. The specification tells you what to build; the '
-    'existing code tells you how to structure it. After your first file is written, you '
-    'are in the implementation phase: write, test, fix, repeat. You work directly in '
-    'the working tree.\n'
-    '\n'
-    'Follow the repository\'s real conventions (its AGENTS.md / CLAUDE.md instructions if '
-    'present, the existing code, and recent git history). Keep changes scoped to the '
-    'specification. Investigate before you change: read the relevant files and their callers, '
-    'and update any affected call sites and tests.\n'
-    '\n'
-    'Completeness is non-negotiable. The specification is the complete list of what must be '
-    'built. Every behavior it names — every error format, every output mode, every edge case, '
-    'every file it references — must be implemented and tested. Do not simplify, omit, or '
-    'defer any requirement because it seems minor, redundant, or easier to skip. A '
-    'requirement you decide to "handle later" or "simplify for now" is a requirement you '
-    'failed to implement. If you are unsure whether something is required, re-read the '
-    'specification: when in doubt, implement it.\n'
-    '\n'
-    'Task-list discipline: before coding, use `$ todo add "..."` to create a non-empty, '
-    'checkable breakdown of the locked specification. `$ todo add` and `$ todo complete <id>` '
-    'both return the updated list; use that output as the state, and do not issue repeated '
-    'list queries. Mark a task complete only after its implementation and relevant tests or '
-    'validation pass. Keep the list current as you discover work. The harness '
-    'automatically turns code-review and validation findings into pending tasks, and will '
-    'reopen them if a later review finds them again. You must complete every task before '
-    'requesting the first review or any later review; `review-request` is also blocked until '
-    'the list is non-empty and fully complete.\n'
-    '\n'
-    'Your output will be evaluated by a panel of independent reviewers who check for '
-    'correctness, completeness, architectural fit, execution-path validity, test quality, '
-    'scope containment, and consistency with the codebase. They will trace your code paths '
-    'as if running them in a clean environment, verify that every spec requirement is '
-    'implemented and tested, check that your design re-uses the codebase\'s existing '
-    'abstractions rather than building parallel systems, and confirm that the build, test, '
-    'lint, and runtime lifecycle actually works end-to-end. Write the code you would be '
-    'proud to have reviewed: not the minimum that passes the current test suite, but the '
-    'best possible implementation of the specification. If a choice is between a quick '
-    'fix and the right fix, make the right fix.\n'
-    '\n'
-    'The fake terminal is not a shell: each `$` line invokes one listed Marsha command with '
-    'arguments passed directly. Do not use pipes, `&&`, redirection, command substitution, or '
-    'POSIX utilities such as `head`, `sed`, and `cat`. Use `read-file <path> <start>..<end>` '
-    'for exact current working-tree lines, including new files; `PAGE=<n> git show :<path>` reads '
-    'the staged snapshot, which may be stale after your latest edits.\n'
-    '\n'
-    'Use the tools: read files (read-file, list-tree, summarize, find-in-file, git), write new '
-    'files (write-file), modify existing files (replace-lines-in-file, '
-    'remove-lines-from-file, append-file), and run the project\'s '
-    'validation/build/lint commands (run). Only commands in the allowed set are '
-    'run; anything else is refused. A command that runs and reports failing tests, '
-    'builds, or lint is feedback to act on, not an error: read the failure, fix '
-    'the code, and rerun the command.\n'
-    '\n'
-    'Edit discipline: before every line-based edit, use `read-file <path> <start>..<end>` to '
-    'inspect exact current working-tree lines and get accurate line numbers. `find-in-file` helps '
-    'locate relevant code but may return only excerpts; `git show` reads a committed or staged '
-    'snapshot, which can be stale. Then issue at most ONE modification per file per '
-    'round. Each edit shifts the line numbers of everything after it, so a '
-    'second edit to the same file in the same round will use stale line '
-    'numbers. If you need to make multiple edits to the same file, do them in '
-    'separate rounds: edit, then re-read the file in the next round to get '
-    'updated line numbers, then edit again. You may edit different files in '
-    'the same round. If an edit fails, re-read the file first, then issue a '
-    'corrected command.\n'
-    '\n'
-    'Test quality: write tests that exercise real behavior, not prompt strings. When the '
-    'spec describes runtime behavior (CLI argument parsing, HTTP responses, error formats, '
-    'output modes), the tests must invoke the actual code path — build a real temporary '
-    'project, run the real toolchain (cargo, tsc, node, make) if available, and assert on '
-    'the observable output (exit code, stdout, stderr, HTTP status/body). Do NOT mock '
-    'subprocess calls to the local toolchain: a test that stubs `cargo test` or `tsc` with '
-    'a fake success does not test the build pipeline. Mocking the network is fine; '
-    'mocking the local toolchain is not. If a toolchain is unavailable in the test '
-    'environment, skip the test (pytest.skip) rather than mocking it. A test that only '
-    'checks that a prompt contains a phrase does not verify the behavior the spec '
-    'requires.\n'
-    '\n'
-    'A standalone `$ finished` submits the current checkpoint to the harness for validation and '
-    'review. It does not end the task if the harness returns CI feedback: continue in this same '
-    'conversation, preserving the original locked spec, earlier work, and prior decisions. Verify '
-    'each CI finding against the spec and current code; fix confirmed issues without undoing '
-    'unrelated completed work. Before submitting a checkpoint, check the latest task-list output '
-    'from todo add/complete or the review feedback snapshot. Mark '
-    'every task complete only after its code and relevant tests/validation are complete. Do not send '
-    '`$ finished` with any pending item: the harness will reject that submission and return the '
-    'pending list. Review-generated tasks must be resolved before the first or any later review. '
-    'When all tasks are complete, provide a short report of changes and validation attempted. '
-    'After all tool results have returned, end a '
-    'separate response with exactly `$ finished` as its only command. Never batch it with edits, '
-    'reads, or validation commands. '
-    'Do not commit — the harness commits after its own review gate.')
+IMPL_SYSTEM_PROMPT = '''You implement the locked specification in the current repository. Work incrementally: inspect relevant code, make changes, run real tests, fix failures, and continue after every tool result. Do not stop until every specification requirement and every todo item is implemented and tested.
+
+## Priorities
+- The locked specification is authoritative. Implement every required behavior, error, output mode, and edge case; keep the change scoped and follow repository conventions.
+- Before coding, create a non-empty checklist with `$ todo add`. Keep it current using the updated list returned by todo commands. Mark items complete only after implementation and relevant validation. Complete every item before finishing.
+- Verify review and validation findings against the specification and current code. Preserve unrelated completed work. A finding you judge invalid is rejected with `$ todo reject <id> "<reason>"`, never skipped silently; the reviewers see the reason and re-raise a defended finding, which reopens the item — fix it then, or re-reject it with a new reason.
+- Before editing, inspect affected callers, data flow, existing tests, nearby patterns, and relevant history. Prefer a cohesive, minimal change over a sequence of speculative line edits. Re-read affected sections after editing; if a check fails, fix or revert that change and re-test before layering on more work.
+- Test real behavior with the real local toolchain when available; do not mock local build/test tools. Skip only when the required toolchain is unavailable.
+- This fake terminal is not a shell. Use only listed Marsha commands; no pipes, `&&`, redirection, shell substitution, or POSIX utilities. `git show` may be stale; `read-file` reads the current working tree.
+- Do not commit. The harness commits only after its review gate.
+
+## Review dimensions: design for these from the first edit; audit before finishing
+The implementation and tests are reviewed for:
+- Spec fidelity and completeness: every required behavior, default, boundary, and failure path; no stubs or test-specific shortcuts.
+- Correctness and regression safety: invariants, callers, untested branches, anti-overfitting, and preservation of behavior and tests outside scope.
+- Error and execution contracts: correct failures and fallbacks, clean-checkout setup and ordering, tool availability versus test failure, and propagation of cancellation or budget stops.
+- Adversarial safety: malformed, hostile, and oversized inputs; trust boundaries; paths, subprocesses, network, secrets, and resource bounds.
+- Architecture, integration, and scope: existing abstractions and conventions, public interfaces, platform/version compatibility, and no unrelated changes or duplicate systems.
+- Dependencies and performance: correct manifests and compatibility; algorithmic, architectural, hot-path, and resource costs without speculative micro-optimization.
+- Test quality and maintainability: real observable behavior, hermetic and independent regression/edge tests that fail on the bug, preserved assertions, and readable, minimal code.
+
+Before `$ finished`, compare each specification requirement and changed path against these dimensions; inspect the final diff; run the focused regressions and the repository's required full tests, type checks, lint, and build checks. Report only checks that actually ran. Review history is evidence, not authority: verify each prior finding against the current code and locked spec, preserve accepted fixes, and address a confirmed root cause rather than patching symptoms.
+
+## Turn protocol
+You may give one short progress sentence before issuing tools; do not send a plan-only turn. Tool commands must occupy the final lines of your response, with nothing after them. If finished, wait for all tool results, provide a short summary, then send `$ finished` alone.
+
+Valid:
+I fixed the argument parser and am rerunning its generated-project test.
+$ run python -m pytest tests/test_non_python_backends.py::test_generated_rust_project_cli_and_http -q
+
+Never add prose or ellipses after a tool command. If more work is needed, wait for the tool results and then issue another command batch.
+
+An incomplete `$ finished` is rejected with the pending checklist. Continue from that returned list. Two incomplete finish attempts are bounced; a third incomplete attempt stops with an explicit failure. Complete the entire todo list before trying again. After a successful checkpoint, continue in the same conversation if review feedback arrives.'''
 
 
 def _impl_request(spec_text: str, conventions: str, base_name: str, safe: bool,
@@ -962,9 +930,16 @@ def _address_findings_request(findings: list[Finding], base_name: str,
     head = (f'A CI review of the current working-tree checkpoint found the findings below. '
             'Verify each reviewer observation against the original locked specification and the '
             'current code before changing anything. Address each confirmed issue: '
-            f'{action} Keep changes scoped to the default branch `{base_name}` and do not commit. '
+            f'{action} A finding you judge invalid or inapplicable is never skipped silently: '
+            'reject it on the todo list with `$ todo reject <id> "<reason>"` — the reviewers see '
+            'your reason and re-raise the finding if they defend it, which reopens the item. '
+            f'Keep changes scoped to the default branch `{base_name}` and do not commit. '
             'This continues your existing implementation session: preserve earlier work and '
-            'decisions, and do not restart or undo unrelated completed changes.\n\n')
+            'decisions, and do not restart or undo unrelated completed changes. For each confirmed '
+            'finding, trace the violated contract to its root cause, make the smallest coherent fix, '
+            'and add a focused regression test when behavior or coverage is affected. Run that test '
+            'before taking on unrelated repairs; if it exposes a regression, resolve or revert that '
+            'repair before proceeding.\n\n')
     finding_data = tools.wrap_untrusted('ci-review-findings', _findings_block(findings))
     return head + '# CI review findings\n\n' + finding_data
 
@@ -1030,7 +1005,7 @@ class ImplementorFailed(Exception):
 async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                        model: str, debug: bool, constraints: str,
                        validation_report: str,
-                       prior_findings: list[Finding],
+                       review_history: list[tuple[list[Finding], dict[str, str]]] | None = None,
                        no_network: bool = False) -> list[Finding]:
     # One code-review pass over the current working-tree diff. Validation is executed by the outer
     # cycle and supplied as evidence; the validation meta-reviewer reconciles it with these findings.
@@ -1065,16 +1040,24 @@ async def _review_gate(cwd: str, base_name: str, base_ref: str, spec_text: str,
                 + resolve_loop_reviewers('review', None, registry))
     reviewers = [(n, b, i + 1) for i, (n, b, _) in enumerate(combined)]
     reviewer_numbers = {name: number for name, _body, number in reviewers}
+    # Each reviewer sees the past couple of cycles for ITS OWN findings, with the implementor's
+    # disposition of each (addressed, or rejected with the recorded reason) — not the full
+    # history and not the implementor's process.
     prior_block_by_number: dict[int, str] = {}
     prior_labels_by_number: dict[int, set[str]] = {}
     for name, number in reviewer_numbers.items():
-        own = [f for f in prior_findings if f.get('name') == name]
+        own: list[tuple[list[Finding], dict[str, str]]] = []
+        for cycle_findings, rejections in (review_history or []):
+            mine = [f for f in cycle_findings if f.get('name') == name]
+            if mine:
+                keys = {finding_id(f) for f in mine}
+                own.append(
+                    (mine, {key: reason for key, reason in rejections.items()
+                            if key in keys}))
         if own:
-            prior_block_by_number[number] = prior_round_block(
-                own, 'Re-check these prior findings against the current diff. Re-raise an issue '
-                     'with its exact label if it remains; omit it only when the current code '
-                     'resolves it.', 'prior review cycle')
-            prior_labels_by_number[number] = {f['label'] for f in own}
+            prior_block_by_number[number] = _reviewer_history_block(own)
+            prior_labels_by_number[number] = {
+                f['label'] for own_findings, _ in own for f in own_findings}
     tool_ctx = tools.ToolContext(
         phase='review', workdir=cwd, notes=[], require_evidence=True,
         base_ref=base_ref, working_tree=True, no_network=no_network)
@@ -1110,6 +1093,10 @@ async def _run_review_loop(
     conversations. Validation-only mode (zero cycles) still runs and repairs validation failures.
     """
     previous: list[Finding] = []
+    # The past review cycles, for each re-reviewing reviewer: (that cycle's panel findings, the
+    # implementor's rejections recorded while repairing it, keyed by finding ID). Trimmed to
+    # REVIEW_HISTORY_CYCLES so a reviewer sees the past couple of cycles — not the full history.
+    review_history: list[tuple[list[Finding], dict[str, str]]] = []
     resolved_findings: list[Finding] = []
     resolved_ids: set[str] = set()
     if implementor_history is None:
@@ -1123,22 +1110,33 @@ async def _run_review_loop(
             cwd, validation_cmd, debug, safe, validation_allowed,
             baseline_checks=baseline_checks)
 
+    async def ensure_todo_checkpoint() -> tuple[bool, list[Finding]]:
+        if not tools.todo_list_ready(impl_ctx):
+            # run_with_tools holds the same implementor conversation until `$ finished` is
+            # accepted with a complete checklist, or raises after the bounded finish bounces.
+            await _run_implementor(
+                impl_ctx, _todo_completion_request(impl_ctx, base_name, safe),
+                model, max_failures, debug, history=implementor_history)
+        if tools.todo_list_ready(impl_ctx):
+            return True, []
+        return False, _todo_findings(impl_ctx)
+
+    async def ensure_todo_checkpoint_guarded() -> tuple[bool, list[Finding]]:
+        try:
+            return await ensure_todo_checkpoint()
+        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+            raise
+        except Exception as error:
+            raise ImplementorFailed(f'todo checkpoint failed: {error}') from error
+
     async def prepare_review_checkpoint(
             cycle: int) -> tuple[bool, list[ValidationCheck], list[Finding]]:
-        todo_passes = 0
         validation_passes = 0
         checks: list[ValidationCheck] = []
         while True:
-            if not tools.todo_list_ready(impl_ctx):
-                if todo_passes >= MAX_TODO_COMPLETION_PASSES:
-                    return False, checks, _todo_findings(impl_ctx)
-                todo_passes += 1
-                await _run_implementor(
-                    impl_ctx,
-                    _todo_completion_request(
-                        impl_ctx, base_name, safe, todo_passes),
-                    model, max_failures, debug, history=implementor_history)
-                continue
+            ready, todo_findings = await ensure_todo_checkpoint()
+            if not ready:
+                return False, checks, todo_findings
 
             # A failed validator is itself a pending task, so repair it before asking reviewers
             # for another pass. This keeps the checklist and the review gate in sync.
@@ -1155,11 +1153,16 @@ async def _run_review_loop(
                         failures, checks, base_name, safe, cycle,
                         todo_items=tools.format_todo_list(impl_ctx)),
                     model, max_failures, debug, history=implementor_history)
+                if not tools.todo_list_ready(impl_ctx):
+                    return False, checks, _todo_findings(impl_ctx)
                 continue
             if tools.todo_list_ready(impl_ctx):
                 return True, checks, []
 
     if review_cycles == 0:
+        ready, todo_findings = await ensure_todo_checkpoint_guarded()
+        if not ready:
+            return False, todo_findings, []
         for attempt in range(MAX_VALIDATION_FIX_PASSES + 1):
             checks = await run_validation_cycle()
             failures = _validation_findings(checks)
@@ -1167,21 +1170,10 @@ async def _run_review_loop(
             if not failures:
                 if tools.todo_list_ready(impl_ctx):
                     return True, [], checks
-                if attempt == MAX_VALIDATION_FIX_PASSES:
-                    return False, _todo_findings(impl_ctx), checks
-                try:
-                    await _run_implementor(
-                        impl_ctx,
-                        _todo_completion_request(
-                            impl_ctx, base_name, safe, attempt + 1),
-                        model, max_failures, debug,
-                        history=implementor_history)
-                except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
-                    return False, _todo_findings(impl_ctx), checks
-                except Exception as error:
-                    raise ImplementorFailed(
-                        f'todo completion failed: {error}') from error
-                continue
+                ready, todo_findings = await ensure_todo_checkpoint_guarded()
+                if ready:
+                    continue
+                return False, todo_findings, checks
             if attempt == MAX_VALIDATION_FIX_PASSES:
                 return False, failures, checks
             try:
@@ -1191,7 +1183,9 @@ async def _run_review_loop(
                         failures, checks, base_name, safe, attempt + 1,
                         todo_items=tools.format_todo_list(impl_ctx)),
                     model, max_failures, debug, history=implementor_history)
-            except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+            except tools.ToolFailureLimitExceeded:
+                raise
+            except KeyboardInterrupt:
                 return False, failures, checks
             except Exception as error:
                 raise ImplementorFailed(
@@ -1201,7 +1195,9 @@ async def _run_review_loop(
         try:
             ready, checks, todo_or_validation_findings = \
                 await prepare_review_checkpoint(cycle)
-        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+        except tools.ToolFailureLimitExceeded:
+            raise
+        except KeyboardInterrupt:
             return False, _todo_findings(impl_ctx), []
         except PrimaryValidationUnavailable:
             raise
@@ -1214,7 +1210,7 @@ async def _run_review_loop(
             cwd, base_name, base_ref, spec_text, model, debug,
             constraints=constraints, validation_report=_validation_report(
                 checks),
-            prior_findings=previous, no_network=safe)
+            review_history=list(review_history), no_network=safe)
         current = dedup_findings(panel_findings + _validation_findings(checks))
         if not previous:
             meta = ValidationMetaResult(
@@ -1257,6 +1253,12 @@ async def _run_review_loop(
         if debug:
             debug_print(f'[diff] cycle {cycle}/{review_cycles}: '
                         f'{len(active)} open finding(s); implementing one repair batch')
+        # Snapshot the rejections already on record, so this cycle's entry records only the
+        # rejections made in THIS repair (a defended item re-rejected with a new reason counts;
+        # a stale rejection on a settled item must not leak into the new entry).
+        rejected_before = {item.key: item.rejection_reason
+                           for item in impl_ctx.todo_items
+                           if item.key is not None and item.rejected}
         try:
             await _run_implementor(
                 impl_ctx,
@@ -1264,11 +1266,24 @@ async def _run_review_loop(
                                    meta.summary,
                                    tools.format_todo_list(impl_ctx)),
                 model, max_failures, debug, history=implementor_history)
-        except (tools.ToolFailureLimitExceeded, KeyboardInterrupt):
+        except tools.ToolFailureLimitExceeded:
+            raise
+        except KeyboardInterrupt:
             return False, active, checks
         except Exception as error:
             raise ImplementorFailed(
                 f'review repair failed: {error}') from error
+        # Record this cycle for the reviewers' next pass: the panel's findings with the
+        # implementor's disposition of each — a rejected item keeps its reason; everything else
+        # was addressed. A rejected finding the next cycle does not re-raise is settled (the
+        # history block marks it as such); one that is re-raised stays contested, and its todo
+        # item reopens with the rejection visible to the implementor.
+        review_history.append((
+            list(panel_findings),
+            {item.key: item.rejection_reason for item in impl_ctx.todo_items
+             if item.key is not None and item.source == 'review' and item.rejected
+             and rejected_before.get(item.key) != item.rejection_reason}))
+        del review_history[:-REVIEW_HISTORY_CYCLES]
         previous = active
     return False, previous, []
 

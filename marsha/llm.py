@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import re
@@ -69,7 +70,8 @@ async def gpt_test_suite(meta: MarshaMeta, tool_use: bool = True,
     # The run was invoked in a repository: give the context its workdir so the sandboxed read
     # tools this phase advertises (list-tree, summarize, find-in-file) can
     # actually read files.
-    ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
+    ctx = tools.ToolContext(
+        backend=b, phase='gen', workdir=os.getcwd(), completion_mode='submit')
     if tool_use:
         system += tools.tool_instructions(ctx)
     gpt_gen_test = get_mapper(system, n_results=1,
@@ -112,6 +114,7 @@ async def _run_editor(loop: str, meta: MarshaMeta, user_message: str, model: str
     system = system.format(filename=meta.filename, void_note=void_note(meta),
                            target_version=b.target_version)
     if tool_ctx is not None:
+        tool_ctx = dataclasses.replace(tool_ctx, completion_mode='submit')
         system += tools.tool_instructions(tool_ctx)
     if loop == 'impl':
         first_header = b.source_name(meta.filename)
@@ -305,7 +308,8 @@ async def optimize_test_suite(
     if level <= 0:
         return oracle_md
     tool_ctx = None if args.no_tools else tools.ToolContext(
-        backend=backends.current(), phase='oracle-opt', workdir=os.getcwd())
+        backend=backends.current(), phase='oracle-opt', workdir=os.getcwd(),
+        completion_mode='submit')
     registry = build_registry()
     reviewers = resolve_loop_reviewers('oracle', args.test_personas, registry)
     model = resolve_model()
@@ -363,7 +367,8 @@ async def gpt_implementation(meta: MarshaMeta, oracle_md: str, n_results: int,
     # the spec wins.
     b = backends.current()
     system = b.impl_prompt(meta)
-    ctx = tools.ToolContext(backend=b, phase='gen', workdir=os.getcwd())
+    ctx = tools.ToolContext(
+        backend=b, phase='gen', workdir=os.getcwd(), completion_mode='submit')
     if tool_use:
         system += tools.tool_instructions(ctx)
     marsha_for_code_llm = format_marsha_for_llm(meta)
@@ -479,7 +484,8 @@ async def optimize_implementation(
     # candidate venv: the installed-env tools can introspect it. Absent a venv, build_commands
     # drops those tools and the phase degrades to the base set.
     tool_ctx = None if args.no_tools else tools.ToolContext(
-        backend=b, phase='impl-opt', workdir=subdir)
+        backend=b, phase='impl-opt', workdir=subdir,
+        completion_mode='submit')
     registry = build_registry()
     reviewers = resolve_loop_reviewers('impl', args.impl_personas, registry)
     model = resolve_strong_model()
@@ -762,7 +768,8 @@ async def validate_test_correction(meta: MarshaMeta, code: str, orig_test: str, 
     if not args.no_tools and subdir is not None:
         b = backends.current()
         tool_ctx = tools.ToolContext(
-            backend=b, phase='correction', workdir=subdir)
+            backend=b, phase='correction', workdir=subdir,
+            completion_mode='submit')
     registry = build_registry()
     reviewers = resolve_loop_reviewers(
         'correction', args.fix_personas, registry)

@@ -550,8 +550,8 @@ _CONVENTIONS_REBUTTAL_CONTRACT = '''
 
 You are checking a set of code-review FINDINGS (not the code directly) against the conventions this repository actually follows. Your only job is to rebut findings that would push the code away from a convention the codebase genuinely follows, or that misread the codebase. Cite each rebutted finding by its exact [Name-Label], with the evidence.
 Do NOT re-raise findings, add new ones, or restate agreement with a finding.
-If every finding is consistent with the codebase's conventions, respond with exactly: NO OBJECTIONS
-Otherwise respond with one rebuttal per line, in exactly this form:
+If every finding is consistent with the codebase's conventions, your result is exactly: NO OBJECTIONS
+Otherwise your result is one rebuttal per line, in exactly this form:
 [Name-Label] - <one-line reason it violates a real convention, with evidence>
 Do not restate a reviewer's name. Do not add any prose outside the rebuttals.
 '''
@@ -566,7 +566,8 @@ async def conventions_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
         return ''
     # The gate rebuts findings (it answers "NO OBJECTIONS" or rebuttals, not findings), so it is
     # exempt from mandatory probing; it may still probe to check a convention.
-    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
+    gate_ctx = dataclasses.replace(
+        tool_ctx, notes=[], require_evidence=False, completion_mode='submit')
     _name, body = load_editor('review')
     system = body + _CONVENTIONS_REBUTTAL_CONTRACT
     system += tools.tool_instructions(gate_ctx)
@@ -604,10 +605,10 @@ _CRITIC_REBUTTAL_CONTRACT = '''
 Your output is consumed mechanically, so its form is fixed; here you only report the work you have
 already done.
 
-If every finding survives your attempt to falsify it, reply with the single line, exactly:
+If every finding survives your attempt to falsify it, your result is the single line, exactly:
 NO OBJECTIONS
 
-Otherwise reply with one line per finding you refuted, and nothing else, each in exactly this form:
+Otherwise your result is one line per finding you refuted, and nothing else, each in exactly this form:
 [Name-Label] - <one sentence stating the contradiction, citing the file:line of the counter-evidence>
 
 Use each finding's exact [Name-Label]. Do not restate a reviewer's name, do not re-raise or add
@@ -622,8 +623,8 @@ _ARCHIVIST_CONTRACT = '''
 Your output is consumed mechanically, so its form is fixed; here you only report the work you have
 already done.
 
-Reply with exactly one line per open thread you were given, and nothing else, each in exactly this
-form:
+Your result is exactly one line per open thread you were given, and nothing else, each in exactly
+this form:
 [Label] - CLEARED
 [Label] - STILL-RAISED
 [Label] - UNCLEAR
@@ -665,7 +666,8 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
         return ''
     # The critic refutes findings (it answers NO OBJECTIONS or refutations, not findings), so it
     # is exempt from mandatory probing; it still probes with git to find counter-evidence.
-    gate_ctx = dataclasses.replace(tool_ctx, notes=[], require_evidence=False)
+    gate_ctx = dataclasses.replace(
+        tool_ctx, notes=[], require_evidence=False, completion_mode='submit')
     _name, body = load_persona(os.path.join(
         personas_dir(), '_review-critic.md'))
     system = body + _CRITIC_REBUTTAL_CONTRACT
@@ -709,21 +711,29 @@ async def critic_gate(findings: list[Finding], tool_ctx: tools.ToolContext,
                    if working_tree else '`git show HEAD:<path>`')
     user = (
         f'Falsify the findings below against the actual code (default branch `{base_name}`, '
-        f'diff base ref `{base_ref}`). Test each finding\'s central claim with the git tool: grep '
-        f'symbols as whole words, with no language-specific definition keyword assumed, and read '
-        f'the cited lines with {source_read}. A finding whose claim rests on general '
-        f'knowledge (a performance characteristic, a security property, a known-bad pattern, or a '
-        f'style best practice) must name, in its support, a source the reviewer actually retrieved '
-        f'(listed under "Sources the reviewers retrieved"); if such a claim names no retrieved '
-        f'source, it is an ungrounded assertion — refute it. EXCEPTION: standard toolchain and '
-        f'language-runtime behavior (Cargo defaults, npm install behavior, TypeScript compiler '
-        f'options, Python typing semantics, regex engine behavior, OS conventions) is established '
-        f'knowledge and does NOT require a retrieved source. Do not refute a finding on the '
-        f'ground of "no source cited" when its claim is about such standard behavior, unless '
-        f'you can show the behavior is actually wrong. Use the code the reviewer already read '
-        f'below as your starting point and probe only what you still need. Report, in the '
-        f'fixed form, only the findings the code plainly contradicts or that rest on an '
-        f'ungrounded general-knowledge claim that is not standard toolchain behavior.\n\n'
+        f'diff base ref `{base_ref}`), working through all three of your passes for EACH '
+        f'finding:\n'
+        f'1. Factual premises about this codebase — read the cited lines with {source_read} and '
+        f'grep symbols as whole words, with no language-specific definition keyword assumed; if '
+        f'the code the finding cites contradicts its premise, refute it, citing the file:line of '
+        f'the counter-evidence.\n'
+        f'2. Claims about language, runtime, or standard-toolchain behavior — check each against '
+        f'your own knowledge of that behavior. If the reviewer misstates established behavior '
+        f'(calls a valid construct invalid, or claims a default the tool does not have), the '
+        f'finding\'s central claim is false: refute it, citing the finding\'s own file:line and '
+        f'stating the behavior that is actually true. A confident misstatement of language or '
+        f'toolchain behavior is a refutable error — "no source cited" is not a reason to let one '
+        f'pass.\n'
+        f'3. Claims that rest on external facts you cannot settle from the code or established '
+        f'behavior (benchmark numbers, CVE status, version-specific quirks, third-party '
+        f'guarantees) — those must name, in their support, a source the reviewer actually '
+        f'retrieved (listed under "Sources the reviewers retrieved"); if no such source exists, '
+        f'refute the finding as an ungrounded assertion.\n\n'
+        f'Do not refute a finding you cannot ground in a file:line you read or in the actual '
+        f'behavior of a language or tool, and do not dispute a judgment call its code and sources '
+        f'genuinely support. Use the code the reviewer already read below as your starting point '
+        f'and probe only what you still need. Report, in the fixed form, exactly the findings you '
+        f'refute in these three passes.\n\n'
         f'# Findings under review\n\n'
         + findings_block + evidence_block + sources_block)
     mapper = get_mapper(system, n_results=1, stats_stage='review',
@@ -775,7 +785,8 @@ async def _archivist_clearance(candidates: list[dict[str, Any]],
     if not candidates:
         return {}
     arch_ctx = tools.ToolContext(
-        phase='review', workdir=cwd, notes=[], require_evidence=False)
+        phase='review', workdir=cwd, notes=[], require_evidence=False,
+        completion_mode='submit')
     _name, body = load_persona(os.path.join(
         personas_dir(), '_review-archivist.md'))
     system = body + _ARCHIVIST_CONTRACT

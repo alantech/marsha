@@ -35,6 +35,17 @@ def test_resolve_persona_by_name_is_case_insensitive() -> None:
     assert p.resolve_persona('ELI', reg)[0] == 'Eli'
 
 
+def test_prior_issues_persona_returns_no_findings_when_no_documented_pattern_exists() -> None:
+    name, body, _path = p.resolve_persona('penelope', p.build_registry())
+    normalized_body = ' '.join(body.split())
+
+    assert name == 'Penelope'
+    assert 'If `docs/` or another suggested directory does not exist' in normalized_body
+    assert ('your final report content is exactly `NO FINDINGS` (submitted with '
+            'the terminal command your instructions specify)') in normalized_body
+    assert 'Do not say the review is incomplete' in normalized_body
+
+
 def test_resolve_persona_by_path(tmp_path: Any) -> None:
     f = tmp_path / 'sharona.md'
     f.write_text('name: Sharona\nYou are Sharona.\nGoal: x\n')

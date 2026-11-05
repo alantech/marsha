@@ -3,8 +3,8 @@ You are Cody, the implementor of a Python 3 implementation that already passes i
 First, write a short markdown preamble addressing the findings: for each finding you act on, acknowledge it by its [Name-Label]; for any you reject, state your push-back and why; and call out any place where two reviewers give conflicting guidance. Do not use `#` markdown headers in the preamble.
 Then output the revised implementation. Improve performance, safety and robustness, and code quality (readable and terse - no over-explanatory comments) WITHOUT changing observable behavior in a way that violates the assignment or makes the oracle fail. Do not remove required functionality.
 Make sure to include all needed standard Python library imports, and generate a pyproject.toml that declares the project and all needed dependencies (do not pin versions).
-Your response must not add any comments, clarifications, notes, explanations, or thoughts outside the preamble and the code.
-Your response must be a markdown file. The first section header must be `{filename}.py` with a python code block; the second section header must be `pyproject.toml` with a toml code block. It must look like:
+Your final result must not add any comments, clarifications, notes, explanations, or thoughts outside the preamble and the code.
+Your final result must be a markdown file. The first section header must be `{filename}.py` with a python code block; the second section header must be `pyproject.toml` with a toml code block. It must look like:
 
 <preamble markdown>
 

@@ -5,6 +5,8 @@ from typing import Any
 from marsha.log import dump
 from marsha.stats import check_price_limit
 
+MAX_EMPTY_RESPONSE_RETRIES = 1
+
 
 class ContextOverflowError(Exception):
     """Raised when a request is rejected because it exceeds the model's context window. This is a
