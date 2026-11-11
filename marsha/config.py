@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
-from typing import TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 
 APP_NAME = 'marsha'
 CONFIG_FILENAME = 'config.json'
@@ -25,6 +25,53 @@ class ConfigFile(TypedDict, total=False):
     claude_api_key: str
     model: str
     model_strong: str
+
+
+# Documentation for one supported config file key: what it is for, what applies when it is
+# unset, and whether the value is a secret (masked in `marsha config` output).
+class ConfigKey(NamedTuple):
+    name: str
+    description: str
+    default: str
+    secret: bool = False
+
+
+# The supported config file keys, in display order. This is the single source of truth for
+# `marsha config list` and for the key validation in `set`/`unset`; keep it in sync with the
+# resolvers below and the README's config-file section.
+CONFIG_KEYS: tuple[ConfigKey, ...] = (
+    ConfigKey(
+        'provider',
+        'LLM provider to use: openai (any OpenAI-compatible API) or anthropic (Claude). '
+        'Overridden by --provider.',
+        DEFAULT_PROVIDER),
+    ConfigKey(
+        'api_base',
+        'Base URL of an OpenAI-compatible API, e.g. a local llama.cpp server. Overridden by '
+        'the OPENAI_BASE_URL environment variable and --api-base (openai provider only).',
+        DEFAULT_API_BASE),
+    ConfigKey(
+        'api_key',
+        'API key for the openai provider. Overridden by the OPENAI_SECRET_KEY / OPENAI_API_KEY '
+        'environment variables.',
+        '(none)',
+        secret=True),
+    ConfigKey(
+        'claude_api_key',
+        'API key for the anthropic provider. Overridden by the CLAUDE_API_KEY / '
+        'ANTHROPIC_API_KEY environment variables.',
+        '(none)',
+        secret=True),
+    ConfigKey(
+        'model',
+        'Model to use for code generation. Overridden by --model.',
+        f'{DEFAULT_MODEL} ({ANTHROPIC_DEFAULT_MODEL} with provider=anthropic)'),
+    ConfigKey(
+        'model_strong',
+        'Strong model: used for the test-fixing stage and as the escalation target when a '
+        'prompt exceeds the standard model\'s context.',
+        f'{DEFAULT_STRONG_MODEL} ({ANTHROPIC_DEFAULT_STRONG_MODEL} with provider=anthropic)'),
+)
 
 
 _cli_model: str | None = None
@@ -66,6 +113,18 @@ def load_config_file() -> ConfigFile:
                 f'Invalid config file at {path}: expected a JSON object')
         config = cast(ConfigFile, loaded)
     return config
+
+
+def save_config_file(config: dict[str, str]) -> None:
+    # Write the config file, creating the config directory on first use. The file can hold
+    # API keys, so permissions are tightened to owner-only (0600; a no-op where the OS does
+    # not support them).
+    path = get_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4)
+        f.write('\n')
+    os.chmod(path, 0o600)
 
 
 def set_cli_model(model: str | None) -> None:

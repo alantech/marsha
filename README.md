@@ -140,6 +140,12 @@ The config file is a JSON file read from the standard configuration location for
 
 It supports the keys `provider`, `api_base`, `api_key`, `claude_api_key`, `model`, and `model_strong`. The default model for code generation is `gpt-6-luna` (`claude-sonnet-5` with the anthropic provider); `model_strong` (default `gpt-5.6-terra`, `claude-opus-5` with the anthropic provider) is used for the test-fixing stage and as the escalation target when a prompt exceeds the model's context.
 
+The `marsha config` subcommand manages this file for you (see `marsha help config`):
+
+* `marsha config list` shows the values currently set alongside every supported key with its default and a description (API keys are masked; pass `--show-secrets` to reveal them), and warns about unrecognized keys in the file.
+* `marsha config set <key> <value>` adds or updates a key (`add` works as an alias), validating the key name and the `provider` value.
+* `marsha config unset <key>` removes a key (`remove` works as an alias).
+
 Eg, to point Marsha at a llama.cpp server listening on localhost port 8080:
 
 ```json

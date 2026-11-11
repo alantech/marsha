@@ -13,6 +13,7 @@ from typing import Any, NoReturn, cast
 from marsha import backends
 from marsha.config import (resolve_model, resolve_provider, resolve_api_base, is_local_backend,
                            set_cli_api_base, set_cli_model, set_cli_provider)
+from marsha.config_cli import run_config
 from marsha.context import discover_models
 from marsha.model_match import apply_available_models
 from marsha import log
@@ -182,13 +183,36 @@ refine_parser.add_argument('--provider', choices=['openai', 'anthropic'],
                            help='LLM provider: openai (default) or anthropic (Claude).')
 refine_parser.add_argument('--api-base',
                            help='OpenAI-compatible API base URL for the LLM.')
+config_parser = sub.add_parser(
+    'config',
+    help='Inspect and edit the user config file.')
+config_sub = config_parser.add_subparsers(dest='config_action')
+config_list_parser = config_sub.add_parser(
+    'list',
+    help='List the values currently set and every supported key with its default and '
+         'a description.')
+config_list_parser.add_argument(
+    '--show-secrets', action='store_true',
+    help='Print API keys in plaintext instead of masking them.')
+config_set_parser = config_sub.add_parser(
+    'set', aliases=['add'],
+    help='Set (add or update) a key in the config file.')
+config_set_parser.add_argument(
+    'key', help='The config key to set; see `marsha config list` for the supported keys.')
+config_set_parser.add_argument('value', help='The value to set it to.')
+config_unset_parser = config_sub.add_parser(
+    'unset', aliases=['remove'],
+    help='Remove a key from the config file.')
+config_unset_parser.add_argument(
+    'key', help='The config key to remove; see `marsha config list` for the supported keys.')
 
 
 def _normalize_argv(argv: list[str]) -> tuple[list[str], bool]:
     # The deprecated bare form `marsha <source> [flags]` maps onto
     # `marsha compile <source> [flags]`. `compile`/`help` are real
     # subcommands; a top-level -h/--help shows the subcommand overview.
-    if not argv or argv[0] in ('compile', 'help', 'review', 'refine', '-h', '--help'):
+    if not argv or argv[0] in ('compile', 'help', 'review', 'refine', 'config',
+                               '-h', '--help'):
         return argv, False
     return ['compile'] + argv, True
 
@@ -214,6 +238,11 @@ def print_help(topic: str | None) -> None:
         '            Example: marsha refine spec.mrsh or marsha refine --issue 218\n'
         '            Key flags: --issue, --linear, --check, --dry-run.\n'
         '\n'
+        '  config    Inspect and edit the user config file: list the values currently\n'
+        '            set and every supported key (with defaults), and set or unset keys.\n'
+        '            Example: marsha config list, marsha config set model gpt-5\n'
+        '            Actions: list, set (add), unset (remove).\n'
+        '\n'
         '  help      Show this overview, or detailed help for a subcommand.\n'
         '            Example: marsha help compile\n'
         '\n'
@@ -223,9 +252,10 @@ def print_help(topic: str | None) -> None:
     )
     if topic is None:
         print(overview)
-    elif topic in ('compile', 'help', 'review', 'refine'):
+    elif topic in ('compile', 'help', 'review', 'refine', 'config'):
         submap = {'compile': compile_parser, 'help': help_parser,
-                  'review': review_parser, 'refine': refine_parser}
+                  'review': review_parser, 'refine': refine_parser,
+                  'config': config_parser}
         print(submap[topic].format_help())
     else:
         print(f'Unknown command: {topic}', file=sys.stderr)
@@ -269,6 +299,13 @@ def run(argv: list[str] | None = None) -> int:
         log.set_progress(args.check)
         _setup_runtime(args, require_toolchain=False)
         return asyncio.run(run_refine(args))
+    if args.command == 'config':
+        # No _setup_runtime: managing the config file is local file I/O and must work without
+        # an LLM endpoint, API key, or target toolchain.
+        if args.config_action is None:
+            config_parser.print_help(sys.stderr)
+            return 2
+        return run_config(args)
     if args.command != 'compile':
         parser.print_help(sys.stderr)
         return 2

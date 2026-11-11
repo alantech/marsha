@@ -28,6 +28,8 @@ def test_normalize_argv_leaves_subcommands_and_help_alone() -> None:
     assert base._normalize_argv(['help']) == (['help'], False)
     assert base._normalize_argv(['help', 'compile']) == ([
         'help', 'compile'], False)
+    assert base._normalize_argv(['config', 'list']) == ([
+        'config', 'list'], False)
     assert base._normalize_argv(['-h']) == (['-h'], False)
     assert base._normalize_argv(['--help']) == (['--help'], False)
     assert base._normalize_argv([]) == ([], False)
@@ -38,7 +40,17 @@ def test_print_help_overview_lists_subcommands(capsys: Any) -> None:
     out = capsys.readouterr().out
     assert 'compile' in out
     assert 'help' in out
+    assert 'config' in out
     assert 'deprecated' in out
+
+
+def test_print_help_config_shows_config_usage(capsys: Any) -> None:
+    base.print_help('config')
+    out = capsys.readouterr().out
+    assert 'usage: marsha config' in out
+    assert 'list' in out
+    assert 'set' in out
+    assert 'unset' in out
 
 
 def test_print_help_compile_shows_compile_usage(capsys: Any) -> None:
